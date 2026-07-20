@@ -1,0 +1,26 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Test & coverage caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Checkpoints and run outputs
+checkpoints/
+runs/
+*.pkl
+*.ckpt
+
+# Editor / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
