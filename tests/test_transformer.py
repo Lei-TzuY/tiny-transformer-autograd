@@ -147,6 +147,14 @@ class TestSelfAttention:
             assert p.grad is not None, f"No gradient for param of shape {p.shape}"
             assert not np.any(np.isnan(p.grad)), "NaN gradient"
 
+    def test_default_forward_matches_causal_inference(self):
+        attn = SelfAttention(d_model=8)
+        x = RNG.standard_normal((2, 4, 8))
+        from engine.tensor import Tensor
+        forward = attn(Tensor(x)).data
+        inferred, _ = attn.infer(x)
+        np.testing.assert_allclose(forward, inferred, atol=1e-12, rtol=1e-12)
+
 
 class TestMultiHeadAttention:
     def test_shape(self):
@@ -183,6 +191,92 @@ class TestMultiHeadAttention:
             assert p.grad is not None
             assert not np.any(np.isnan(p.grad))
 
+    def test_default_forward_matches_causal_inference(self):
+        attn = MultiHeadAttention(d_model=8, num_heads=2)
+        x = RNG.standard_normal((2, 4, 8))
+        from engine.tensor import Tensor
+        forward = attn(Tensor(x)).data
+        inferred, _ = attn.infer(x)
+        np.testing.assert_allclose(forward, inferred, atol=1e-12, rtol=1e-12)
+
+
+class TestCustomAttentionMask:
+    """Defined behaviour for caller-supplied masks, including all-masked rows."""
+
+    @staticmethod
+    def _fully_masked_first_row(T):
+        """Causal mask whose query row 0 additionally hides its own key."""
+        mask = np.triu(np.full((T, T), -np.inf), k=1)
+        mask[0, 0] = -np.inf
+        return mask
+
+    def test_fully_masked_row_returns_out_proj_bias(self):
+        from engine.tensor import Tensor
+        T = 4
+        attn = MultiHeadAttention(d_model=8, num_heads=2)
+        # A distinctive bias makes "output is exactly the bias" observable.
+        attn.out_proj.bias.data[:] = np.arange(1.0, 9.0)
+        x = Tensor(RNG.standard_normal((2, T, 8)))
+
+        out = attn(x, Tensor(self._fully_masked_first_row(T))).data
+
+        assert np.isfinite(out).all()
+        # Zero attention weights ⇒ zero context vector ⇒ bias only.
+        for batch in range(2):
+            np.testing.assert_allclose(
+                out[batch, 0], attn.out_proj.bias.data, atol=1e-12
+            )
+        assert not np.allclose(out[0, 1], attn.out_proj.bias.data)
+
+    def test_fully_masked_row_blocks_gradient_to_inputs(self):
+        from engine.tensor import Tensor
+        T = 3
+        attn = SelfAttention(d_model=8)
+        x = Tensor(RNG.standard_normal((1, T, 8)), requires_grad=True)
+
+        out = attn(x, Tensor(self._fully_masked_first_row(T)))
+        # Differentiate the fully masked position only.
+        cotangent = np.zeros_like(out.data)
+        cotangent[0, 0, :] = 1.0
+        out.backward(cotangent)
+
+        assert np.isfinite(x.grad).all()
+        np.testing.assert_allclose(x.grad, np.zeros_like(x.grad), atol=1e-12)
+        # The bias still receives the upstream gradient it passed through.
+        np.testing.assert_allclose(attn.out_proj.bias.grad, np.ones(8), atol=1e-12)
+
+    def test_masked_softmax_paths_agree(self):
+        from nn.attention import _softmax
+        from engine.tensor import Tensor
+        scores = np.array([[-np.inf, -np.inf, -np.inf], [0.5, -np.inf, 2.0]])
+
+        np.testing.assert_allclose(
+            _softmax(scores), ops.softmax(Tensor(scores)).data, atol=1e-15
+        )
+
+    def test_numpy_mask_is_accepted_and_matches_tensor_mask(self):
+        from engine.tensor import Tensor
+        T = 4
+        attn = MultiHeadAttention(d_model=8, num_heads=2)
+        x = Tensor(RNG.standard_normal((1, T, 8)))
+        mask = np.triu(np.full((T, T), -np.inf), k=1)
+
+        np.testing.assert_array_equal(
+            attn(x, mask).data, attn(x, Tensor(mask)).data
+        )
+
+    def test_per_head_mask_shape_is_supported(self):
+        from engine.tensor import Tensor
+        T, H = 4, 2
+        attn = MultiHeadAttention(d_model=8, num_heads=H)
+        x = Tensor(RNG.standard_normal((1, T, 8)))
+        mask = np.zeros((1, H, T, T))
+        mask[0, 1] = np.triu(np.full((T, T), -np.inf), k=1)
+
+        out = attn(x, mask).data
+        assert out.shape == (1, T, 8)
+        assert np.isfinite(out).all()
+
 
 # ---------------------------------------------------------------------------
 # Transformer blocks
@@ -209,6 +303,295 @@ class TestTransformerBlock:
         for p in block.parameters():
             assert p.grad is not None
             assert not np.any(np.isnan(p.grad))
+
+
+class TestKeyPaddingMask:
+    """attention_mask must make padding invisible to the real tokens."""
+
+    PAD = 0
+    IGNORE = -1
+
+    def _model(self, **kw):
+        defaults = dict(
+            vocab_size=10, context_len=8,
+            d_model=8, num_heads=2, d_ff=16, num_layers=2,
+        )
+        defaults.update(kw)
+        np.random.seed(3)
+        return GPT(**defaults)
+
+    def _padded_batch(self, real, pad_to):
+        padding = pad_to - real.shape[1]
+        idx = np.concatenate(
+            [real, np.full((real.shape[0], padding), self.PAD, dtype=np.int64)],
+            axis=1,
+        )
+        mask = np.concatenate(
+            [np.ones_like(real), np.zeros((real.shape[0], padding), dtype=np.int64)],
+            axis=1,
+        )
+        return idx, mask
+
+    def test_real_token_logits_match_the_unpadded_sequence(self):
+        model = self._model()
+        real = np.array([[1, 4, 7, 2]], dtype=np.int64)
+        idx, mask = self._padded_batch(real, pad_to=7)
+
+        padded_logits = model(idx, attention_mask=mask).data
+        unpadded_logits = model(real).data
+
+        np.testing.assert_allclose(
+            padded_logits[:, : real.shape[1]], unpadded_logits, atol=1e-12
+        )
+
+    def test_padding_content_cannot_change_real_token_logits(self):
+        model = self._model()
+        real = np.array([[3, 5, 1]], dtype=np.int64)
+        idx, mask = self._padded_batch(real, pad_to=6)
+
+        first = model(idx, attention_mask=mask).data[:, :3]
+        idx[:, 3:] = 9  # different junk in the padded slots
+        second = model(idx, attention_mask=mask).data[:, :3]
+
+        np.testing.assert_array_equal(first, second)
+
+    def test_without_the_mask_padding_leaks_into_real_tokens(self):
+        """Guards the test above: the mask is what makes padding invisible."""
+        model = self._model()
+        real = np.array([[3, 5, 1]], dtype=np.int64)
+        idx, _ = self._padded_batch(real, pad_to=6)
+
+        # Position 2 is causal, so only later positions could differ; compare a
+        # padded position's neighbour instead by changing the padding content.
+        leaky_first = model(idx).data[:, 3]
+        idx[:, 3:] = 9
+        leaky_second = model(idx).data[:, 3]
+
+        assert not np.allclose(leaky_first, leaky_second)
+
+    def test_gradients_match_the_unpadded_sequence(self):
+        real = np.array([[1, 4, 7, 2]], dtype=np.int64)
+        targets = np.array([[4, 7, 2, 1]], dtype=np.int64)
+        idx, mask = self._padded_batch(real, pad_to=7)
+        padded_targets = np.concatenate(
+            [targets, np.full((1, 3), self.IGNORE, dtype=np.int64)], axis=1
+        )
+
+        padded_model = self._model()
+        padded_loss = ops.cross_entropy(
+            padded_model(idx, attention_mask=mask),
+            padded_targets,
+            ignore_index=self.IGNORE,
+        )
+        padded_loss.backward()
+
+        plain_model = self._model()
+        plain_loss = ops.cross_entropy(plain_model(real), targets)
+        plain_loss.backward()
+
+        np.testing.assert_allclose(padded_loss.data, plain_loss.data, atol=1e-12)
+        for (name, padded), (_, plain) in zip(
+            padded_model.named_parameters(), plain_model.named_parameters()
+        ):
+            np.testing.assert_allclose(
+                padded.grad, plain.grad, atol=1e-12, err_msg=f"gradient for {name}"
+            )
+
+    def test_all_padding_row_stays_finite(self):
+        model = self._model()
+        idx = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.int64)
+        mask = np.array([[1, 1, 1], [0, 0, 0]], dtype=np.int64)
+
+        logits = model(idx, attention_mask=mask).data
+
+        assert np.isfinite(logits).all()
+
+    def test_boolean_mask_matches_integer_mask(self):
+        model = self._model()
+        idx = np.array([[1, 2, 3, 0]], dtype=np.int64)
+        mask = np.array([[1, 1, 1, 0]], dtype=np.int64)
+
+        np.testing.assert_array_equal(
+            model(idx, attention_mask=mask).data,
+            model(idx, attention_mask=mask.astype(bool)).data,
+        )
+
+    def test_mask_is_applied_in_every_layer(self):
+        """A single-layer model cannot detect a mask bug in later layers."""
+        model = self._model(num_layers=3)
+        real = np.array([[2, 6, 1, 3]], dtype=np.int64)
+        idx, mask = self._padded_batch(real, pad_to=8)
+
+        np.testing.assert_allclose(
+            model(idx, attention_mask=mask).data[:, :4],
+            model(real).data,
+            atol=1e-12,
+        )
+
+
+ARCHITECTURES = [
+    pytest.param(
+        dict(norm="layernorm", pos_encoding="learned", ffn="gelu"), id="gpt"
+    ),
+    pytest.param(
+        dict(norm="rmsnorm", pos_encoding="rope", ffn="swiglu"), id="llama"
+    ),
+]
+
+
+class TestPaddedGeneration:
+    """Left-padded batched generation must equal generating each row alone."""
+
+    PAD = 0
+    PROMPTS = [[1, 4, 7, 2, 5], [3, 6], [9, 8, 1]]
+
+    def _model(self, arch, **kw):
+        config = dict(
+            vocab_size=12, context_len=16,
+            d_model=16, num_heads=2, d_ff=32, num_layers=2,
+        )
+        config.update(arch)
+        config.update(kw)
+        np.random.seed(11)
+        return GPT(**config)
+
+    def _left_padded(self, prompts=None):
+        prompts = prompts or self.PROMPTS
+        width = max(len(prompt) for prompt in prompts)
+        tokens = np.full((len(prompts), width), self.PAD, dtype=np.int64)
+        mask = np.zeros((len(prompts), width), dtype=np.int64)
+        for row, prompt in enumerate(prompts):
+            tokens[row, width - len(prompt):] = prompt
+            mask[row, width - len(prompt):] = 1
+        return tokens, mask
+
+    def _position_ids(self, mask):
+        return np.maximum(np.cumsum(mask, axis=1) - 1, 0)
+
+    @pytest.mark.parametrize("arch", ARCHITECTURES)
+    def test_prefill_logits_match_the_unpadded_prompt(self, arch):
+        model = self._model(arch)
+        tokens, mask = self._left_padded()
+
+        padded, _ = model.infer(
+            tokens, attention_mask=mask, position_ids=self._position_ids(mask)
+        )
+
+        assert np.isfinite(padded).all()
+        for row, prompt in enumerate(self.PROMPTS):
+            alone, _ = model.infer(np.array([prompt], dtype=np.int64))
+            np.testing.assert_allclose(
+                padded[row, -1], alone[0, -1], atol=1e-12,
+                err_msg=f"row {row} last-position logits differ",
+            )
+
+    @pytest.mark.parametrize("arch", ARCHITECTURES)
+    def test_batched_generation_matches_one_prompt_at_a_time(self, arch):
+        model = self._model(arch)
+        tokens, mask = self._left_padded()
+        new_tokens = 4
+
+        batched = model.generate(
+            tokens, new_tokens, strategy="greedy", attention_mask=mask
+        )
+
+        assert batched.shape == (len(self.PROMPTS), tokens.shape[1] + new_tokens)
+        for row, prompt in enumerate(self.PROMPTS):
+            alone = model.generate(
+                np.array([prompt], dtype=np.int64), new_tokens, strategy="greedy"
+            )
+            np.testing.assert_array_equal(
+                batched[row, -new_tokens:], alone[0, -new_tokens:]
+            )
+        # The prompt columns, padding included, come back unchanged.
+        np.testing.assert_array_equal(batched[:, : tokens.shape[1]], tokens)
+
+    @pytest.mark.parametrize("arch", ARCHITECTURES)
+    def test_cached_and_uncached_padded_generation_agree(self, arch):
+        model = self._model(arch)
+        tokens, mask = self._left_padded()
+
+        cached = model.generate(
+            tokens, 3, strategy="greedy", use_cache=True, attention_mask=mask
+        )
+        uncached = model.generate(
+            tokens, 3, strategy="greedy", use_cache=False, attention_mask=mask
+        )
+
+        np.testing.assert_array_equal(cached, uncached)
+
+    def test_padding_content_cannot_change_generated_tokens(self):
+        model = self._model(ARCHITECTURES[0].values[0])
+        tokens, mask = self._left_padded()
+        first = model.generate(tokens, 3, strategy="greedy", attention_mask=mask)
+
+        scrambled = tokens.copy()
+        scrambled[mask == 0] = 11
+        second = model.generate(scrambled, 3, strategy="greedy", attention_mask=mask)
+
+        np.testing.assert_array_equal(first[:, -3:], second[:, -3:])
+
+    def test_single_row_prompt_with_no_padding_is_unaffected(self):
+        model = self._model(ARCHITECTURES[0].values[0])
+        prompt = np.array([[1, 2, 3]], dtype=np.int64)
+
+        with_mask = model.generate(
+            prompt, 3, strategy="greedy", attention_mask=np.ones((1, 3), dtype=np.int64)
+        )
+        without_mask = model.generate(prompt, 3, strategy="greedy")
+
+        np.testing.assert_array_equal(with_mask, without_mask)
+
+    def test_rejects_right_padded_mask(self):
+        model = self._model(ARCHITECTURES[0].values[0])
+        tokens = np.array([[1, 2, 0, 0]], dtype=np.int64)
+        with pytest.raises(ValueError, match="left-padded"):
+            model.generate(
+                tokens, 2, strategy="greedy",
+                attention_mask=np.array([[1, 1, 0, 0]]),
+            )
+
+    def test_rejects_prompt_without_any_real_token(self):
+        model = self._model(ARCHITECTURES[0].values[0])
+        tokens = np.array([[1, 2], [0, 0]], dtype=np.int64)
+        with pytest.raises(ValueError, match="at least one real token"):
+            model.generate(
+                tokens, 2, strategy="greedy",
+                attention_mask=np.array([[1, 1], [0, 0]]),
+            )
+
+    def test_rejects_run_that_would_leave_the_context_window(self):
+        model = self._model(ARCHITECTURES[0].values[0], context_len=6)
+        tokens, mask = self._left_padded([[1, 2, 3, 4], [5, 6]])
+        with pytest.raises(ValueError, match="fit in context_len"):
+            model.generate(tokens, 4, strategy="greedy", attention_mask=mask)
+
+    def test_beam_search_rejects_an_attention_mask(self):
+        model = self._model(ARCHITECTURES[0].values[0])
+        tokens = np.array([[1, 2]], dtype=np.int64)
+        with pytest.raises(ValueError, match="beam search"):
+            model.generate(
+                tokens, 2, strategy="beam",
+                attention_mask=np.ones((1, 2), dtype=np.int64),
+            )
+
+    def test_sampling_respects_the_mask_for_every_row(self):
+        """Sampling shares the masked forward pass, so rows stay independent."""
+        model = self._model(ARCHITECTURES[0].values[0])
+        tokens, mask = self._left_padded()
+
+        np.random.seed(0)
+        first = model.generate(
+            tokens, 3, temperature=0.9, strategy="sample", attention_mask=mask
+        )
+        scrambled = tokens.copy()
+        scrambled[mask == 0] = 11
+        np.random.seed(0)
+        second = model.generate(
+            scrambled, 3, temperature=0.9, strategy="sample", attention_mask=mask
+        )
+
+        np.testing.assert_array_equal(first[:, -3:], second[:, -3:])
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +695,18 @@ class TestGPT:
         shared_weight = model.token_emb.weight
         assert shared_weight.grad is not None
         assert not np.all(shared_weight.grad == 0), "tied weight has zero gradient"
+
+    def test_loading_legacy_checkpoint_rebuilds_strict_causal_mask(self):
+        model = self._make_model()
+        state = model.state_dict()
+        state["causal_mask"] = np.triu(
+            np.full((model.context_len, model.context_len), -1e9), k=1
+        )
+
+        restored = self._make_model()
+        restored.load_state_dict(state)
+        assert np.isneginf(restored.causal_mask.data[0, 1])
+        assert restored.causal_mask.data[-1, -1] == 0.0
 
 
 # ---------------------------------------------------------------------------

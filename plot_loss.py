@@ -4,11 +4,10 @@ plot_loss.py — Plot training and validation curves from a JSONL log file.
 Usage:
     python plot_loss.py runs/tiny.jsonl
     python plot_loss.py runs/tiny.jsonl --out loss.png
-    python plot_loss.py runs/tiny.jsonl --metric val_ppl --title "Perplexity"
 
 The JSONL file is produced by train.py --log-jsonl.  Each line is a JSON
 object with at least {"step": int, "train_loss": float}.  Optional fields
-"val_loss", "val_ppl", and "lr" are plotted on separate axes when present.
+"val_loss" and "lr" add a validation curve and learning-rate panel when present.
 """
 
 import argparse
