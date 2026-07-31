@@ -21,7 +21,7 @@ every module is built from those primitives.
 | **Layers** | Linear, Embedding, LayerNorm, RMSNorm, Dropout — all with fast `infer()` paths |
 | **Attention** | Multi-head causal self-attention with KV-cache inference; optional RoPE; validated custom masks |
 | **Transformer** | Pre-norm decoder block; beam/greedy/nucleus sampling; weight tying |
-| **Ragged batches** | `attention_mask` hides padded keys, `cross_entropy(..., ignore_index=…)` drops padded targets, and left-padded batched generation matches one-at-a-time decoding |
+| **Ragged batches** | `attention_mask` hides padded keys, `cross_entropy(..., ignore_index=…)` drops padded targets, and left-padded batched generation matches one-at-a-time decoding, even past the context window |
 | **Architectures** | `--arch gpt` (LayerNorm + learned pos + GELU) or `--arch llama` (RMSNorm + RoPE + SwiGLU) |
 | **LoRA** | Low-rank adapter fine-tuning (freeze backbone, train A/B matrices) |
 | **Grad accumulation** | `--grad-accum N` simulates N×-larger batches at constant memory |
@@ -54,7 +54,7 @@ src/
 └── benchmark.py        # Inference throughput benchmark
 tests/
 ├── test_autograd.py    # Numerical/VJP gradient checks and graph lifecycle (63 tests)
-├── test_transformer.py # Shape, gradients, masks, padded generation (54 tests)
+├── test_transformer.py # Shape, gradients, masks, padded generation (77 tests)
 ├── test_training.py    # Scheduler, tokenizer, checkpoint, LoRA tests (28 tests)
 ├── test_grad_mode.py   # no_grad graph suppression and scope semantics (21 tests)
 ├── test_data.py        # document corpora, padded batching, training CLI (23 tests)
@@ -97,7 +97,7 @@ python src/train.py --resume run/ckpt.pkl --iters 2000
 # Generate text from a saved checkpoint (no training)
 python src/train.py --resume run/ckpt.pkl --generate-only --sample 400
 
-# Run all 301 tests
+# Run all 324 tests
 pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
@@ -296,11 +296,26 @@ on its own, cached and uncached agree, and this holds for both `--arch gpt`
 (learned positions) and `--arch llama` (RoPE, rotated per row). Scrambling the
 padding changes nothing.
 
-Two rules the implementation enforces rather than assumes: the mask must be
-genuinely left-padded (zeros then ones, at least one real token per row), and
-prompt + `max_new_tokens` must fit inside `context_len` — the sliding-window
-crop that an unmasked run uses would invalidate the per-row positions. Beam
+One rule the implementation enforces rather than assumes: the mask must be
+genuinely left-padded (zeros then ones, at least one real token per row). Beam
 search takes no mask, since it decodes one sequence at a time.
+
+A masked run is free to outgrow `context_len`. It then slides the same window
+an unmasked run does — keeping each row's newest `context_len` slots — and
+**renumbers the surviving real tokens from 0 inside the new window**, which is
+the step that makes the crop safe for both learned positions and RoPE. Because
+every row's newest token sits at slot −1, one crop of the shared array is
+simultaneously right for every row: a row that has not filled the window yet
+loses padding, and a row that has loses its oldest tokens. The equivalence
+survives the crop — a row's tokens still match generating that prompt alone,
+including when the prompt is *already* longer than `context_len`.
+
+```python
+model.context_len          # 8
+out = model.generate(tokens, max_new_tokens=20, strategy="greedy",
+                     attention_mask=mask)
+out.shape[1]               # 25 — the window was re-cropped 16 times
+```
 
 A left-padded row's first query attends only to padding, which is exactly the
 fully-masked row defined above: it yields a zero context vector instead of NaN,

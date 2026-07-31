@@ -13,7 +13,7 @@ NumPy is the only runtime dependency. Every addition must stay readable as a
 ## Commands
 
 ```bash
-python -m pytest -q -W error          # full suite — must stay green (301 tests, ~1s)
+python -m pytest -q -W error          # full suite — must stay green (324 tests, ~1s)
 python -m pytest tests/test_data.py -q # one module
 python -m compileall -q src tests plot_loss.py
 python src/train.py --iters 20 --no-sample          # smoke-train
@@ -30,7 +30,7 @@ src/engine/    tensor.py  ops.py  grad_mode.py  recompute.py
                optim.py  scheduler.py  checkpoint.py
 src/nn/        module.py  layers.py  attention.py  transformer.py
 src/           train.py (CLI)  tokenizer.py  benchmark.py
-tests/         9 modules, 301 tests
+tests/         9 modules, 324 tests
 ```
 
 Tests add `src` to `sys.path` themselves; scripts run from the repo root cannot
@@ -75,6 +75,11 @@ Break any of these and the project is silently wrong. Each has dedicated tests.
 13. **The default `text` (token-stream) training path is trajectory-stable.** Refactors
     must consume the RNG in the same order; verify by re-running a seeded CLI command
     and comparing losses and gradient norms step for step.
+14. **A generation window crop renumbers positions from 0.** `generate` recomputes
+    per-row positions from the *cropped* mask on every re-prefill, never carrying
+    absolute numbering across a crop. Carrying it over pushes `position_ids` past
+    `context_len` — `_validate_position_ids` catches that, so the failure is loud
+    rather than a silent position drift.
 
 ## Conventions
 

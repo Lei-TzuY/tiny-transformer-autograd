@@ -180,9 +180,10 @@
 - Round 2's fully-masked-row definition is load-bearing a second time: a left-padded row's first
   query attends only to padding. Without the zero-weight definition the prefill would be NaN and
   the entire scheme would be impossible.
-- Refusing to run when prompt + `max_new_tokens` exceeds `context_len` was the honest choice: the
-  sliding-window crop resets the cache and renumbers slots, so per-row positions would silently
-  drift. The unmasked path keeps its existing cropping behavior untouched.
+- Refusing to run when prompt + `max_new_tokens` exceeds `context_len` was the honest choice at the
+  time: the sliding-window crop resets the cache and renumbers slots, so per-row positions would
+  silently drift. The unmasked path keeps its existing cropping behavior untouched. *(Lifted in
+  round 8, which renumbers the window instead of refusing it.)*
 - Beam search takes no mask by construction — it already decodes one sequence at a time, so there
   is nothing to pad; passing one now raises instead of being ignored.
 - Remaining opportunities, none blocking: exposing ragged prompts through the training CLI (which
@@ -262,6 +263,50 @@
 - Committing as one checkpoint was the honest option: the pre-existing user diff (Llama/RoPE/SwiGLU/
   AdamW) and six rounds of work touch the same files, so splitting the history after the fact would
   risk misattributing or dropping user changes.
+
+## Round 8 Findings (sliding-window decoding for masked runs)
+- The round-4 refusal was more conservative than the problem required. "Per-row positions must stay
+  absolute" was the wrong framing: positions only have to be consistent *within the window the model
+  is actually shown*. Renumbering the surviving tokens from 0 at each crop satisfies that, and it is
+  precisely what the unmasked path had been doing all along by re-prefilling with default positions.
+  So the fix made the two paths one behaviour rather than adding a second.
+- Cropping does not need to be per row, which was the other half of the round-4 worry. Left padding
+  already guarantees every row's newest token sits at slot −1, so keeping the last `context_len`
+  columns of the shared array is simultaneously right for every row: a row that has not filled the
+  window loses padding, a row that has loses its oldest tokens. Checked both cases explicitly —
+  prompts of length 5, 2 and 3 at `context_len=8`.
+- The genuinely new bug this round could have introduced is in the *cached* branch, not the crop.
+  Once the window start moves, `mask` is wider than the keys the cache holds, so passing the whole
+  mask silently misaligns every key. Slicing it to `cache_len + 1` is what keeps padded prompt slots
+  hidden after a slide.
+- A missing renumbering fails loudly rather than drifting, which is worth knowing before trusting
+  the tests: emulating "positions were never renumbered" makes `_validate_position_ids` raise
+  `position_ids must be in [0, 8)` on the first crop. The round-4 bound check turned out to be the
+  guard rail for round 8.
+- Positions are recomputed from the cropped mask rather than tracked as an offset. An offset would
+  have to be maintained at every crop and every cached step; `cumsum` over the mask that is actually
+  handed to `infer` is derived from the state that decides the answer, so the two cannot disagree.
+- Prompts longer than `context_len` came for free — the first prefill already crops — and the
+  unmasked path had always accepted them. Verified with a 10-token prompt at `context_len=8`.
+- Equivalence still holds exactly. Every row of a masked run matches generating that prompt alone:
+  greedy, 6 and 20 new tokens, both architectures, cached and uncached. This is despite the two runs
+  cropping at *different* steps (a padded row's shared cache fills before its own token count would),
+  which confirms a crop is genuinely value-neutral, not merely consistent.
+- The equivalence test alone could pass for the wrong reason, since both sides call `generate`. The
+  independent anchor is a direct `infer` on a row's last `context_len` *real* tokens, unpadded and
+  with default positions — a path that never enters `generate` — and its greedy argmax matches the
+  generated token for every row on both architectures.
+- Verified no regression the same way the round-6 stream path was: 52 unmasked generation results
+  (both architectures × two context lengths × cached/uncached × greedy/sample/beam × short and
+  over-long prompts) and 24 in-window masked results are byte-identical to the previous commit.
+- The honest cost: once the window fills, every step drops the cache and re-prefills the whole
+  window. Measured at `ctx=64`, 4 layers, `d_model=128`: 1.10 ms/token inside the window against
+  11.21 ms/token past it, 10.2× slower — and a 20-token run at `ctx=8` re-crops 16 times. This is
+  pre-existing unmasked behaviour that masked runs can now reach, so it is recorded as the top next
+  candidate (a ring cache, which would work for RoPE but not for learned absolute positions).
+- The new tests subclass the round-4 class with `context_len=8` rather than restating its
+  assertions. That re-runs all 14 in-window guarantees under a sliding window for free, and it keeps
+  the claim honest: round 8 asserts nothing new, it asserts round 4's claim under harder conditions.
 
 ## Issues Encountered
 | Issue | Resolution |

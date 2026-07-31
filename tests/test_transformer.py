@@ -560,12 +560,6 @@ class TestPaddedGeneration:
                 attention_mask=np.array([[1, 1], [0, 0]]),
             )
 
-    def test_rejects_run_that_would_leave_the_context_window(self):
-        model = self._model(ARCHITECTURES[0].values[0], context_len=6)
-        tokens, mask = self._left_padded([[1, 2, 3, 4], [5, 6]])
-        with pytest.raises(ValueError, match="fit in context_len"):
-            model.generate(tokens, 4, strategy="greedy", attention_mask=mask)
-
     def test_beam_search_rejects_an_attention_mask(self):
         model = self._model(ARCHITECTURES[0].values[0])
         tokens = np.array([[1, 2]], dtype=np.int64)
@@ -592,6 +586,159 @@ class TestPaddedGeneration:
         )
 
         np.testing.assert_array_equal(first[:, -3:], second[:, -3:])
+
+
+class TestMaskedSlidingWindow(TestPaddedGeneration):
+    """A masked run that outgrows context_len must still match solo decoding.
+
+    Inherits the padded-generation fixtures deliberately: the claim is that the
+    equivalence proved inside the window survives the crop, so it is the same
+    claim under harder conditions, not a new one.
+    """
+
+    CONTEXT_LEN = 8
+
+    def _model(self, arch, **kw):
+        kw.setdefault("context_len", self.CONTEXT_LEN)
+        return super()._model(arch, **kw)
+
+    def _crossing_run(self, model, prompts=None, new_tokens=6, use_cache=True):
+        """Generate past the window and return (batched output, prompts)."""
+        prompts = prompts or self.PROMPTS
+        tokens, mask = self._left_padded(prompts)
+        batched = model.generate(
+            tokens, new_tokens, strategy="greedy",
+            attention_mask=mask, use_cache=use_cache,
+        )
+        # Without this the run never reaches the crop and the test would pass
+        # for the wrong reason.
+        assert batched.shape[1] > model.context_len
+        return batched, prompts
+
+    @pytest.mark.parametrize("arch", ARCHITECTURES)
+    def test_run_past_the_window_matches_one_prompt_at_a_time(self, arch):
+        model = self._model(arch)
+        new_tokens = 6
+        batched, prompts = self._crossing_run(model, new_tokens=new_tokens)
+
+        for row, prompt in enumerate(prompts):
+            alone = model.generate(
+                np.array([prompt], dtype=np.int64), new_tokens, strategy="greedy"
+            )
+            np.testing.assert_array_equal(
+                batched[row, -new_tokens:], alone[0, -new_tokens:],
+                err_msg=f"row {row} diverged after the window slid",
+            )
+
+    @pytest.mark.parametrize("arch", ARCHITECTURES)
+    def test_prompt_longer_than_the_window_is_cropped_per_row(self, arch):
+        """The first prefill already crops: no step ever fits the full prompt."""
+        model = self._model(arch)
+        prompts = [[1, 4, 7, 2, 5, 3, 9, 8, 2, 6], [3, 6, 1, 5, 7, 2]]
+        new_tokens = 5
+        tokens, mask = self._left_padded(prompts)
+        assert tokens.shape[1] > model.context_len
+
+        batched = model.generate(
+            tokens, new_tokens, strategy="greedy", attention_mask=mask
+        )
+
+        for row, prompt in enumerate(prompts):
+            alone = model.generate(
+                np.array([prompt], dtype=np.int64), new_tokens, strategy="greedy"
+            )
+            np.testing.assert_array_equal(
+                batched[row, -new_tokens:], alone[0, -new_tokens:],
+                err_msg=f"row {row} diverged on an over-long prompt",
+            )
+
+    def test_many_crops_stay_equivalent(self):
+        """20 new tokens re-prefill the window on every step after it fills."""
+        model = self._model(ARCHITECTURES[0].values[0])
+        new_tokens = 20
+        batched, prompts = self._crossing_run(model, new_tokens=new_tokens)
+
+        for row, prompt in enumerate(prompts):
+            alone = model.generate(
+                np.array([prompt], dtype=np.int64), new_tokens, strategy="greedy"
+            )
+            np.testing.assert_array_equal(
+                batched[row, -new_tokens:], alone[0, -new_tokens:]
+            )
+
+    @pytest.mark.parametrize("arch", ARCHITECTURES)
+    def test_cached_and_uncached_agree_past_the_window(self, arch):
+        model = self._model(arch)
+        cached, _ = self._crossing_run(model, use_cache=True)
+        uncached, _ = self._crossing_run(model, use_cache=False)
+
+        np.testing.assert_array_equal(cached, uncached)
+
+    def test_padding_content_cannot_change_tokens_past_the_window(self):
+        model = self._model(ARCHITECTURES[0].values[0])
+        tokens, mask = self._left_padded()
+        first = model.generate(tokens, 6, strategy="greedy", attention_mask=mask)
+
+        scrambled = tokens.copy()
+        scrambled[mask == 0] = 11
+        second = model.generate(scrambled, 6, strategy="greedy", attention_mask=mask)
+
+        np.testing.assert_array_equal(first[:, -6:], second[:, -6:])
+
+    def test_dropping_the_mask_still_changes_the_answer(self):
+        """Counter-test: the crop must not be quietly discarding the mask."""
+        model = self._model(ARCHITECTURES[0].values[0])
+        tokens, mask = self._left_padded()
+
+        masked = model.generate(tokens, 6, strategy="greedy", attention_mask=mask)
+        unmasked = model.generate(tokens, 6, strategy="greedy")
+
+        assert not np.array_equal(masked[:, -6:], unmasked[:, -6:])
+
+    @pytest.mark.parametrize("arch", ARCHITECTURES)
+    def test_window_matches_a_direct_inference_on_the_surviving_tokens(self, arch):
+        """Anchor the renumbering against a path that never touches generate().
+
+        Each row's next token must be what ``infer`` predicts from that row's
+        last ``context_len`` *real* tokens, fed unpadded with default positions.
+        """
+        model = self._model(arch)
+        new_tokens = 7
+        tokens, mask = self._left_padded()
+
+        before = model.generate(
+            tokens, new_tokens - 1, strategy="greedy", attention_mask=mask
+        )
+        after = model.generate(
+            tokens, new_tokens, strategy="greedy", attention_mask=mask
+        )
+        keep = np.concatenate(
+            [mask, np.ones((mask.shape[0], new_tokens - 1), dtype=np.int64)], axis=1
+        )
+
+        for row in range(len(self.PROMPTS)):
+            window = before[row][keep[row] == 1][-model.context_len:]
+            logits, _ = model.infer(np.array([window], dtype=np.int64))
+            assert int(np.argmax(logits[0, -1])) == int(after[row, -1]), (
+                f"row {row}: generate disagrees with infer on the cropped window"
+            )
+
+    def test_sampling_past_the_window_ignores_padding_content(self):
+        model = self._model(ARCHITECTURES[0].values[0])
+        tokens, mask = self._left_padded()
+
+        np.random.seed(0)
+        first = model.generate(
+            tokens, 6, temperature=0.9, strategy="sample", attention_mask=mask
+        )
+        scrambled = tokens.copy()
+        scrambled[mask == 0] = 11
+        np.random.seed(0)
+        second = model.generate(
+            scrambled, 6, temperature=0.9, strategy="sample", attention_mask=mask
+        )
+
+        np.testing.assert_array_equal(first[:, -6:], second[:, -6:])
 
 
 # ---------------------------------------------------------------------------

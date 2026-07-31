@@ -355,9 +355,11 @@ class GPT(Module):
         same as generating that prompt on its own.
 
         The returned array keeps the left padding, so a row's generated tokens
-        are the last ``max_new_tokens`` columns. A masked run must fit inside
-        ``context_len``: the sliding-window crop that an unmasked run uses would
-        invalidate the per-row positions.
+        are the last ``max_new_tokens`` columns. A masked run may outgrow
+        ``context_len``: it then slides the same window an unmasked run does,
+        keeping each row's newest ``context_len`` slots and renumbering the
+        surviving real tokens from 0 — a row that has not filled the window
+        yet loses padding, one that has loses its oldest tokens.
         """
         if not isinstance(max_new_tokens, (int, np.integer)) or max_new_tokens < 0:
             raise ValueError("max_new_tokens must be a non-negative integer")
@@ -378,38 +380,43 @@ class GPT(Module):
         mask = positions = None
         if attention_mask is not None:
             mask = self._validate_generation_mask(attention_mask, idx.shape)
-            if idx.shape[1] + max_new_tokens > self.context_len:
-                raise ValueError(
-                    "padded generation must fit in context_len: prompt "
-                    f"{idx.shape[1]} + max_new_tokens {max_new_tokens} exceeds "
-                    f"{self.context_len}"
-                )
-            # Real tokens are numbered 0, 1, 2, …; padded slots collapse to 0
-            # and are never attended to.
-            positions = np.maximum(np.cumsum(mask, axis=1) - 1, 0)
+            # Filled per window below: a crop renumbers the surviving tokens,
+            # so positions are only meaningful inside the current window.
+            positions = np.zeros(idx.shape, dtype=np.int64)
 
         kv_cache = None
         for _ in range(max_new_tokens):
             if use_cache and kv_cache is not None:
-                step_positions = None if positions is None else positions[:, -1:]
+                step_mask = step_positions = None
+                if mask is not None:
+                    # The mask must span the cached keys plus the new one, and
+                    # the cache may start after the prompt if the window slid.
+                    cached = kv_cache[0]["k"].shape[2]
+                    step_mask = mask[:, -(cached + 1):]
+                    step_positions = positions[:, -1:]
                 logits, kv_cache = self.infer(
                     idx[:, -1:],
                     kv_cache,
-                    attention_mask=mask,
+                    attention_mask=step_mask,
                     position_ids=step_positions,
                 )
-            elif use_cache:
-                logits, kv_cache = self.infer(
-                    idx[:, -self.context_len:],
-                    attention_mask=mask,
-                    position_ids=positions,
-                )
             else:
-                logits, _ = self.infer(
-                    idx[:, -self.context_len:],
-                    attention_mask=mask,
-                    position_ids=positions,
+                window = idx[:, -self.context_len:]
+                window_mask = window_positions = None
+                if mask is not None:
+                    width = window.shape[1]
+                    window_mask = mask[:, -width:]
+                    # A crop restarts the window at position 0, exactly as the
+                    # unmasked path does; each row is numbered from its own
+                    # first real token that survived the crop.
+                    positions[:, -width:] = _left_padded_positions(window_mask)
+                    window_positions = positions[:, -width:]
+                logits, cache = self.infer(
+                    window,
+                    attention_mask=window_mask,
+                    position_ids=window_positions,
                 )
+                kv_cache = cache if use_cache else None
 
             logits_last = logits[:, -1, :]
             if strategy == "greedy":
@@ -431,7 +438,9 @@ class GPT(Module):
                     [positions, positions[:, -1:] + 1], axis=1
                 )
 
-            # Sliding-window crops shift learned absolute positions.
+            # A full cache means the next step must crop, and a crop shifts
+            # absolute positions. Dropping the cache forces the re-prefill that
+            # renumbers the window instead of decoding against stale positions.
             if kv_cache is not None and kv_cache[0]["k"].shape[2] >= self.context_len:
                 kv_cache = None
         return idx
@@ -561,6 +570,15 @@ def _validate_keep_mask(attention_mask, expected_shape, description):
                 "1/True (real token)"
             )
     return mask.astype(bool)
+
+
+def _left_padded_positions(keep):
+    """Number each row's real tokens from 0; padded slots collapse to 0.
+
+    Padded slots are never attended to, so their position is arbitrary — 0 is
+    the only value guaranteed to be inside the learned/rotary position table.
+    """
+    return np.maximum(np.cumsum(keep, axis=1) - 1, 0)
 
 
 def _gelu(x):

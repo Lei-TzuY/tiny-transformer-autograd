@@ -3,7 +3,7 @@
 Handoff snapshot for `Tiny Transformer & Autograd`. Written so a session with no prior
 context can resume without re-deriving anything.
 
-**Last updated:** 2026-07-31 · **Branch:** `main` · **Suite:** 301 passing (`-W error`)
+**Last updated:** 2026-07-31 · **Branch:** `checkpoint/rounds-1-7` · **Suite:** 324 passing (`-W error`)
 
 Companions: `CLAUDE.md` (working rules and invariants), `task_plan.md` (phases,
 decisions, acceptance criteria), `findings.md` (per-round findings), `progress.md`
@@ -29,7 +29,7 @@ on Linux, development is on Windows.
 | `src/nn/module.py` | 180 | `Module` base: `modules`, `parameters`, `named_parameters`, `state_dict`, `train`/`eval`, `param_count`. |
 | `src/nn/layers.py` | 235 | `Linear` (+LoRA), `Embedding`, `LayerNorm`, `RMSNorm`, `Dropout`, each with a NumPy `infer`. |
 | `src/nn/attention.py` | 393 | `SelfAttention`, `MultiHeadAttention`, `RotaryEmbedding`, mask preparation/validation, zero-row softmax. |
-| `src/nn/transformer.py` | 606 | `FeedForward`, `SwiGLU`, `TransformerBlock`, `GPT` (forward / infer / generate / generate_beam / LoRA / config). |
+| `src/nn/transformer.py` | 624 | `FeedForward`, `SwiGLU`, `TransformerBlock`, `GPT` (forward / infer / generate / generate_beam / LoRA / config). |
 | `src/train.py` | 630 | Training CLI: corpora, batching, loop, evaluation, checkpointing, sampling, arg validation. |
 | `src/tokenizer.py` | 123 | `CharTokenizer`, `BPETokenizer`, build/restore helpers. |
 | `src/benchmark.py` | 122 | Throughput/timing harness. |
@@ -81,7 +81,7 @@ Per-element RoPE positions (`rotate_np(positions=…)`), additive key bias threa
 through block/attention inference, `GPT.infer(attention_mask=…, position_ids=…)` with the
 mask covering cached *and* current keys, and `generate(attention_mask=…)` deriving
 per-row positions as `cumsum(mask) - 1`. Left padding required and enforced; a masked run
-must fit inside `context_len`; beam search rejects a mask.
+had to fit inside `context_len` (lifted in round 8); beam search rejects a mask.
 
 **Round 5 — gradient checkpointing.**
 `engine/recompute.py`: unrecorded forward under `no_grad()`, recorded replay under
@@ -95,6 +95,15 @@ restoring the NumPy RNG state. Exposed as `GPT(grad_checkpoint=…)` per block a
 `evaluate_documents`. Both corpus kinds flow through one `(tokens, targets, mask)`
 sampler, so the stream path is byte-identical. Tokenizer is built from document text,
 not the raw file.
+
+**Round 8 — sliding-window decoding for masked runs.**
+Removed the last hard refusal in the generation API: `generate(attention_mask=…)` no
+longer requires prompt + `max_new_tokens` to fit in `context_len`. A masked run now
+slides the same window an unmasked run does and renumbers the surviving real tokens
+from 0 inside each new window (`_left_padded_positions` applied to the *cropped* mask),
+so learned positions and RoPE both stay in range. The cached-step mask is sliced to the
+cache length so it still covers exactly the cached plus current keys once the window
+start moves. A prompt already longer than `context_len` is now accepted as well.
 
 ---
 
@@ -112,7 +121,9 @@ not the raw file.
 | Right-pad training, left-pad generation | Training numbers position *i* at slot *i*; decoding reads slot −1, so the newest token must sit there. One padding could not serve both. |
 | `infer`'s mask covers cached keys | Padded prompt slots stay in the KV cache for the whole run; a per-step mask would unhide them right after the prefill. |
 | Derive `position_ids` inside `generate` | `cumsum(mask) - 1` is the only correct answer for a left-padded row; deriving it removes a class of caller mistakes. |
-| Refuse masked runs exceeding `context_len` | The sliding-window crop resets the cache and renumbers slots, so per-row positions would silently drift. |
+| Crop the shared array, not per row | Left padding puts every row's newest token at slot −1, so one crop of the last `context_len` columns is simultaneously right for all rows: a row still inside the window loses padding, a row past it loses its oldest tokens. |
+| Renumber from 0 after a crop | Absolute numbering carried across a crop runs past `context_len`. Renumbering is also what the unmasked path already does implicitly by re-prefilling with default positions, so the two paths agree. |
+| Recompute window positions instead of tracking an offset | An offset must be right at every crop *and* every cached step; `cumsum` over the cropped mask is derived from the state that actually decides the answer and cannot drift out of sync. |
 | Module named `recompute`, not `checkpoint` | `engine/checkpoint.py` already means on-disk training state. |
 | Replay from detached copies | `Tensor.backward` resets the gradient of any node with parents, so replaying into the outer graph discards a residual's accumulated gradient — this fires on the very first block. |
 | Capture and replay the RNG state | Otherwise the replay draws fresh dropout masks and differentiates a different function; restoring afterwards keeps the training trajectory bit-identical. |
@@ -124,12 +135,12 @@ not the raw file.
 
 ## 4. Test baseline
 
-`python -m pytest -q -W error` → **301 passed in ~1.0s**.
+`python -m pytest -q -W error` → **324 passed in ~1.2s**.
 
 | Module | Tests | Covers |
 |--------|-------|--------|
 | `tests/test_autograd.py` | 63 | Ops, VJPs with non-uniform cotangents, matmul broadcasting/1-D cases, stable CE, repeated backward, deep graphs, division, transpose/concat edge cases. |
-| `tests/test_transformer.py` | 54 | Attention parity, causality, masks, KV cache, RoPE, generation, ragged batches, batched masked generation. |
+| `tests/test_transformer.py` | 77 | Attention parity, causality, masks, KV cache, RoPE, generation, ragged batches, batched masked generation, sliding-window masked decoding. |
 | `tests/test_validation.py` | 41 | Public-API argument validation across constructors, tokens, RoPE, generation, norms. |
 | `tests/test_modern.py` | 37 | Llama-style stack: RMSNorm, RoPE, SwiGLU, AdamW, gradient accumulation, LoRA. |
 | `tests/test_training.py` | 28 | Training loop, checkpoint save/resume/transactionality, optimizer identity, RNG state, CLI. |
@@ -161,6 +172,7 @@ Any refactor of the default token-stream path must reproduce these numbers exact
 | `no_grad()` evaluation | 4 layers, `d_model=128`, `ctx=64`, batch 8, 10 passes: 1.102 s recorded → 0.586 s (1.88×). Live tensors after a forward pass: 346 → 65 (the model's own parameters). |
 | Gradient checkpointing | 6 layers, `d_model=128`, `ctx=64`, batch 8: retained activations 320.9 MiB (413 tensors) → 14.2 MiB (29 tensors), 22.7× less; 227 ms/step → 342 ms/step, 1.51× slower. |
 | Padded vs. unpadded equivalence | Logit difference exactly `0.0`; loss and every parameter gradient within 1e-12–1e-14. |
+| Decoding past the window (round 8) | 4 layers, `d_model=128`, `ctx=64`, 3 ragged rows: 1.10 ms/token inside the window → 11.21 ms/token once it fills, 10.2× slower. The cache is dropped at every crop, so each step re-prefills 64 positions. This is the pre-existing unmasked behaviour, now reachable with a mask; see next-round candidate 1. |
 
 ---
 
@@ -170,8 +182,9 @@ These are stated in the README and enforced with clear errors — none is an ope
 
 - **`float64` only.** No dtype system, no mixed precision, no GPU.
 - **Right padding for training masks, left padding for generation masks.** Enforced, not assumed.
-- **A masked generation run must fit in `context_len`.** No sliding-window decoding for
-  masked runs; the unmasked path still crops as before.
+- **A generation window crop renumbers positions from 0**, for masked and unmasked runs
+  alike. Tokens that leave the window are forgotten — that is the point of a window, but
+  it means a row's output depends on `context_len`, not only on its prompt.
 - **`recompute` wraps functions returning a single `Tensor`.** Multi-output and
   multi-section forms are not implemented (block structure does not need them).
 - **Beam search takes no attention mask.** It decodes one sequence at a time.
@@ -185,10 +198,11 @@ These are stated in the README and enforced with clear errors — none is an ope
 ## 6. Repository state
 
 - History: `021dda5 Initial commit`, then one checkpoint commit on branch
-  `checkpoint/rounds-1-7` containing everything described above. That single commit also
-  carries the pre-existing user diff (Llama/RoPE/SwiGLU/AdamW), which was interleaved
-  with six rounds of work across the same files and could not be separated after the
-  fact — see the round 7 decision in `task_plan.md`.
+  `checkpoint/rounds-1-7` covering rounds 1–7, then one commit per round after it
+  (round 8 is the first). The checkpoint commit also carries the pre-existing user diff
+  (Llama/RoPE/SwiGLU/AdamW), which was interleaved with six rounds of work across the
+  same files and could not be separated after the fact — see the round 7 decision in
+  `task_plan.md`. Later rounds are separate, reviewable commits.
 - The checkpoint branch is not merged into `main`. To put it there:
   `git checkout main && git merge --ff-only checkpoint/rounds-1-7`.
 - `git diff --check` is clean apart from pre-existing LF/CRLF notices on Windows.
@@ -200,12 +214,13 @@ These are stated in the README and enforced with clear errors — none is an ope
 
 Ranked. None blocks the default training or generation path.
 
-1. **Sliding-window decoding for masked runs.** Today `generate(attention_mask=…)` refuses
-   when prompt + `max_new_tokens` exceeds `context_len`, because cropping resets the KV
-   cache and renumbers slots while per-row positions must stay absolute. Doing this
-   properly means cropping per row, rebuilding the cache, and remapping `position_ids` —
-   then proving a cropped masked run still matches generating that prompt alone.
-   *Highest value: it removes the only hard refusal in the generation API.*
+1. **Decoding cost once the window fills.** Correct but slow: after the window fills, the
+   cache is dropped every step, so each new token re-prefills `context_len` positions
+   instead of extending a cache. A ring/shift cache that drops the oldest key and value
+   in place would restore incremental decoding — but only for RoPE, since learned
+   absolute positions genuinely change under a crop. Round 8 recorded the measurement
+   (16 full-window re-prefills for a 20-token run at `context_len=8`).
+   *Highest value now: it is a real cost on the path round 8 just opened.*
 2. **Multi-output / multi-section `recompute`.** Currently one function returning one
    `Tensor`. A tuple-returning form would let a caller checkpoint a section that also
    emits a cache or auxiliary loss. Needs care: the replay must seed each output's

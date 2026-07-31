@@ -4,7 +4,7 @@
 Assess the current project honestly, implement the highest-value missing capabilities and quality improvements, and leave the repository with verified behavior, tests, and clear documentation.
 
 ## Current Phase
-Complete (round 7: handoff documentation and checkpoint commit)
+Complete (round 8: sliding-window decoding for masked runs)
 
 ## Phases
 
@@ -110,6 +110,18 @@ Complete (round 7: handoff documentation and checkpoint commit)
 - [x] Create the checkpoint commit preserving the pre-existing user diff
 - **Status:** complete
 
+### Phase 12: Round 8 — Sliding-window decoding for masked runs
+- [x] Remove the refusal when prompt + `max_new_tokens` exceeds `context_len`
+- [x] Crop the shared array per window and renumber the surviving real tokens from 0
+- [x] Slice the cached-step mask to the cache length so it still covers cached + current keys
+- [x] Accept a prompt that is already longer than `context_len`
+- [x] Prove a cropped masked run still matches generating each prompt alone, both
+      architectures, cached and uncached, and far past the window
+- [x] Anchor the renumbering against a direct `infer` call that never touches `generate`
+- [x] Prove unmasked and in-window masked generation are byte-identical to round 7
+- [x] Measure the cost of decoding past the window and record it as the next candidate
+- **Status:** complete
+
 ## Key Questions
 1. Which correctness or capability gaps remain in the current autograd engine?
 2. Which Transformer features are missing for a coherent tiny-but-real implementation?
@@ -153,6 +165,12 @@ Complete (round 7: handoff documentation and checkpoint commit)
 | Round 7: state invariants as a numbered list with the failure they prevent | Most traps here are interactions between rounds, not bugs inside one file; a rule without its reason gets refactored away. |
 | Round 7: pin a CLI regression anchor with exact expected output | The round-6 stream-path check referenced numbers whose command was never recorded, so it could not be rerun from a cold start. A named command plus its output can. |
 | Round 7: commit as a checkpoint rather than splitting the history | The pre-existing user diff (Llama/RoPE/SwiGLU/AdamW) is interleaved with six rounds of work across the same files; reconstructing separate commits would risk misattributing or losing it. |
+| Round 8: crop the shared array rather than per row | Left padding already puts every row's newest token at slot −1, so cropping the last `context_len` columns is simultaneously correct for every row — one that has not filled the window loses padding, one that has loses its oldest tokens. Per-row cropping would produce ragged rows that no longer share a cache. |
+| Round 8: renumber positions from 0 inside each window | Carrying absolute numbering across a crop immediately exceeds `context_len`. Renumbering also matches what the unmasked path already does by re-prefilling with default positions, so masked and unmasked runs stay one behaviour rather than two. |
+| Round 8: recompute positions from the cropped mask, never track an offset | An offset has to be maintained correctly at every crop *and* every cached step; `cumsum` over the mask that is actually being passed to `infer` is derived from the state that decides the answer, so the two cannot drift apart. |
+| Round 8: keep the existing cache-drop trigger | Dropping a full cache is exactly what forces the re-prefill that renumbers the window. Reusing it means the masked path inherits an already-tested reset rule instead of adding a second one. |
+| Round 8: accept prompts longer than `context_len` | It falls out of cropping rather than being added: the first prefill already crops, and the unmasked path has always accepted them. Refusing would have been an extra rule with no reason behind it. |
+| Round 8: test by subclassing the round-4 test class | The claim is that round 4's equivalence survives the crop, not a new claim, so re-running the same assertions with a small `context_len` verifies exactly that and cannot drift from the original wording. |
 
 ## Acceptance Criteria
 - Matmul gradients pass finite differences for singleton batch broadcasting and all 1-D NumPy matmul combinations.
@@ -228,6 +246,18 @@ Complete (round 7: handoff documentation and checkpoint commit)
   `--grad-checkpoint`.
 - Round 7: the full suite passes with warnings as errors, sources compile, and the checkpoint
   commit contains the pre-existing user diff alongside the six rounds of work.
+- Round 8: a masked run whose length exceeds `context_len` completes, and every row's generated
+  tokens still equal generating that prompt alone — both architectures, cached and uncached,
+  and with the run continued far past the window.
+- Round 8: a prompt that is already longer than `context_len` is cropped per row and matches
+  the same prompt decoded alone.
+- Round 8: the run provably reaches the crop (output width exceeds `context_len`), scrambling
+  the padding changes nothing, and dropping the mask demonstrably changes the answer.
+- Round 8: the next token after a crop equals what `infer` predicts from that row's last
+  `context_len` real tokens fed unpadded, a path that never enters `generate`.
+- Round 8: unmasked generation and masked generation inside the window are byte-identical to
+  the previous round across architectures, cache modes, strategies, and over-long prompts.
+- Round 8: the CLI regression anchor reproduces exactly.
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
