@@ -16,6 +16,13 @@ closures in reverse topological order (like reverse-mode AD).
 
 import numpy as np
 
+from .grad_mode import is_grad_enabled
+
+
+def _no_backward():
+    """Shared do-nothing closure for nodes that cannot propagate a gradient."""
+    return None
+
 
 class Tensor:
     """
@@ -31,17 +38,69 @@ class Tensor:
         Parent tensors in the computational graph (set by ops, not users).
     _op : str
         Human-readable label of the op that produced this tensor.
+
+    Inside a ``no_grad()`` block an op result (a tensor with ``_children``)
+    is created detached: no parents, no gradient buffer, no backward closure.
+    Explicitly constructed leaves keep the ``requires_grad`` they were given.
     """
 
+    # Ask NumPy binary operators to defer to Tensor's reflected methods.
+    __array_priority__ = 1000
+
     def __init__(self, data, requires_grad=False, _children=(), _op=""):
+        children = tuple(_children)
+        is_op_result = bool(children)
+        recording = is_grad_enabled()
+        requested_grad = bool(requires_grad)
+
+        # Remember why a result became detached before discarding its parents.
+        # The marker propagates through further constant-only arithmetic so a
+        # value derived from a suppressed forward remains a loud backward
+        # error. Explicit constants and operations on constants never acquire
+        # it and retain their historical no-op backward behaviour.
+        parent_was_suppressed = any(
+            getattr(child, "_detached_by_no_grad", False) for child in children
+        )
+        detached_by_no_grad = is_op_result and (
+            parent_was_suppressed or (not recording and requested_grad)
+        )
+
+        if is_op_result and not recording:
+            # Recording is off: keep the value, drop the graph.
+            requires_grad = False
+        if is_op_result and not requires_grad:
+            # A result that cannot receive a gradient has no reason to retain
+            # its parents. This also prunes constant/frozen-only branches while
+            # allowing their values to feed a later trainable operation.
+            children = ()
+
         self.data = np.array(data, dtype=np.float64)
         self.requires_grad = requires_grad
         self.grad = np.zeros_like(self.data) if requires_grad else None
+        self._detached_by_no_grad = detached_by_no_grad and not requires_grad
 
         # Computational graph bookkeeping
-        self._children = set(_children)
+        self._children = set(children)
         self._op = _op
         self._backward = lambda: None  # filled by each op
+
+    # ------------------------------------------------------------------
+    # Backward closure
+    # ------------------------------------------------------------------
+    @property
+    def _backward(self):
+        """Closure that pushes this node's gradient into its parents."""
+        return self._backward_fn
+
+    @_backward.setter
+    def _backward(self, function):
+        # A node with no gradient of its own can never contribute one, so its
+        # closure is dropped instead of stored.  That releases every forward
+        # intermediate the closure captured — the reason no_grad() is cheap —
+        # and guarantees a detached node is never asked to propagate a
+        # gradient it does not have.
+        graph_node = self.requires_grad and bool(self._children)
+        self._backward_fn = function if graph_node else _no_backward
 
     # ------------------------------------------------------------------
     # Shape helpers
@@ -100,36 +159,70 @@ class Tensor:
 
         Builds the topological order of the computational graph rooted at
         self, then calls each node's _backward closure in reverse order.
+        Leaf gradients accumulate across calls; non-leaf gradients are reset
+        on every call so stale intermediate values are never propagated.
 
         Parameters
         ----------
         grad : array-like or None
-            Gradient flowing into this tensor.  If None and this tensor is
-            scalar, it defaults to 1.0 (standard loss.backward() call).
+            Gradient flowing into this tensor. If None, defaults to an array
+            of ones with this tensor's shape. For non-scalar tensors this is
+            equivalent to differentiating ``self.sum()``.
+
+        Raises
+        ------
+        RuntimeError
+            If this tensor was produced by an operation while recording was
+            disabled. The creation provenance is retained after leaving the
+            block, while explicit constants remain intentional no-ops.
         """
         if not self.requires_grad:
+            if self._detached_by_no_grad:
+                raise RuntimeError(
+                    "backward() called on a tensor detached by no_grad(); "
+                    "build the forward pass outside no_grad() (or re-enable "
+                    "it with enable_grad())"
+                )
             return
 
-        # Initialise incoming gradient
+        # Prepare and validate the incoming vector-Jacobian product seed.
         if grad is None:
-            if self.data.shape == ():
-                grad = np.ones((), dtype=np.float64)
-            else:
-                grad = np.ones_like(self.data, dtype=np.float64)
-        self.grad = np.array(grad, dtype=np.float64)
+            grad = np.ones_like(self.data, dtype=np.float64)
+        incoming = np.asarray(grad, dtype=np.float64)
+        if incoming.shape != self.shape:
+            raise ValueError(
+                f"backward gradient shape mismatch: expected {self.shape}, "
+                f"got {incoming.shape}"
+            )
 
-        # Build topological ordering via DFS
+        # Build a post-order topological traversal iteratively. A recursive
+        # DFS fails on perfectly valid long chains at Python's recursion limit.
         topo = []
         visited = set()
-
-        def _build(node):
-            if id(node) not in visited:
-                visited.add(id(node))
-                for child in node._children:
-                    _build(child)
+        stack = [(self, False)]
+        while stack:
+            node, expanded = stack.pop()
+            node_id = id(node)
+            if expanded:
                 topo.append(node)
+                continue
+            if node_id in visited:
+                continue
+            visited.add(node_id)
+            stack.append((node, True))
+            for child in node._children:
+                if id(child) not in visited:
+                    stack.append((child, False))
 
-        _build(self)
+        # Intermediates are implementation details of this VJP and must start
+        # clean on each call. Leaves intentionally retain their gradients so
+        # independent graphs and repeated backward calls accumulate normally.
+        for node in topo:
+            if node._children and node.requires_grad:
+                node.grad = np.zeros_like(node.data)
+
+        self._ensure_grad()
+        self.grad += incoming
 
         # Propagate gradients in reverse topological order
         for node in reversed(topo):
@@ -156,7 +249,13 @@ class Tensor:
 
     def __matmul__(self, other):
         from .ops import matmul
+        other = other if isinstance(other, Tensor) else Tensor(other)
         return matmul(self, other)
+
+    def __rmatmul__(self, other):
+        from .ops import matmul
+        other = other if isinstance(other, Tensor) else Tensor(other)
+        return matmul(other, self)
 
     def __neg__(self):
         from .ops import mul
@@ -170,11 +269,14 @@ class Tensor:
         return (-self) + other
 
     def __truediv__(self, other):
-        from .ops import mul, exp, log
-        if isinstance(other, (int, float)):
-            return mul(self, Tensor(np.full_like(self.data, 1.0 / other)))
-        # a / b = a * exp(-log(b))  (works for tensor divisors)
-        return mul(self, exp(-log(other)))
+        from .ops import div
+        other = other if isinstance(other, Tensor) else Tensor(other)
+        return div(self, other)
+
+    def __rtruediv__(self, other):
+        from .ops import div
+        other = other if isinstance(other, Tensor) else Tensor(other)
+        return div(other, self)
 
     def __pow__(self, exponent):
         """Scalar-exponent power: x ** n."""
@@ -216,7 +318,13 @@ class Tensor:
     # Detach / clone
     # ------------------------------------------------------------------
     def detach(self):
-        """Return a new Tensor sharing data but excluded from the graph."""
+        """
+        Return a graph-free copy of this tensor.
+
+        The constructor copies, so the result owns its own storage: later
+        writes to ``detach().data`` do not touch this tensor.  Use it to read
+        a value out of the graph; use ``no_grad()`` to avoid building one.
+        """
         return Tensor(self.data, requires_grad=False)
 
     def numpy(self):
