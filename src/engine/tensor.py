@@ -48,17 +48,39 @@ class Tensor:
     __array_priority__ = 1000
 
     def __init__(self, data, requires_grad=False, _children=(), _op=""):
-        if _children and not is_grad_enabled():
+        children = tuple(_children)
+        is_op_result = bool(children)
+        recording = is_grad_enabled()
+        requested_grad = bool(requires_grad)
+
+        # Remember why a result became detached before discarding its parents.
+        # The marker propagates through further constant-only arithmetic so a
+        # value derived from a suppressed forward remains a loud backward
+        # error. Explicit constants and operations on constants never acquire
+        # it and retain their historical no-op backward behaviour.
+        parent_was_suppressed = any(
+            getattr(child, "_detached_by_no_grad", False) for child in children
+        )
+        detached_by_no_grad = is_op_result and (
+            parent_was_suppressed or (not recording and requested_grad)
+        )
+
+        if is_op_result and not recording:
             # Recording is off: keep the value, drop the graph.
             requires_grad = False
-            _children = ()
+        if is_op_result and not requires_grad:
+            # A result that cannot receive a gradient has no reason to retain
+            # its parents. This also prunes constant/frozen-only branches while
+            # allowing their values to feed a later trainable operation.
+            children = ()
 
         self.data = np.array(data, dtype=np.float64)
         self.requires_grad = requires_grad
         self.grad = np.zeros_like(self.data) if requires_grad else None
+        self._detached_by_no_grad = detached_by_no_grad and not requires_grad
 
         # Computational graph bookkeeping
-        self._children = set(_children)
+        self._children = set(children)
         self._op = _op
         self._backward = lambda: None  # filled by each op
 
@@ -150,17 +172,16 @@ class Tensor:
         Raises
         ------
         RuntimeError
-            If this tensor carries no gradient while recording is disabled.
-            Differentiating a graph that was built outside the block is still
-            allowed; this only catches the common mistake of building the
-            forward pass *inside* ``no_grad()`` and then expecting gradients.
+            If this tensor was produced by an operation while recording was
+            disabled. The creation provenance is retained after leaving the
+            block, while explicit constants remain intentional no-ops.
         """
         if not self.requires_grad:
-            if not is_grad_enabled():
+            if self._detached_by_no_grad:
                 raise RuntimeError(
-                    "backward() called on a tensor with no gradient while grad "
-                    "recording is disabled; build the forward pass outside "
-                    "no_grad() (or re-enable it with enable_grad())"
+                    "backward() called on a tensor detached by no_grad(); "
+                    "build the forward pass outside no_grad() (or re-enable "
+                    "it with enable_grad())"
                 )
             return
 

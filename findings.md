@@ -308,6 +308,86 @@
   assertions. That re-runs all 14 in-window guarantees under a sliding window for free, and it keeps
   the claim honest: round 8 asserts nothing new, it asserts round 4's claim under harder conditions.
 
+## Round 9 Findings (inference-mode and mask-contract audit)
+- The user's requested `no_grad` and fully-masked attention-row semantics are already implemented
+  in round 2 and are load-bearing for later gradient recomputation and ragged-batch features.
+- Session catch-up reported no unsynchronized work, so repository state and persistent planning
+  records are aligned before this audit begins.
+- The repository is on `checkpoint/rounds-1-7` at the dedicated round-8 commit `5195930`;
+  before this round the worktree was clean, and only the three planning files are currently modified.
+- Current handoff documentation records 324 warnings-as-errors tests. It exposes the exact grad-mode
+  lifecycle invariants and defines a fully masked query as zero attention weights whose projected
+  result is the output bias.
+- Public `infer`/`generate` paths already operate on NumPy arrays. Training-script evaluation uses
+  graph-based `forward` under `no_grad()`, so it suppresses retained graphs but remains a candidate
+  for parity-checked routing through the faster NumPy inference implementation.
+- Fresh baseline verification passes all 324 tests with warnings promoted to errors.
+- Four boundary defects are now reproduced:
+  1. A result detached inside `no_grad()` silently no-ops when `backward()` is called after leaving
+     the block (`x.grad` remains zero), because the error depends on the *current* mode rather than
+     how the tensor was created.
+  2. A single guard instance shared across two threads restores the wrong modes under interleaved
+     exits (`True` becomes `False` in one thread and an outer `False` becomes `True` in the other),
+     because its `_previous` list is shared even though the global flag is thread-local.
+  3. `evaluate_batches` leaves a previously training model in eval mode when its sampler raises.
+  4. Standalone `SelfAttention.infer` accepts an oversized key bias and silently expands a batch
+     from 1 to 2; a `+inf` bias emits an invalid-subtract warning and produces non-finite output.
+- The intended all-`-inf` standalone inference case already works: its output is bitwise equal to
+  the broadcast output-projection bias. The fix should preserve this convention while rejecting
+  only malformed additive biases.
+- Multi-head `forward` documents a `(B,T,T)` custom mask, but NumPy right-aligned broadcasting
+  interprets three dimensions as `(H,T,T)`. With `B=H=2` this silently applies each batch mask to
+  a head instead (measured max output delta 0.5428774883 versus `mask[:,None,:,:]`); with `B!=H`
+  it rejects the documented shape. Three-dimensional multi-head masks must be normalized by
+  inserting the head axis before validation in both forward and inference.
+- Training masks are documented as right-padded but `_validate_keep_mask` checks only shape and
+  0/1 values. A left-padded learned-position run was silently accepted and its last-token logits
+  differed from the truly unpadded prompt by 0.1299070464. Forward should reject any 0-to-1
+  transition while continuing to allow an all-padding row for ignored targets.
+- `GPT.infer` validates only cache-list length. Missing `v`, wrong rank/head width/batch, or
+  inconsistent past lengths fail later as `KeyError` or opaque broadcasting errors. Because the
+  attention mask shape is derived from that cache length, structural cache validation belongs at
+  this public boundary.
+- Constant-only Tensor operations outside `no_grad()` currently retain parent references despite
+  having no gradient or backward closure. Dropping parents whenever an op result cannot require a
+  gradient matches the no-grad lifecycle and avoids needless retention without changing values.
+- README already describes right padding and delayed inference-mode behavior, but its "mistakes are
+  loud" line currently promises an error only *inside* the disabled block. Round 9 must update that
+  wording to creation provenance, document direct inference-bias validation and 3-D batch-mask axis
+  semantics, and synchronize per-module/total test counts after collection.
+- The handoff invariant says right padding is enforced even though the current code does not enforce
+  it. This round closes the code/document mismatch rather than weakening the documented invariant.
+- Full async grad-mode semantics require task-local `ContextVar` state, and lazy generators need a
+  guard around each resume. That expansion is deferred; round 9 will reject coroutine/generator
+  decorator targets explicitly so unsupported use cannot silently build a graph.
+- Grad-mode hardening is implemented: suppression provenance survives delayed backward and detached
+  chains, non-gradient op results drop parents, shared guards use per-thread restoration stacks, and
+  lazy async/generator decorators fail explicitly. The focused grad/recompute suite passes 48 tests;
+  an intermediate full run passed 332 tests.
+- Attention hardening is implemented through one graph/NumPy mask validator. A 3-D multi-head mask
+  is normalized as batch-major without detaching a Tensor mask, invalid inference biases fail early,
+  and both SelfAttention and MultiHeadAttention retain exact projection-bias output for fully masked
+  inference rows. The expanded transformer module passes 90 tests.
+- Evaluation now restores train/eval mode in `finally`; training masks enforce right padding before
+  dropout consumes RNG; and `GPT.infer` validates every cache layer before deriving past length.
+- All original failure probes now assert the corrected behavior. The five affected modules pass
+  229 tests with warnings as errors; source/tests compile and the diff has no whitespace defects.
+- Pytest now collects 372 tests. Changed module counts are: Transformer 92, validation 58, data 31,
+  and grad mode 29; all other module counts remain unchanged.
+- README, `CLAUDE.md`, and `PROJECT_STATE.md` now describe round-9 provenance, synchronous-only
+  decorators, shared mask normalization, enforced padding, cache validation, and the 372-test map.
+- Final independent review found no high/medium regression. Its one actionable low gap is cache
+  content validation: correct-shape object arrays fail later with an opaque ufunc error, while NaN
+  arrays are accepted and return non-finite logits; standalone attention also leaks `KeyError` for
+  malformed direct caches. Both public boundaries now reject malformed, non-real, or non-finite
+  caches explicitly.
+- The final expanded suite now collects and passes 380 tests with warnings as errors. Transformer
+  coverage is 98 tests and validation coverage is 60; compilation, whitespace, and stale-count
+  scans pass.
+- A wheel built from the final cache-hardened tree, installed into an isolated venv, imported every
+  intended module, exercised delayed no-grad and invalid-cache behavior from site-packages, and ran
+  `tiny-train --help`. The generated audit venv, wheel, build tree, and egg-info were then removed.
+
 ## Issues Encountered
 | Issue | Resolution |
 |-------|------------|

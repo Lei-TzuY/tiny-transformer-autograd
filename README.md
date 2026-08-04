@@ -54,14 +54,14 @@ src/
 └── benchmark.py        # Inference throughput benchmark
 tests/
 ├── test_autograd.py    # Numerical/VJP gradient checks and graph lifecycle (63 tests)
-├── test_transformer.py # Shape, gradients, masks, padded generation (77 tests)
+├── test_transformer.py # Shape, gradients, masks, padded generation (98 tests)
 ├── test_training.py    # Scheduler, tokenizer, checkpoint, LoRA tests (28 tests)
-├── test_grad_mode.py   # no_grad graph suppression and scope semantics (21 tests)
-├── test_data.py        # document corpora, padded batching, training CLI (23 tests)
+├── test_grad_mode.py   # no_grad graph suppression and scope semantics (29 tests)
+├── test_data.py        # document corpora, padded batching, training CLI (31 tests)
 ├── test_recompute.py   # gradient checkpointing equivalence and memory (19 tests)
 ├── test_features.py    # Integration: KV-cache, generation, ragged batches (15 tests)
 ├── test_modern.py      # RMSNorm, RoPE, SwiGLU, AdamW, grad accumulation (37 tests)
-└── test_validation.py  # Public API and invalid-input regression tests (41 tests)
+└── test_validation.py  # Public API and invalid-input regression tests (60 tests)
 plot_loss.py            # Plot training curves from a --log-jsonl file
 CLAUDE.md               # Working rules, commands, and the invariants that must hold
 PROJECT_STATE.md        # Architecture map, design decisions, baseline, limitations
@@ -97,7 +97,7 @@ python src/train.py --resume run/ckpt.pkl --iters 2000
 # Generate text from a saved checkpoint (no training)
 python src/train.py --resume run/ckpt.pkl --generate-only --sample 400
 
-# Run all 324 tests
+# Run all 380 tests
 pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
@@ -213,7 +213,10 @@ so their graph-tracked `forward()` and NumPy `infer()` paths agree.
 the score shape (`(T, T)`, `(B, T, T)`, or `(B, H, T, T)`), as a Tensor or a
 plain NumPy array: `0.0` keeps a key, `-inf` removes it. A mask that is larger
 than the scores, does not broadcast, or contains NaN/`+inf` is rejected with an
-explicit error instead of quietly producing NaN.
+explicit error instead of quietly producing NaN. For multi-head attention, a
+3-D mask always means batch-major `(B, T, T)` and is normalized to
+`(B, 1, T, T)`; use an explicit 4-D shape for per-head masks. The NumPy
+`infer(..., key_bias=...)` path applies the same shape/value validation.
 
 **Fully masked rows** — if every key of a query row is `-inf` (a padded query, or
 an over-restrictive custom mask) there is no distribution to normalise. Both
@@ -252,7 +255,8 @@ parameter gradient match a run on the unpadded sequence. An all-`ignore_index`
 batch raises rather than dividing by zero.
 
 For training, positions are numbered from 0, so **pad on the right** — the
-forward pass assigns position *i* to slot *i*.
+forward pass assigns position *i* to slot *i*. The API rejects left padding and
+interior holes instead of silently shifting learned positions.
 
 The training CLI uses exactly this path for document corpora:
 
@@ -266,8 +270,9 @@ Each line (or JSON record) is one document. Documents are truncated to
 without its first — and anything shorter than two tokens is dropped and
 reported. A sampled batch is right-padded to its longest document, with the
 mask and `ignore_index` doing the rest, so **a padded batch's loss equals the
-mean of scoring each document on its own** (asserted in `test_data.py`, along
-with the gradients being unchanged when the padding content is scrambled). The
+scored-token-weighted mean of the per-document losses** (asserted in
+`test_data.py`, along with the gradients being unchanged when the padding
+content is scrambled). The
 train/validation split is over documents rather than tokens, and the tokenizer
 is built from the document text — not the JSON scaffolding around it, which
 would otherwise put braces and quotes in the vocabulary.
@@ -325,7 +330,9 @@ which is what makes the whole scheme work.
 for already-processed positions, giving ~1.5× speedup for autoregressive
 generation.  The cache is automatically reset when the context window fills,
 because learned absolute positional embeddings would be invalid after a
-sliding-window crop.
+sliding-window crop. Caller-provided caches are validated per layer for their
+`k`/`v` structure, batch/head dimensions, head width, finite real values, and
+one common past length before mask or position shapes are derived.
 
 **Weight tying** — `head.weight` and `token_emb.weight` are the same Python
 object (GPT-2 style).  Gradients from both the embedding lookup and the output
@@ -363,8 +370,10 @@ row as zero weights (see [Architecture](#architecture)).
 ### Inference mode: `no_grad()`
 
 Every op stores its parents and keeps a backward closure alive, and that closure
-holds the forward intermediates it will need. For evaluation or generation that
-bookkeeping is pure overhead, so wrap the work in `no_grad()`:
+holds the forward intermediates it will need. For graph-based evaluation or a
+manual Tensor forward that bookkeeping is pure overhead, so wrap the work in
+`no_grad()`. Built-in `infer()` and `generate()` are already NumPy-only and do
+not construct an autograd graph:
 
 ```python
 from engine.grad_mode import no_grad, enable_grad, is_grad_enabled
@@ -378,20 +387,26 @@ def score(batch):
     return ops.cross_entropy(model(batch[0]), batch[1]).data
 ```
 
-- **Op results** created while recording is off come back detached.
+- **Op results** created while recording is off come back detached. Results
+  that cannot require gradients also discard their parents instead of retaining
+  a useless constant-only graph.
 - **Leaves are untouched:** `Tensor(x, requires_grad=True)` inside a `no_grad()`
   block stays trainable, so constructing a model there does not freeze it.
 - **Nesting works:** `enable_grad()` re-enables recording inside a `no_grad()`
   block, blocks restore the previous mode even if the body raises, and the flag
-  is thread-local.
-- **Mistakes are loud:** calling `backward()` on a detached tensor inside a
-  `no_grad()` block raises instead of silently doing nothing. Differentiating a
-  graph that was built *outside* the block is still allowed.
+  and reusable guard restoration stacks are thread-local.
+- **Mistakes remain loud after the scope ends:** calling `backward()` on an op
+  result detached by `no_grad()` raises based on creation provenance. Explicit
+  constants remain intentional no-ops, and differentiating a graph built
+  *outside* the block is still allowed inside it.
+- **Decorators are synchronous:** coroutine and generator targets are rejected
+  explicitly; full task-local asynchronous grad mode is outside this tiny API.
 
 Measured on a 4-layer, `d_model=128`, `ctx=64`, batch-8 forward + loss: **1.88×
 faster** (1.10 s → 0.59 s for 10 passes) and 281 fewer live tensors per pass.
 `train.py`'s validation loop uses it — `eval()` only disables dropout, while
-`no_grad()` is what stops the graph from being built.
+`no_grad()` is what stops the graph from being built. A validation exception
+restores both grad mode and the caller's previous train/eval mode.
 
 ### Gradient checkpointing: `recompute()`
 

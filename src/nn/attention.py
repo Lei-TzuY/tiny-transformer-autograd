@@ -210,6 +210,11 @@ class SelfAttention(Module):
         ``key_bias`` is an additive per-key bias broadcastable to the
         (batch, query, key) scores — used to hide padded keys.
         """
+        cache = _prepare_cache(
+            cache,
+            batch=x.shape[0],
+            width=self.d_model,
+        )
         Q = self.W_q.infer(x)
         K = self.W_k.infer(x)
         V = self.W_v.infer(x)
@@ -220,6 +225,12 @@ class SelfAttention(Module):
         scores = Q @ np.swapaxes(K, -1, -2) * self.scale
         scores += _causal_mask(x.shape[1], K.shape[1], past_len)
         if key_bias is not None:
+            key_bias = _prepare_mask(
+                key_bias,
+                scores.shape,
+                as_tensor=False,
+                name="attention key_bias",
+            )
             scores = scores + key_bias
         weights = _softmax(scores)
         return self.out_proj.infer(weights @ V), {"k": K, "v": V}
@@ -313,6 +324,12 @@ class MultiHeadAttention(Module):
         """
         B, T, C = x.shape
         H, d_k = self.num_heads, self.d_k
+        cache = _prepare_cache(
+            cache,
+            batch=B,
+            width=d_k,
+            heads=H,
+        )
 
         Q = self.W_q.infer(x).reshape(B, T, H, d_k).transpose(0, 2, 1, 3)
         K = self.W_k.infer(x).reshape(B, T, H, d_k).transpose(0, 2, 1, 3)
@@ -334,6 +351,12 @@ class MultiHeadAttention(Module):
         scores = Q @ K.transpose(0, 1, 3, 2) * self.scale
         scores += _causal_mask(T, K.shape[2], past_len)
         if key_bias is not None:
+            key_bias = _prepare_mask(
+                key_bias,
+                scores.shape,
+                as_tensor=False,
+                name="attention key_bias",
+            )
             scores = scores + key_bias
         weights = _softmax(scores)
         attn = weights @ V
@@ -347,32 +370,113 @@ def _causal_mask(query_len, key_len, past_len):
     return np.where(key_positions > query_positions, -np.inf, 0.0)
 
 
-def _prepare_mask(mask, scores_shape):
-    """
-    Validate an additive attention mask and return it as a Tensor.
+def _prepare_cache(cache, *, batch, width, heads=None):
+    """Validate a standalone attention KV cache before using it."""
+    if cache is None:
+        return None
+    if not isinstance(cache, dict):
+        raise TypeError("attention cache must be a dictionary")
+    if "k" not in cache or "v" not in cache:
+        raise ValueError("attention cache must contain 'k' and 'v'")
 
-    Accepts a Tensor or anything NumPy can turn into a float array. The mask
-    must broadcast *up to* the score shape (it may be smaller, never larger),
-    and may not contain NaN or +inf, which no masking scheme can mean and which
-    would make the softmax NaN rather than simply dropping a key.
+    key, value = cache["k"], cache["v"]
+    if not isinstance(key, np.ndarray) or not isinstance(value, np.ndarray):
+        raise TypeError("attention cache k and v must be NumPy arrays")
+    expected_rank = 3 if heads is None else 4
+    if key.ndim != expected_rank or value.ndim != expected_rank:
+        raise ValueError(
+            f"attention cache k and v must have rank {expected_rank}"
+        )
+    if key.shape != value.shape:
+        raise ValueError("attention cache k and v must have equal shapes")
+    if key.shape[0] != batch:
+        raise ValueError(
+            f"attention cache batch dimension must be {batch}, "
+            f"got {key.shape[0]}"
+        )
+    if heads is not None and key.shape[1] != heads:
+        raise ValueError(
+            f"attention cache head count must be {heads}, got {key.shape[1]}"
+        )
+    if key.shape[-1] != width:
+        raise ValueError(
+            f"attention cache feature dimension must be {width}, "
+            f"got {key.shape[-1]}"
+        )
+    if not all(
+        np.issubdtype(array.dtype, np.number)
+        and not np.issubdtype(array.dtype, np.complexfloating)
+        for array in (key, value)
+    ):
+        raise TypeError("attention cache k and v must have real numeric dtypes")
+    if not np.isfinite(key).all() or not np.isfinite(value).all():
+        raise ValueError("attention cache k and v must contain only finite values")
+    return cache
+
+
+def _prepare_mask(
+    mask,
+    scores_shape,
+    *,
+    as_tensor=True,
+    name="attention mask",
+):
     """
-    mask = mask if isinstance(mask, Tensor) else Tensor(mask)
+    Normalize and validate an additive attention mask.
+
+    Forward calls receive a Tensor so a learnable additive bias remains in the
+    autograd graph; NumPy inference calls receive an ndarray.  A three-axis
+    mask for four-axis multi-head scores is the documented batch-major
+    ``(B, Q, K)`` form and is normalized to ``(B, 1, Q, K)``. Per-head masks
+    must therefore be explicit four-axis ``(B, H, Q, K)`` arrays, avoiding the
+    otherwise ambiguous case where ``batch == heads``.
+
+    The normalized mask must broadcast *up to* the score shape (it may be
+    smaller, never larger), and may not contain NaN or +inf, which no masking
+    scheme can mean and which would make the softmax NaN rather than simply
+    dropping a key. Negative infinity is valid and denotes a hidden key.
+    """
     scores_shape = tuple(scores_shape)
+    if as_tensor:
+        if not isinstance(mask, Tensor):
+            try:
+                mask = Tensor(mask)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(f"{name} must contain numeric values") from exc
+        if len(scores_shape) == 4 and mask.ndim == 3:
+            mask = ops.reshape(
+                mask,
+                (mask.shape[0], 1, mask.shape[1], mask.shape[2]),
+            )
+        values = mask.data
+    else:
+        try:
+            values = (
+                mask.data
+                if isinstance(mask, Tensor)
+                else np.asarray(mask, dtype=np.float64)
+            )
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"{name} must contain numeric values") from exc
+        if len(scores_shape) == 4 and values.ndim == 3:
+            values = values[:, np.newaxis, :, :]
+        mask = values
+
     try:
         broadcast = np.broadcast_shapes(mask.shape, scores_shape)
     except ValueError as exc:
         raise ValueError(
-            f"attention mask shape {mask.shape} does not broadcast to "
+            f"{name} shape {mask.shape} does not broadcast to "
             f"attention scores {scores_shape}"
         ) from exc
     if broadcast != scores_shape:
         raise ValueError(
-            f"attention mask shape {mask.shape} is larger than attention "
+            f"{name} shape {mask.shape} is larger than attention "
             f"scores {scores_shape}"
         )
-    if not np.all(np.isfinite(mask.data) | np.isneginf(mask.data)):
+    if not np.all(np.isfinite(values) | np.isneginf(values)):
         raise ValueError(
-            "attention mask entries must be finite biases or -inf "
+            f"{name} entries must be finite biases or -inf "
             "(NaN and +inf are not valid masks)"
         )
     return mask

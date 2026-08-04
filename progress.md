@@ -322,6 +322,54 @@
   - `findings.md`
   - `progress.md`
 
+## Session: 2026-08-03
+
+### Phase 13: Round 9 — Inference-mode and mask-contract audit
+- **Status:** complete
+- Actions taken:
+  - Re-read the complete planning-with-files instructions and restored all existing planning context.
+  - Ran the session catch-up helper; it reported no unsynchronized context.
+  - Confirmed from the persistent plan that both requested features shipped in round 2 and now underpin later ragged-batch, generation, and recomputation work.
+  - Opened a fresh audit phase to verify the current implementation and extend it only where concrete gaps remain.
+  - Confirmed the round-8 checkpoint commit and a clean pre-round worktree; only planning artifacts changed after opening phase 13.
+  - Read the handoff invariants and mapped every grad-mode, inference, mask, and fully-masked-row reference across source, tests, and README.
+  - Ran the fresh baseline suite with warnings as errors: all 324 tests passed.
+  - Read the grad-mode/Tensor/recompute implementation and the attention/GPT/train inference paths; recorded four concrete lifecycle and direct-API candidates for reproduction.
+  - Reproduced all four candidates with one deterministic probe: post-scope detached backward silently no-ops, a shared guard crosses thread restoration stacks, evaluation exceptions leak eval mode, and standalone inference accepts poisoned/oversized key biases.
+  - Independent mask review reproduced two contract bugs: documented `(B,T,T)` multi-head masks are misread as per-head masks, and documented right-padding is not enforced in `GPT.forward`.
+  - Recorded missing public KV-cache structure validation and constant-only Tensor parent retention as bounded lifecycle hardening candidates.
+  - Inspected all public documentation sections and identified the exact no-grad, custom-mask, right-padding, cache, suite-count, and handoff text that must be synchronized after implementation.
+  - Integrated and reviewed the grad-mode/Tensor lifecycle implementation and eight new regressions; focused tests passed 48 and an intermediate full suite passed 332.
+  - Integrated and reviewed shared forward/inference mask validation, batch-major 3-D normalization, and thirteen transformer regressions; the transformer module passed 90 tests.
+  - Integrated evaluation exception safety, enforced training right padding, and added structural KV-cache validation with twenty-five parameterized boundary regressions.
+  - Re-ran every original failure probe against the integrated code; all now pass.
+  - Ran the five affected test modules: 229 passed with warnings as errors. Byte compilation and `git diff --check` also passed.
+  - Collected exactly 372 tests and recorded every per-module count plus current source line counts for documentation synchronization.
+  - Synchronized README, invariants, and the cold-start project snapshot with round-9 behavior, limitations, source sizes, and all per-module test counts.
+  - Closed the final low-severity review gap by validating finite real-valued KV caches in standalone attention and GPT, with eight additional regressions.
+  - Ran the final integrated suite: 380 passed with warnings as errors; collection also reports exactly 380. Compilation, diff, and stale-document-count checks passed.
+  - Built the final wheel, force-installed it in an isolated venv with NumPy available from system site packages, verified imports plus round-9 behavior, and ran the installed CLI help.
+  - Resolved and removed only the three generated packaging targets: `.tmp-round9-package-audit/`, `build/`, and `src/tiny_transformer.egg-info/`; all are reproducible and contained no user data.
+  - Received final independent lifecycle, mask/cache, and delivery reviews; all reported no remaining actionable issue after the finite-cache hardening.
+  - Removed the generated `.pytest_cache` and confirmed no packaging/test artifacts or untracked files remain.
+- Files created/modified:
+  - `.github/workflows/tests.yml`
+  - `README.md`
+  - `CLAUDE.md`
+  - `PROJECT_STATE.md`
+  - `src/engine/grad_mode.py`
+  - `src/engine/tensor.py`
+  - `src/nn/attention.py`
+  - `src/nn/transformer.py`
+  - `src/train.py`
+  - `tests/test_data.py`
+  - `tests/test_grad_mode.py`
+  - `tests/test_transformer.py`
+  - `tests/test_validation.py`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
 ## Test Results
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
@@ -405,6 +453,14 @@
 | Round 8 CLI anchor | The recorded anchor command | Training trajectory unchanged | `3.6106/3.5812/3.5234`, `gnorm 2.677/2.654/2.547` — exact match | PASS |
 | Round 8 test collection | `pytest --collect-only -q` per file | Documented counts match collection | 63/23/15/21/37/19/28/77/41 = 324 | PASS |
 
+| Round-9 baseline | `python -m pytest -q -W error` | Existing advanced suite stays green | 324 passed in 1.42s | PASS |
+| Original round-9 failure probes after fixes | Delayed backward, shared guard, eval failure, invalid masks/cache | Every former failure is rejected/restored explicitly | All probes passed | PASS |
+| Final affected suites | Grad/recompute/transformer/data/validation | All focused lifecycle and mask behavior passes | 229 passed in 0.76s before final cache additions; cache suites 158 passed after | PASS |
+| Final complete suite | `python -m pytest -q -W error` | Entire delivered suite passes warning-free | 380 passed in 1.14s | PASS |
+| CLI trajectory anchor | Seeded 3-step default trainer command | Exact round-7 loss/val/lr/gnorm values | All three lines reproduced exactly | PASS |
+| Final installed wheel | Build, force-install, imports, round-9 probes, `tiny-train --help` | Current tree works outside source injection | All checks passed | PASS |
+| Final artifact/status audit | Build/dist/venv/egg-info/wheel/pytest cache + untracked scan | No generated delivery artifacts or untracked files | None found | PASS |
+
 ## Error Log
 | Timestamp | Error | Attempt | Resolution |
 |-----------|-------|---------|------------|
@@ -424,11 +480,22 @@
 | 2026-07-31 | A scripted replace of `_print_sample(model, tokenizer, text, args)` asserted 3 occurrences and found 4 | 1 | The fourth was the `def` line itself; replaced only call sites (trailing newline) and renamed the parameter separately. |
 
 
+| 2026-08-03 | Phase 13 planning patch matched a console-garbled em dash in the phase heading | 1 | Re-read exact headings with `rg` and patched against stable section boundaries. |
+| 2026-08-03 | Batched plan/test inspection treated ripgrep's normal no-match exit code as fatal | 1 | Kept the returned test evidence and reran the plan read separately with optional-search no-match handling. |
+| 2026-08-03 | Round-9 multi-document patch used a non-exact wrapped `PROJECT_STATE.md` sentence | 1 | Split updates per file and used stable ASCII heading boundaries. |
+| 2026-08-03 | Second `PROJECT_STATE.md` patch matched a console-rendered Unicode baseline separator | 1 | Switched to small ASCII-only replacements and heading-anchored paragraph updates. |
+| 2026-08-03 | Optional `PROJECT_STATE.md` cleanup again depended on Unicode heading context | 1 | Kept the harmless separator and limited the retry to ASCII contract text. |
+| 2026-08-03 | Installed-wheel smoke used `--no-deps` in a venv without NumPy | 1 | Recreate only the generated venv with system site packages and reuse the successfully built wheel. |
+| 2026-08-03 | Policy rejected combined computed-path verification and recursive venv removal | 1 | Resolve the target read-only, then remove the exact literal path in a separate native PowerShell command. |
+| 2026-08-03 | Truncating installed CLI help closed stdout early and produced exit -1 after valid output | 1 | Rerun complete help redirected to null and emit a separate success marker. |
+| 2026-08-03 | Cache-hardening planning patch used a non-exact progress-log row | 1 | Split the update by file and re-read the exact row before patching it. |
+| 2026-08-03 | Final artifact scan found ignored `.pytest_cache` after the full suite | 1 | Resolve and explicitly remove the generated cache, then rerun status/artifact checks without rerunning pytest afterward. |
+
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Round 7 complete: six rounds of work are committed as a checkpoint, and `CLAUDE.md` plus `PROJECT_STATE.md` carry the architecture, invariants, baseline, limitations, and next candidates for a cold-start session. |
-| Where am I going? | Hand off a tested teaching project. Remaining non-blocking extensions, ranked in `PROJECT_STATE.md`: sliding-window decoding for masked runs, multi-output `recompute`, faster evaluation through the `infer` path, and token-weighted document perplexity. |
+| Where am I? | Round 9 complete: inference lifecycle, mask semantics, padding, evaluation restoration, and every public KV-cache boundary are hardened and documented. |
+| Where am I going? | Hand off a tested teaching project. Remaining non-blocking extensions are ranked in `PROJECT_STATE.md`, led by faster decoding after a context-window crop. |
 | What's the goal? | Improve the project materially and prove the result with tests, packaging, and documentation. |
-| What have I learned? | Each round enabled the next: round 2's masked-row definition keeps an all-padding row finite in round 3 and a left-padded row's first query finite in round 4, and round 2's `no_grad`/`enable_grad` pair is exactly the primitive round 5's recomputation needed. The subtle failures are the ones a naive implementation hides — a replay differentiating into the outer graph silently discards a residual's gradient, and a replay drawing fresh dropout masks silently differentiates a different function. Measuring beats asserting "close enough": padded-vs-unpadded logits differ by exactly 0.0. |
-| What have I done? | Hardened autograd and attention, made checkpoint restore reproducible and transactional, repaired packaging, added `no_grad` graph suppression, defined masked-row behavior, added ragged-batch training, left-padded batched generation, and gradient checkpointing, expanded tests to 301, and synchronized CI/docs. |
+| What have I learned? | Current mode cannot identify a tensor's creation history; NumPy broadcasting can silently exchange batch and head semantics; and shape-valid caches still need dtype/finiteness checks. Strong boundary tests caught all three. |
+| What have I done? | Added suppression provenance and thread-safe guards, pruned constant graphs, unified graph/NumPy masks, enforced padding, made evaluation exception-safe, validated caches, expanded the suite to 380, and verified the installed wheel/CLI. |

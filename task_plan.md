@@ -4,7 +4,7 @@
 Assess the current project honestly, implement the highest-value missing capabilities and quality improvements, and leave the repository with verified behavior, tests, and clear documentation.
 
 ## Current Phase
-Complete (round 8: sliding-window decoding for masked runs)
+Complete (round 9: inference-mode and mask-contract hardening)
 
 ## Phases
 
@@ -122,6 +122,15 @@ Complete (round 8: sliding-window decoding for masked runs)
 - [x] Measure the cost of decoding past the window and record it as the next candidate
 - **Status:** complete
 
+### Phase 13: Round 9 — Inference-mode and mask-contract audit
+- [x] Verify the existing `no_grad` and fully-masked-row implementations against their documented contracts
+- [x] Audit every public inference/evaluation entry point for accidental graph construction
+- [x] Audit custom attention-mask normalization, broadcasting, and fully-masked behavior across training and cached inference
+- [x] Implement any confirmed lifecycle or mask-contract gaps without changing default numerical behavior
+- [x] Add focused regression/integration tests and synchronize public documentation
+- [x] Run the complete quality, packaging, and artifact-hygiene checks
+- **Status:** complete
+
 ## Key Questions
 1. Which correctness or capability gaps remain in the current autograd engine?
 2. Which Transformer features are missing for a coherent tiny-but-real implementation?
@@ -171,6 +180,15 @@ Complete (round 8: sliding-window decoding for masked runs)
 | Round 8: keep the existing cache-drop trigger | Dropping a full cache is exactly what forces the re-prefill that renumbers the window. Reusing it means the masked path inherits an already-tested reset rule instead of adding a second one. |
 | Round 8: accept prompts longer than `context_len` | It falls out of cropping rather than being added: the first prefill already crops, and the unmasked path has always accepted them. Refusing would have been an extra rule with no reason behind it. |
 | Round 8: test by subclassing the round-4 test class | The claim is that round 4's equivalence survives the crop, not a new claim, so re-running the same assertions with a small `context_len` verifies exactly that and cannot drift from the original wording. |
+| Round 9: remember whether an op result was detached by grad mode | Current mode at `backward()` time cannot reveal how a tensor was created; provenance lets a delayed misuse raise while preserving the project's intentional no-op for explicit constants. |
+| Round 9: make each guard's restoration stack thread-local | The enabled flag is already per-thread, but a shared guard instance can interleave exits; its saved previous modes must have the same isolation. |
+| Round 9: share the additive-mask contract across forward and standalone inference | Both public paths accept additive masks and promise the same fully-masked behavior, so shape and value validation must not stop at the graph path. |
+| Round 9: restore evaluation mode in `finally` | Validation failures must not leak `eval()` into the caller's subsequent training loop. |
+| Round 9: interpret a 3-D multi-head mask as `(B,T,T)` | This is the documented public shape; per-head masks remain available unambiguously as `(1,H,T,T)` or `(B,H,T,T)`. |
+| Round 9: enforce right padding at training forward | Learned absolute positions make left/interior padding numerically different from an unpadded sequence, so silently accepting it violates the documented equivalence. |
+| Round 9: validate caller-provided KV caches before using their length | Mask and position validation depend on one coherent past length; malformed per-layer structures should fail at the public boundary, not deep in NumPy broadcasting. |
+| Round 9: reject async/generator decorators explicitly | A synchronous wrapper disables recording only while creating a lazy coroutine/generator, not while its body runs; a clear unsupported error is safer than silently recording a graph. |
+| Round 9: require finite real-valued KV caches at every public inference boundary | Correct shapes are insufficient: object arrays fail opaquely and NaNs poison logits, so standalone attention and GPT should reject both before attention math. |
 
 ## Acceptance Criteria
 - Matmul gradients pass finite differences for singleton batch broadcasting and all 1-D NumPy matmul combinations.
@@ -258,6 +276,29 @@ Complete (round 8: sliding-window decoding for masked runs)
 - Round 8: unmasked generation and masked generation inside the window are byte-identical to
   the previous round across architectures, cache modes, strategies, and over-long prompts.
 - Round 8: the CLI regression anchor reproduces exactly.
+- Round 9: an op result created under `no_grad()` raises on `backward()` both inside and after
+  the disabled scope; explicit constant leaves remain a no-op, and an outer recorded graph may
+  still be differentiated inside `no_grad()`.
+- Round 9: one guard instance can be shared by interleaving threads without either thread restoring
+  the other's previous mode; ordinary nesting, recursion, decorators, and exception restoration stay green.
+- Round 9: standalone attention inference rejects non-broadcastable, oversized, NaN, and `+inf`
+  key biases with explicit errors, while valid broadcast shapes and all-`-inf` rows retain the
+  documented zero-weight/output-bias behavior.
+- Round 9: evaluation restores the caller's exact training/eval mode even when sampling or model
+  execution raises, and grad recording is enabled again afterward.
+- Round 9: constant-only op results retain no parents, and delayed no-grad errors do not prevent
+  such constants from remaining intentional backward no-ops.
+- Round 9: documented `(B,T,T)` multi-head masks behave exactly like `(B,1,T,T)`, including when
+  `batch == heads`; explicit 4-D per-head masks remain supported.
+- Round 9: `GPT.forward` rejects left padding and interior holes while accepting right padding and
+  all-padding rows, and `GPT.infer` rejects malformed or inconsistent per-layer KV caches before
+  deriving mask/position shapes.
+- Round 9: decorator use on coroutine, generator, or async-generator functions fails immediately
+  with a clear sync-only message instead of appearing to disable recording while doing nothing.
+- Round 9: standalone Self/MultiHead attention and GPT reject cache entries that are malformed,
+  non-real/non-numeric, or non-finite, while caches returned by valid inference remain accepted.
+- Round 9: all pre-existing numerical paths remain bitwise unchanged for valid inputs, and the
+  complete warnings-as-errors suite, byte compilation, packaging smoke, and diff checks pass.
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
@@ -273,6 +314,17 @@ Complete (round 8: sliding-window decoding for masked runs)
 | Final status grep used a literal newline without ripgrep multiline mode | 1 | Rerun with a simple status-only expression that does not span lines. |
 | Round 2 decorator form raised `TypeError` because `self.__class__(self.mode)` does not fit the zero-argument `no_grad`/`enable_grad` subclasses | 1 | Construct the base `set_grad_enabled(mode)` guard inside the wrapper instead of re-instantiating the subclass. |
 | Round 2 mask-validation test expected "larger than" for a `(1, 2, 4, 4)` mask | 1 | That is exactly the score shape and therefore valid; used `(2, 2, 4, 4)` for the too-large case and `(5, 5)` for the non-broadcastable case. |
+
+| Phase 13 planning patch matched a console-garbled em dash in the phase heading | 1 | Re-read exact headings with `rg` and patch against stable section boundaries instead. |
+| Batched plan/test inspection treated ripgrep's normal no-match exit code as a fatal batch error | 1 | Preserve partial results and rerun the plan read separately; use an explicit no-match handler for optional searches. |
+| Round-9 multi-document patch used a non-exact wrapped sentence in `PROJECT_STATE.md` | 1 | Split the documentation update per file and anchor the round insertion on stable ASCII headings. |
+| Second `PROJECT_STATE.md` batch patch matched a rendered Unicode separator in the baseline line | 1 | Use smaller ASCII-only patches and replace the baseline paragraph via surrounding headings. |
+| Optional `PROJECT_STATE.md` cleanup again depended on a Unicode round heading and wrapped context | 1 | Stop matching the heading; keep the harmless section separator and patch only ASCII contract text. |
+| Installed-wheel smoke used a dependency-free venv, so importing the package could not find NumPy | 1 | Keep the already verified wheel, recreate only the generated venv with system site packages, and rerun imports/CLI without downloading dependencies. |
+| Policy rejected a script combining computed-path verification with recursive venv deletion | 1 | Resolve the exact generated venv read-only first, then use a separate explicit literal-path PowerShell removal before recreating it. |
+| Installed CLI help was piped through `Select-Object -First`, closing stdout early and yielding exit -1 after valid output | 1 | Rerun the installed executable with complete help redirected to null, then print an independent success marker. |
+| Cache-hardening planning patch used a non-exact progress-log row | 1 | Split the update by file and inspect the exact progress row before patching it. |
+| Final artifact scan included pytest's ignored `.pytest_cache` and failed after an otherwise clean status | 1 | Resolve the exact cache directory, remove that generated test cache explicitly, then rerun the artifact/status scan. |
 
 ## Notes
 - Existing user changes must be preserved and unrelated files left untouched.

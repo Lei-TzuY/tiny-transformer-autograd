@@ -142,6 +142,34 @@ def test_gpt_accepts_a_well_formed_attention_mask():
     assert np.isfinite(logits.data).all()
 
 
+@pytest.mark.parametrize(
+    "mask",
+    [
+        np.array([[0, 1, 1, 1]]),
+        np.array([[1, 0, 1, 0]]),
+    ],
+)
+def test_gpt_forward_rejects_left_or_interior_padding(mask):
+    tokens = np.array([[0, 1, 2, 3]], dtype=np.int64)
+    with pytest.raises(ValueError, match="right-padded"):
+        _model().forward(tokens, attention_mask=mask)
+
+
+@pytest.mark.parametrize(
+    "mask",
+    [
+        np.array([[1, 1, 1, 1]]),
+        np.array([[1, 1, 0, 0]]),
+        np.array([[0, 0, 0, 0]]),
+    ],
+)
+def test_gpt_forward_accepts_right_padding_and_all_padding(mask):
+    tokens = np.array([[0, 1, 2, 3]], dtype=np.int64)
+    logits = _model().forward(tokens, attention_mask=mask)
+    assert logits.shape == (1, 4, 8)
+    assert np.isfinite(logits.data).all()
+
+
 def test_infer_attention_mask_must_cover_cached_keys():
     model = _model()
     tokens = np.array([[0, 1]], dtype=np.int64)
@@ -154,6 +182,99 @@ def test_infer_attention_mask_must_cover_cached_keys():
         np.array([[2]]), cache, attention_mask=np.ones((1, 3), dtype=np.int64)
     )
     assert np.isfinite(logits).all()
+
+
+@pytest.mark.parametrize(
+    ("cache", "error", "message"),
+    [
+        ({}, TypeError, "list or tuple"),
+        ([], ValueError, "one entry per transformer block"),
+        ([None], TypeError, "dictionary"),
+        ([{"k": np.zeros((1, 2, 1, 4))}], ValueError, "'k' and 'v'"),
+        (
+            [{"k": [[[[0.0] * 4]] * 2], "v": [[[[0.0] * 4]] * 2]}],
+            TypeError,
+            "NumPy arrays",
+        ),
+        (
+            [{"k": np.zeros((1, 2, 4)), "v": np.zeros((1, 2, 4))}],
+            ValueError,
+            "rank 4",
+        ),
+        (
+            [
+                {
+                    "k": np.zeros((1, 2, 1, 4)),
+                    "v": np.zeros((1, 2, 2, 4)),
+                }
+            ],
+            ValueError,
+            "equal shapes",
+        ),
+        (
+            [{"k": np.zeros((2, 2, 1, 4)), "v": np.zeros((2, 2, 1, 4))}],
+            ValueError,
+            "batch dimension",
+        ),
+        (
+            [{"k": np.zeros((1, 1, 1, 4)), "v": np.zeros((1, 1, 1, 4))}],
+            ValueError,
+            "head count",
+        ),
+        (
+            [{"k": np.zeros((1, 2, 1, 3)), "v": np.zeros((1, 2, 1, 3))}],
+            ValueError,
+            "head dimension",
+        ),
+        (
+            [
+                {
+                    "k": np.zeros((1, 2, 1, 4)).astype(object),
+                    "v": np.zeros((1, 2, 1, 4)).astype(object),
+                }
+            ],
+            TypeError,
+            "real numeric",
+        ),
+        (
+            [
+                {
+                    "k": np.full((1, 2, 1, 4), np.nan),
+                    "v": np.zeros((1, 2, 1, 4)),
+                }
+            ],
+            ValueError,
+            "finite values",
+        ),
+    ],
+)
+def test_infer_rejects_malformed_kv_cache(cache, error, message):
+    with pytest.raises(error, match=message):
+        _model().infer(np.array([[0]], dtype=np.int64), kv_cache=cache)
+
+
+def test_infer_rejects_inconsistent_cache_lengths_across_layers():
+    model = _model(num_layers=2)
+    cache = [
+        {"k": np.zeros((1, 2, 1, 4)), "v": np.zeros((1, 2, 1, 4))},
+        {"k": np.zeros((1, 2, 2, 4)), "v": np.zeros((1, 2, 2, 4))},
+    ]
+    with pytest.raises(ValueError, match="same past length"):
+        model.infer(np.array([[0]], dtype=np.int64), kv_cache=cache)
+
+
+def test_infer_accepts_tuple_cache_and_preserves_existing_entries():
+    model = _model()
+    _, cache = model.infer(np.array([[0, 1]], dtype=np.int64))
+    original_key = cache[0]["k"].copy()
+    original_value = cache[0]["v"].copy()
+
+    logits, updated = model.infer(np.array([[2]], dtype=np.int64), tuple(cache))
+
+    assert logits.shape == (1, 1, 8)
+    assert updated[0]["k"].shape == (1, 2, 3, 4)
+    np.testing.assert_array_equal(cache[0]["k"], original_key)
+    np.testing.assert_array_equal(cache[0]["v"], original_value)
 
 
 @pytest.mark.parametrize(
