@@ -13,14 +13,16 @@ import tempfile
 import traceback
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from engine.optim import Adam
+from engine.optim import Adam, AdamW
 from engine.scheduler import WarmupCosineScheduler
 from engine.checkpoint import read_checkpoint, restore_checkpoint, save_checkpoint
 from nn.transformer import GPT
 from tokenizer import build_tokenizer, tokenizer_from_state_dict, CharTokenizer, BPETokenizer
+from train import _resolve_optimizer_name, get_batch
 import engine.ops as ops
 
 
@@ -234,6 +236,206 @@ class TestCheckpoint:
         assert abs(loss_ref - loss_resumed) < 1e-8, (
             f"loss diverged after resume: {loss_ref:.6f} vs {loss_resumed:.6f}"
         )
+
+    def test_optimizer_type_is_saved_and_mismatch_is_rejected(self):
+        model, _ = self._small_model_and_opt()
+        optimizer = AdamW(model.parameters(), lr=1e-3, weight_decay=0.1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "adamw.pkl")
+            save_checkpoint(path, model, optimizer)
+            checkpoint = read_checkpoint(path)
+            assert checkpoint["format_version"] == 2
+            assert checkpoint["optimizer_type"] == "AdamW"
+
+            model2, _ = self._small_model_and_opt()
+            compatible = AdamW(model2.parameters())
+            restore_checkpoint(checkpoint, model2, compatible)
+
+            model3, incompatible = self._small_model_and_opt()
+            with np.testing.assert_raises_regex(ValueError, "optimizer type mismatch"):
+                restore_checkpoint(checkpoint, model3, incompatible)
+
+    def test_legacy_checkpoint_and_resume_optimizer_resolution(self):
+        model, optimizer = self._small_model_and_opt()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "legacy.pkl")
+            save_checkpoint(path, model, optimizer)
+            checkpoint = read_checkpoint(path)
+            checkpoint.pop("optimizer_type")
+            checkpoint.pop("format_version")
+            checkpoint.pop("rng_state")
+
+            model2, optimizer2 = self._small_model_and_opt()
+            restore_checkpoint(checkpoint, model2, optimizer2)
+
+        assert _resolve_optimizer_name(None, checkpoint) == "adam"
+        assert _resolve_optimizer_name(None, {"optimizer_type": "AdamW"}) == "adamw"
+        with np.testing.assert_raises_regex(ValueError, "conflicts"):
+            _resolve_optimizer_name("adam", {"optimizer_type": "AdamW"})
+
+    def test_future_checkpoint_version_is_rejected(self):
+        model, optimizer = self._small_model_and_opt()
+        state = {
+            "format_version": 999,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+        }
+        with np.testing.assert_raises_regex(ValueError, "format version"):
+            restore_checkpoint(state, model, optimizer)
+
+    def test_rng_state_continues_after_restore(self):
+        model, optimizer = self._small_model_and_opt()
+        np.random.seed(12345)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "rng.pkl")
+            save_checkpoint(path, model, optimizer)
+            expected = np.random.random(8)
+
+            np.random.seed(999)
+            model2, optimizer2 = self._small_model_and_opt()
+            restore_checkpoint(read_checkpoint(path), model2, optimizer2)
+            actual = np.random.random(8)
+
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_stochastic_training_step_matches_after_resume(self):
+        def make_training_state():
+            model = GPT(
+                vocab_size=10,
+                context_len=4,
+                d_model=8,
+                num_heads=2,
+                d_ff=16,
+                num_layers=1,
+                dropout=0.25,
+            )
+            optimizer = AdamW(model.parameters(), lr=2e-3, weight_decay=0.05)
+            scheduler = WarmupCosineScheduler(
+                optimizer, total_steps=10, warmup_steps=2
+            )
+            return model, optimizer, scheduler
+
+        data = np.arange(80, dtype=np.int64) % 10
+
+        def random_step(model, optimizer, scheduler, step):
+            scheduler.step(step)
+            x, y = get_batch(data, context_len=4, batch_size=3)
+            logits = model(x)
+            loss = ops.cross_entropy(logits, y)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            return x.copy(), y.copy(), float(loss.data)
+
+        np.random.seed(2026)
+        model, optimizer, scheduler = make_training_state()
+        for step in range(3):
+            random_step(model, optimizer, scheduler, step)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "stochastic.pkl")
+            save_checkpoint(path, model, optimizer, scheduler, step=3)
+
+            x_expected, y_expected, loss_expected = random_step(
+                model, optimizer, scheduler, 3
+            )
+            params_expected = {
+                name: parameter.data.copy()
+                for name, parameter in model.named_parameters()
+            }
+
+            np.random.seed(999)
+            resumed_model, resumed_optimizer, resumed_scheduler = make_training_state()
+            restore_checkpoint(
+                read_checkpoint(path),
+                resumed_model,
+                resumed_optimizer,
+                resumed_scheduler,
+            )
+            x_actual, y_actual, loss_actual = random_step(
+                resumed_model, resumed_optimizer, resumed_scheduler, 3
+            )
+
+        np.testing.assert_array_equal(x_actual, x_expected)
+        np.testing.assert_array_equal(y_actual, y_expected)
+        assert loss_actual == loss_expected
+        for name, parameter in resumed_model.named_parameters():
+            np.testing.assert_allclose(
+                parameter.data, params_expected[name], atol=1e-15, rtol=1e-15
+            )
+
+    def test_failed_restore_rolls_back_model_optimizer_scheduler_and_rng(self):
+        source_model, source_optimizer = self._small_model_and_opt()
+        source_scheduler = WarmupCosineScheduler(
+            source_optimizer, total_steps=20, warmup_steps=2
+        )
+
+        def assert_optimizer_state_equal(actual, expected):
+            assert actual.keys() == expected.keys()
+            for key, expected_value in expected.items():
+                actual_value = actual[key]
+                if isinstance(expected_value, list):
+                    for actual_array, expected_array in zip(
+                        actual_value, expected_value
+                    ):
+                        np.testing.assert_array_equal(actual_array, expected_array)
+                else:
+                    assert actual_value == expected_value
+
+        def assert_rng_equal(actual, expected):
+            assert actual[0] == expected[0]
+            np.testing.assert_array_equal(actual[1], expected[1])
+            assert actual[2:] == expected[2:]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "transactional.pkl")
+            save_checkpoint(
+                path,
+                source_model,
+                source_optimizer,
+                source_scheduler,
+                step=4,
+            )
+
+            for corruption in ("model", "optimizer", "scheduler", "rng"):
+                np.random.seed(100 + len(corruption))
+                model, optimizer = self._small_model_and_opt()
+                scheduler = WarmupCosineScheduler(
+                    optimizer, total_steps=20, warmup_steps=2
+                )
+                model_before = model.state_dict()
+                optimizer_before = optimizer.state_dict()
+                scheduler_before = scheduler.state_dict()
+                rng_before = np.random.get_state()
+
+                checkpoint = read_checkpoint(path)
+                if corruption == "model":
+                    last_name = list(checkpoint["model"])[-1]
+                    checkpoint["model"][last_name] = np.zeros((999,))
+                elif corruption == "optimizer":
+                    checkpoint["optimizer"]["v"][-1] = np.zeros((999,))
+                elif corruption == "scheduler":
+                    checkpoint["scheduler"]["total_steps"] = 0
+                else:
+                    checkpoint["rng_state"] = ("invalid",) + tuple(
+                        checkpoint["rng_state"][1:]
+                    )
+
+                with pytest.raises((TypeError, ValueError)):
+                    restore_checkpoint(
+                        checkpoint, model, optimizer, scheduler
+                    )
+
+                for name, expected in model_before.items():
+                    np.testing.assert_array_equal(
+                        model.state_dict()[name], expected
+                    )
+                assert_optimizer_state_equal(
+                    optimizer.state_dict(), optimizer_before
+                )
+                assert scheduler.state_dict() == scheduler_before
+                assert_rng_equal(np.random.get_state(), rng_before)
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 
 from nn.transformer import GPT
+from train import _ARCH_PRESETS
 
 
 def parse_args():
@@ -21,6 +22,7 @@ def parse_args():
     parser.add_argument("--heads", type=int, default=4)
     parser.add_argument("--layers", type=int, default=2)
     parser.add_argument("--batch", type=int, default=4)
+    parser.add_argument("--arch", choices=["gpt", "llama"], default="gpt")
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--generate", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
@@ -39,6 +41,7 @@ def run_benchmark(args):
         num_heads=args.heads,
         d_ff=4 * args.d,
         num_layers=args.layers,
+        **_ARCH_PRESETS[args.arch],
     )
     model.eval()
 
@@ -63,6 +66,7 @@ def run_benchmark(args):
 
     infer_tokens = args.steps * args.batch * args.ctx
     return {
+        "arch": args.arch,
         "vocab": args.vocab,
         "context_len": args.ctx,
         "d_model": args.d,
@@ -92,6 +96,8 @@ def _validate_args(args):
             raise ValueError(f"{name} must be positive")
     if args.d % args.heads != 0:
         raise ValueError("--d must be divisible by --heads")
+    if args.arch == "llama" and (args.d // args.heads) % 2 != 0:
+        raise ValueError("--arch llama needs an even head dimension (d/heads) for RoPE")
 
 
 def main():
@@ -102,6 +108,7 @@ def main():
         return
 
     print("Tiny GPT benchmark")
+    print(f"  arch: {metrics['arch']}")
     print(f"  shape: vocab={metrics['vocab']} ctx={metrics['context_len']} "
           f"d={metrics['d_model']} heads={metrics['heads']} layers={metrics['layers']} "
           f"batch={metrics['batch']}")
