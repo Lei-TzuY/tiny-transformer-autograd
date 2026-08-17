@@ -287,6 +287,41 @@
   - `findings.md`
   - `progress.md`
 
+### Phase 12: Round 8 — Sliding-window decoding for masked runs
+- **Status:** complete
+- **Started:** 2026-07-31
+- Actions taken:
+  - Re-read `CLAUDE.md`, `PROJECT_STATE.md`, and `task_plan.md`; confirmed the 301-test baseline
+    and the CLI anchor before choosing work, and selected the top-ranked next candidate.
+  - Traced the interaction that made round 4 refuse the case: the crop moves the window start, so
+    both `position_ids` and the cached-key mask alignment change.
+  - Removed the `fit in context_len` refusal and merged `generate`'s two prefill branches into one
+    window branch that crops `idx`, `mask`, and `positions` together.
+  - Added `_left_padded_positions` and applied it to the *cropped* mask on every re-prefill, so the
+    surviving real tokens are renumbered from 0.
+  - Sliced the cached-step mask to `cache_len + 1` so it still covers exactly the cached plus
+    current keys after the window start moves.
+  - Probed the new behavior before writing tests: every row matched solo decoding for 6 and 20 new
+    tokens, both architectures, cached and uncached, and for a prompt longer than `context_len`.
+  - Confirmed a missing renumbering fails loudly by emulating it — `_validate_position_ids` raises.
+  - Added `TestMaskedSlidingWindow`, subclassing the round-4 class at `context_len=8` so all 14
+    in-window guarantees re-run under a sliding window, plus 12 new cases including the counter-test
+    and an anchor against a direct `infer` call.
+  - Verified no regression by diffing 52 unmasked and 24 in-window masked generation results
+    against the previous commit's source.
+  - Measured the cost of decoding past the window and recorded it as the next candidate.
+  - Updated `README.md`, `CLAUDE.md` (invariant 14, counts), `PROJECT_STATE.md`, `task_plan.md`
+    (Phase 12, six decisions, six acceptance criteria), `findings.md`, and this log.
+- Files created/modified:
+  - `src/nn/transformer.py`
+  - `tests/test_transformer.py`
+  - `README.md`
+  - `CLAUDE.md`
+  - `PROJECT_STATE.md`
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+
 ## Test Results
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
@@ -356,6 +391,19 @@
 | Round 7 full suite | `python -m pytest -q -W error` | Documentation round changes no behavior | 301 passed in 1.12s | PASS |
 | Round 7 byte compilation | `python -m compileall -q src tests plot_loss.py` | All modules compile | Clean | PASS |
 | Round 7 diff hygiene | `git diff --check` | No whitespace errors | Clean apart from existing CRLF notices | PASS |
+| Round 8 baseline | `python -m pytest -q -W error` before any edit | Suite green at the recorded count | 301 passed in 1.68s | PASS |
+| Round 8 crossing-run probe | Prompts of length 5/2/3 at `ctx=8`, 6 new tokens | Each row matches solo decoding | Match for gpt and llama, cached and uncached | PASS |
+| Round 8 over-long prompt probe | 10- and 6-token prompts at `ctx=8`, 5 new tokens | First prefill crops, rows still match | Match for both architectures | PASS |
+| Round 8 far-past-window probe | 20 new tokens at `ctx=8` (width 5 → 25) | Repeated crops stay equivalent | Match for all three rows | PASS |
+| Round 8 missing-renumbering probe | Emulate positions carried across a crop | Fails loudly, does not drift | `ValueError: position_ids must be in [0, 8)` | PASS |
+| Round 8 unmasked-path regression | 52 generation results diffed against `HEAD:src` | Byte-identical | No diff (both architectures × ctx × cache × greedy/sample/beam × long prompts) | PASS |
+| Round 8 in-window masked regression | 24 masked results at `ctx=16` diffed against `HEAD:src` | Byte-identical | No diff | PASS |
+| Round 8 window-slide count | 20-token masked run at `ctx=8` | Crop path actually exercised | 17 prefills, 16 of them full-window | PASS |
+| Round 8 decoding cost | `ctx=64`, 4 layers, `d_model=128`, 3 ragged rows | Measure the cost of the opened path | 1.10 ms/token inside → 11.21 ms/token past, 10.2× | PASS |
+| Round 8 transformer suite | `pytest tests/test_transformer.py -q -W error` | New and old generation tests pass | 77 passed in 0.49s | PASS |
+| Round 8 full suite | `python -m pytest -q -W error` | All old and new tests pass without warnings | 324 passed in 1.20s | PASS |
+| Round 8 CLI anchor | The recorded anchor command | Training trajectory unchanged | `3.6106/3.5812/3.5234`, `gnorm 2.677/2.654/2.547` — exact match | PASS |
+| Round 8 test collection | `pytest --collect-only -q` per file | Documented counts match collection | 63/23/15/21/37/19/28/77/41 = 324 | PASS |
 
 ## Error Log
 | Timestamp | Error | Attempt | Resolution |
