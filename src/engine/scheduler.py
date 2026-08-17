@@ -52,9 +52,21 @@ class WarmupCosineScheduler:
         }
 
     def load_state_dict(self, state):
-        self.base_lr = state["base_lr"]
-        self.total_steps = state["total_steps"]
-        self.warmup_steps = state["warmup_steps"]
-        self.min_lr = state["min_lr"]
-        self.last_step = state["last_step"]
+        base_lr = state["base_lr"]
+        total_steps = state["total_steps"]
+        warmup_steps = state["warmup_steps"]
+        min_lr = state["min_lr"]
+        last_step = state["last_step"]
+        if base_lr <= 0 or total_steps <= 0:
+            raise ValueError("scheduler base_lr and total_steps must be positive")
+        if not 0 <= warmup_steps <= total_steps:
+            raise ValueError("scheduler warmup_steps must be between 0 and total_steps")
+        if min_lr < 0:
+            raise ValueError("scheduler min_lr must be non-negative")
+
+        self.base_lr = base_lr
+        self.total_steps = total_steps
+        self.warmup_steps = warmup_steps
+        self.min_lr = min_lr
+        self.last_step = last_step
         self.optimizer.lr = self.get_lr(self.last_step)

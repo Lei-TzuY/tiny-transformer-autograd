@@ -91,15 +91,39 @@ def mul(a: Tensor, b: Tensor) -> Tensor:
 
 
 # ---------------------------------------------------------------------------
+# div (element-wise)
+# ---------------------------------------------------------------------------
+def div(a: Tensor, b: Tensor) -> Tensor:
+    """Element-wise division with NumPy broadcasting semantics."""
+    needs_grad = a.requires_grad or b.requires_grad
+    out = Tensor(
+        a.data / b.data,
+        requires_grad=needs_grad,
+        _children=(a, b),
+        _op="div",
+    )
+
+    def _backward():
+        if a.requires_grad:
+            a._ensure_grad()
+            a.grad += _unbroadcast(out.grad / b.data, a.shape)
+        if b.requires_grad:
+            b._ensure_grad()
+            b.grad += _unbroadcast(
+                -out.grad * a.data / (b.data * b.data), b.shape
+            )
+
+    out._backward = _backward
+    return out
+
+
+# ---------------------------------------------------------------------------
 # matmul
 # ---------------------------------------------------------------------------
 def matmul(a: Tensor, b: Tensor) -> Tensor:
     """
-    Matrix multiply supporting 2-D and batched tensors.
-    For a: (..., M, K) @ b: (..., K, N) → (..., M, N)
-    ∂L/∂a = grad @ bᵀ   →  (..., M, K)
-    ∂L/∂b = aᵀ @ grad   →  (..., K, N)
-    Batch dims broadcast: extra leading dims are summed away in the backward.
+    Matrix multiply with the same 1-D promotion and batch broadcasting as
+    ``numpy.matmul``. Broadcast batch axes are summed away in the backward.
     """
     needs_grad = a.requires_grad or b.requires_grad
     out = Tensor(
@@ -110,19 +134,35 @@ def matmul(a: Tensor, b: Tensor) -> Tensor:
     )
 
     def _backward():
+        # NumPy temporarily treats a 1-D left operand as (1, K), and a 1-D
+        # right operand as (K, 1), then squeezes the inserted output axes.
+        # Recreate those promoted matrix shapes so the usual matrix-gradient
+        # formula also covers vector-vector and vector-matrix products.
+        a_was_vector = a.ndim == 1
+        b_was_vector = b.ndim == 1
+        a_matrix = a.data[np.newaxis, :] if a_was_vector else a.data
+        b_matrix = b.data[..., np.newaxis] if b_was_vector else b.data
+
+        grad_matrix = out.grad
+        if a_was_vector and b_was_vector:
+            grad_matrix = np.asarray(grad_matrix).reshape(1, 1)
+        elif a_was_vector:
+            grad_matrix = np.expand_dims(grad_matrix, axis=-2)
+        elif b_was_vector:
+            grad_matrix = np.expand_dims(grad_matrix, axis=-1)
+
         if a.requires_grad:
             a._ensure_grad()
-            a_grad = out.grad @ np.swapaxes(b.data, -1, -2)
-            # Sum away any extra batch dims that were broadcast over
-            while a_grad.ndim > a.data.ndim:
-                a_grad = a_grad.sum(axis=0)
-            a.grad += a_grad
+            a_grad = np.matmul(grad_matrix, np.swapaxes(b_matrix, -1, -2))
+            if a_was_vector:
+                a_grad = np.squeeze(a_grad, axis=-2)
+            a.grad += _unbroadcast(a_grad, a.shape)
         if b.requires_grad:
             b._ensure_grad()
-            b_grad = np.swapaxes(a.data, -1, -2) @ out.grad
-            while b_grad.ndim > b.data.ndim:
-                b_grad = b_grad.sum(axis=0)
-            b.grad += b_grad
+            b_grad = np.matmul(np.swapaxes(a_matrix, -1, -2), grad_matrix)
+            if b_was_vector:
+                b_grad = np.squeeze(b_grad, axis=-1)
+            b.grad += _unbroadcast(b_grad, b.shape)
 
     out._backward = _backward
     return out
@@ -138,11 +178,11 @@ def sigmoid(x: Tensor) -> Tensor:
     overflow in e^{−x}.
     Backward: dL/dx = grad · σ(x) · (1 − σ(x))
     """
-    s = np.where(
-        x.data >= 0,
-        1.0 / (1.0 + np.exp(-x.data)),
-        np.exp(x.data) / (1.0 + np.exp(x.data)),
-    )
+    # np.where eagerly evaluates both branches, so directly spelling exp(-x)
+    # and exp(x) still overflows in the unselected branch.  exp(-abs(x)) is
+    # bounded by one and keeps every intermediate finite.
+    z = np.exp(-np.abs(x.data))
+    s = np.where(x.data >= 0, 1.0 / (1.0 + z), z / (1.0 + z))
     out = Tensor(s, requires_grad=x.requires_grad, _children=(x,), _op="sigmoid")
 
     def _backward():
@@ -219,10 +259,24 @@ def softmax(x: Tensor) -> Tensor:
     Backward:
       ∂L/∂xᵢ = Sᵢ · (∂L/∂Sᵢ  −  Σⱼ ∂L/∂Sⱼ · Sⱼ)
              = S ⊙ (grad − (grad · S).sum(axis=-1, keepdims=True))
+
+    Fully masked rows
+    -----------------
+    A row of all −∞ has no probability distribution: ``max`` is −∞ and the
+    textbook shift would evaluate ``-inf − -inf = nan``, poisoning the whole
+    batch.  This softmax defines such a row as **all zeros** instead, the
+    standard masked-attention convention: the query attends to nothing, so its
+    context vector is zero and its gradient is zero (``S = 0`` makes the VJP
+    above vanish).  Rows with at least one finite entry are unaffected.
     """
-    shifted = x.data - x.data.max(axis=-1, keepdims=True)
-    e = np.exp(shifted)
-    s = e / e.sum(axis=-1, keepdims=True)
+    row_max = x.data.max(axis=-1, keepdims=True)
+    # Shift by 0 where no finite maximum exists so the exponent stays defined.
+    shift = np.where(np.isneginf(row_max), 0.0, row_max)
+    e = np.exp(x.data - shift)
+    total = e.sum(axis=-1, keepdims=True)
+    # A fully masked row sums to exactly 0; dividing by 1 keeps it all zeros
+    # without emitting a divide-by-zero warning.
+    s = e / np.where(total == 0.0, 1.0, total)
     out = Tensor(s, requires_grad=x.requires_grad, _children=(x,), _op="softmax")
 
     def _backward():
@@ -238,30 +292,93 @@ def softmax(x: Tensor) -> Tensor:
 # ---------------------------------------------------------------------------
 # cross_entropy  (logits → scalar mean NLL loss, integer class targets)
 # ---------------------------------------------------------------------------
-def cross_entropy(logits: Tensor, targets) -> Tensor:
+def cross_entropy(logits: Tensor, targets, ignore_index=None) -> Tensor:
     """
-    Combined softmax + negative log-likelihood for numerical stability.
+    Stable mean cross-entropy over the final class axis.
 
     Parameters
     ----------
-    logits : Tensor  shape (N, C)
-    targets : array-like of int  shape (N,)   class indices
+    logits : Tensor, shape (..., C)
+        Unnormalised class scores. The final axis contains the classes.
+    targets : integer array-like, shape (...)
+        One class index for every position in ``logits.shape[:-1]``.
+    ignore_index : int or None
+        Target value marking a position that must not contribute to the loss —
+        typically the padding label of a variable-length batch. Ignored
+        positions are excluded from the mean (the divisor is the number of
+        *scored* positions) and receive exactly zero gradient, so padding can
+        never influence training. ``ignore_index`` is the only target value
+        allowed outside ``[0, C)``.
 
     Returns
     -------
-    Tensor  scalar mean loss
+    Tensor  scalar mean loss over the scored positions
     """
-    targets_np = np.array(targets, dtype=np.int64)
-    N = logits.data.shape[0]
+    if logits.ndim == 0:
+        raise ValueError("cross_entropy logits must have a class dimension")
+    if logits.data.size == 0 or logits.shape[-1] == 0:
+        raise ValueError("cross_entropy inputs must be non-empty")
 
-    # Stable softmax
-    shifted = logits.data - logits.data.max(axis=-1, keepdims=True)
-    e = np.exp(shifted)
-    s = e / e.sum(axis=-1, keepdims=True)  # (N, C)
+    targets_np = np.asarray(targets)
+    expected_shape = logits.shape[:-1]
+    if targets_np.shape != expected_shape:
+        raise ValueError(
+            "cross_entropy target shape mismatch: "
+            f"expected {expected_shape}, got {targets_np.shape}"
+        )
+    if targets_np.size == 0:
+        raise ValueError("cross_entropy targets must be non-empty")
+    if not np.issubdtype(targets_np.dtype, np.integer):
+        raise TypeError("cross_entropy targets must contain integers")
+    if ignore_index is not None and not isinstance(ignore_index, (int, np.integer)):
+        raise TypeError("cross_entropy ignore_index must be an integer or None")
 
-    # NLL: -log(s[i, targets[i]])
-    log_probs = np.log(s[np.arange(N), targets_np] + 1e-12)
-    loss_val = -log_probs.mean()
+    num_classes = logits.shape[-1]
+    # Backward must use the labels seen by this forward pass even if a caller
+    # later mutates the original array in place.
+    targets_flat = np.array(targets_np, dtype=np.int64, copy=True).reshape(-1)
+
+    # Select the positions that are actually scored. ``rows is None`` marks the
+    # common "everything is scored" case so no row gathering happens at all.
+    rows = None
+    if ignore_index is not None:
+        scored = targets_flat != int(ignore_index)
+        if not scored.any():
+            raise ValueError(
+                "cross_entropy has no scored target: every position equals "
+                f"ignore_index={ignore_index}"
+            )
+        if not scored.all():
+            rows = np.flatnonzero(scored)
+            targets_flat = targets_flat[rows]
+
+    if np.any(targets_flat < 0) or np.any(targets_flat >= num_classes):
+        raise ValueError(
+            f"cross_entropy targets must be in [0, {num_classes})"
+        )
+
+    # Flatten only the leading sample axes. Subtracting the row maximum
+    # implements log-sum-exp without exponentiating a large positive value;
+    # unlike log(softmax + eps), this forward exactly matches the standard
+    # softmax-minus-one-hot derivative for extremely unlikely targets.
+    logits_flat = logits.data.reshape(-1, num_classes)
+    scored_logits = logits_flat if rows is None else logits_flat[rows]
+    row_max = scored_logits.max(axis=-1, keepdims=True)
+    # softmax() defines an all −∞ row as zero attention weights, but a loss has
+    # no such reading: every class is impossible, so no target can be scored.
+    # Fail loudly instead of returning a NaN that would spread to every weight.
+    # Only scored rows matter — an ignored position may be anything.
+    if np.isneginf(row_max).any():
+        raise ValueError(
+            "cross_entropy requires at least one finite logit per scored row"
+        )
+    shifted = scored_logits - row_max
+    exponentials = np.exp(shifted)
+    normalisers = exponentials.sum(axis=-1, keepdims=True)
+    probabilities = exponentials / normalisers
+    sample_count = targets_flat.size
+    target_shifted = shifted[np.arange(sample_count), targets_flat]
+    loss_val = (np.log(normalisers[:, 0]) - target_shifted).mean()
 
     out = Tensor(
         loss_val,
@@ -273,11 +390,17 @@ def cross_entropy(logits: Tensor, targets) -> Tensor:
     def _backward():
         if logits.requires_grad:
             logits._ensure_grad()
-            # ∂L/∂logits = (softmax − one_hot) / N
-            grad_logits = s.copy()
-            grad_logits[np.arange(N), targets_np] -= 1.0
-            grad_logits /= N
-            logits.grad += out.grad * grad_logits
+            # ∂L/∂logits = (softmax − one_hot) / scored_count
+            scored_grad = probabilities.copy()
+            scored_grad[np.arange(sample_count), targets_flat] -= 1.0
+            scored_grad /= sample_count
+            if rows is None:
+                grad_logits = scored_grad
+            else:
+                # Ignored positions keep an exactly zero gradient.
+                grad_logits = np.zeros_like(logits_flat)
+                grad_logits[rows] = scored_grad
+            logits.grad += out.grad * grad_logits.reshape(logits.shape)
 
     out._backward = _backward
     return out
@@ -349,21 +472,27 @@ def reshape(x: Tensor, new_shape) -> Tensor:
 # transpose (swap two axes)
 # ---------------------------------------------------------------------------
 def transpose(x: Tensor, axes=None) -> Tensor:
+    axes_tuple = None if axes is None else tuple(axes)
     out = Tensor(
-        np.transpose(x.data, axes),
+        np.transpose(x.data, axes_tuple),
         requires_grad=x.requires_grad,
         _children=(x,),
         _op="transpose",
     )
 
+    if axes_tuple is None:
+        inverse_axes = None
+    else:
+        # np.transpose above performs length, uniqueness, and bounds checks.
+        # Normalise valid negative axes before computing the inverse
+        # permutation; argsort on raw negatives is not an inverse.
+        normalised_axes = tuple(axis % x.ndim for axis in axes_tuple)
+        inverse_axes = tuple(np.argsort(normalised_axes))
+
     def _backward():
         if x.requires_grad:
             x._ensure_grad()
-            if axes is None:
-                inv_axes = None
-            else:
-                inv_axes = np.argsort(axes)
-            x.grad += np.transpose(out.grad, inv_axes)
+            x.grad += np.transpose(out.grad, inverse_axes)
 
     out._backward = _backward
     return out
@@ -380,6 +509,33 @@ def tanh(x: Tensor) -> Tensor:
         if x.requires_grad:
             x._ensure_grad()
             x.grad += out.grad * (1.0 - t * t)  # sech²(x)
+
+    out._backward = _backward
+    return out
+
+
+# ---------------------------------------------------------------------------
+# silu / swish  (Elfwing et al. 2017; used in SwiGLU feed-forwards)
+# ---------------------------------------------------------------------------
+def silu(x: Tensor) -> Tensor:
+    """
+    SiLU(x) = x · σ(x)
+    Backward: d/dx = σ(x) + x·σ(x)·(1−σ(x)) = σ(x)·(1 + x·(1−σ(x)))
+    Uses the same numerically stable sigmoid as sigmoid().
+    """
+    s = np.where(
+        x.data >= 0,
+        1.0 / (1.0 + np.exp(-np.abs(x.data))),
+        np.exp(-np.abs(x.data)) / (1.0 + np.exp(-np.abs(x.data))),
+    )
+    out = Tensor(
+        x.data * s, requires_grad=x.requires_grad, _children=(x,), _op="silu"
+    )
+
+    def _backward():
+        if x.requires_grad:
+            x._ensure_grad()
+            x.grad += out.grad * (s + x.data * s * (1.0 - s))
 
     out._backward = _backward
     return out
@@ -412,11 +568,14 @@ def gelu(x: Tensor) -> Tensor:
 # concat along axis
 # ---------------------------------------------------------------------------
 def concat(tensors, axis=0) -> Tensor:
+    tensors = tuple(tensors)
+    if not tensors:
+        raise ValueError("concat requires at least one tensor")
     needs_grad = any(t.requires_grad for t in tensors)
     out = Tensor(
         np.concatenate([t.data for t in tensors], axis=axis),
         requires_grad=needs_grad,
-        _children=tuple(tensors),
+        _children=tensors,
         _op="concat",
     )
 

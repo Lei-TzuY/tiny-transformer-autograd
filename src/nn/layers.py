@@ -1,5 +1,5 @@
 """
-layers.py — Linear, Embedding, LayerNorm, Dropout.
+layers.py — Linear, Embedding, LayerNorm, RMSNorm, Dropout.
 """
 
 import numpy as np
@@ -17,6 +17,8 @@ class Linear(Module):
     """
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
+        if in_features <= 0 or out_features <= 0:
+            raise ValueError("in_features and out_features must be positive")
         self.in_features = in_features
         self.out_features = out_features
 
@@ -89,6 +91,8 @@ class Embedding(Module):
     """
 
     def __init__(self, num_embeddings: int, embedding_dim: int):
+        if num_embeddings <= 0 or embedding_dim <= 0:
+            raise ValueError("num_embeddings and embedding_dim must be positive")
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.weight = Tensor(
@@ -98,10 +102,22 @@ class Embedding(Module):
 
     def forward(self, idx) -> Tensor:
         """idx: integer array of any shape → output shape (*idx.shape, embedding_dim)."""
+        idx = self._validate_indices(idx)
         return self.weight[idx]
 
     def infer(self, idx):
+        idx = self._validate_indices(idx)
         return self.weight.data[idx]
+
+    def _validate_indices(self, idx):
+        idx = np.asarray(idx)
+        if not np.issubdtype(idx.dtype, np.integer):
+            raise TypeError("embedding indices must be integers")
+        if np.any(idx < 0) or np.any(idx >= self.num_embeddings):
+            raise ValueError(
+                f"embedding indices must be in [0, {self.num_embeddings})"
+            )
+        return idx
 
     def __repr__(self):
         return f"Embedding({self.num_embeddings}, {self.embedding_dim})"
@@ -118,12 +134,15 @@ class LayerNorm(Module):
     """
 
     def __init__(self, normalized_shape: int, eps: float = 1e-5):
+        if normalized_shape <= 0 or eps <= 0:
+            raise ValueError("normalized_shape and eps must be positive")
         self.normalized_shape = normalized_shape
         self.eps = eps
         self.gamma = Tensor(np.ones(normalized_shape), requires_grad=True)
         self.beta = Tensor(np.zeros(normalized_shape), requires_grad=True)
 
     def forward(self, x: Tensor) -> Tensor:
+        self._validate_input_shape(x.shape)
         mu = ops.mean(x, axis=-1, keepdims=True)        # (..., 1)
         diff = x - mu                                    # (..., C)
         var = ops.mean(diff ** 2, axis=-1, keepdims=True)  # (..., 1)
@@ -131,12 +150,61 @@ class LayerNorm(Module):
         return x_hat * self.gamma + self.beta            # (..., C)
 
     def infer(self, x):
+        x = np.asarray(x)
+        self._validate_input_shape(x.shape)
         mu = x.mean(axis=-1, keepdims=True)
         var = ((x - mu) ** 2).mean(axis=-1, keepdims=True)
         return (x - mu) * ((var + self.eps) ** -0.5) * self.gamma.data + self.beta.data
 
+    def _validate_input_shape(self, shape):
+        if not shape or shape[-1] != self.normalized_shape:
+            raise ValueError(
+                f"LayerNorm expected final dimension {self.normalized_shape}, "
+                f"got shape {shape}"
+            )
+
     def __repr__(self):
         return f"LayerNorm({self.normalized_shape}, eps={self.eps})"
+
+
+class RMSNorm(Module):
+    """
+    Root-mean-square normalisation (Zhang & Sennrich 2019), used by Llama.
+
+    y = x / √(mean(x²) + ε) · γ
+
+    Unlike LayerNorm there is no mean-centering and no bias — cheaper, and in
+    practice trains just as well.  Gradients flow through existing autograd
+    primitives, so no custom backward is needed.
+    """
+
+    def __init__(self, normalized_shape: int, eps: float = 1e-5):
+        if normalized_shape <= 0 or eps <= 0:
+            raise ValueError("normalized_shape and eps must be positive")
+        self.normalized_shape = normalized_shape
+        self.eps = eps
+        self.gamma = Tensor(np.ones(normalized_shape), requires_grad=True)
+
+    def forward(self, x: Tensor) -> Tensor:
+        self._validate_input_shape(x.shape)
+        ms = ops.mean(x ** 2, axis=-1, keepdims=True)   # (..., 1)
+        return x * ((ms + self.eps) ** -0.5) * self.gamma
+
+    def infer(self, x):
+        x = np.asarray(x)
+        self._validate_input_shape(x.shape)
+        ms = (x ** 2).mean(axis=-1, keepdims=True)
+        return x * ((ms + self.eps) ** -0.5) * self.gamma.data
+
+    def _validate_input_shape(self, shape):
+        if not shape or shape[-1] != self.normalized_shape:
+            raise ValueError(
+                f"RMSNorm expected final dimension {self.normalized_shape}, "
+                f"got shape {shape}"
+            )
+
+    def __repr__(self):
+        return f"RMSNorm({self.normalized_shape}, eps={self.eps})"
 
 
 class Dropout(Module):
@@ -148,6 +216,8 @@ class Dropout(Module):
     """
 
     def __init__(self, p: float = 0.0):
+        if not 0.0 <= p < 1.0:
+            raise ValueError("dropout probability must be in [0, 1)")
         self.p = p
         self.training = True
 

@@ -149,6 +149,8 @@ class Module:
                 f"state_dict mismatch: missing={missing}, unexpected={unexpected}"
             )
 
+        # Validate every destination before copying any value so a malformed
+        # late entry cannot leave the module partially restored.
         for name, value in state.items():
             if name not in tensors:
                 continue
@@ -158,6 +160,11 @@ class Module:
                     f"shape mismatch for {name}: expected {tensor.data.shape}, "
                     f"got {value.shape}"
                 )
+
+        for name, value in state.items():
+            if name not in tensors:
+                continue
+            tensor = tensors[name]
             tensor.data[:] = value
 
     def param_count(self):

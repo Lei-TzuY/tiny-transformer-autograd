@@ -123,6 +123,58 @@ def test_lora_freezes_backbone_and_receives_gradients():
     assert any(np.any(gradient != 0) for gradient in b_gradients)
 
 
+def test_variable_length_batch_trains_and_ignores_padding():
+    """End-to-end: pad a ragged batch, mask the keys, ignore the pad targets."""
+    np.random.seed(7)
+    model = make_model()
+    optimizer = Adam(model.parameters(), lr=5e-2)
+    pad, ignore = 0, -1
+
+    sequences = [[1, 2, 3, 4, 5], [6, 7, 8], [9, 10, 11, 1]]
+    longest = max(len(sequence) for sequence in sequences)
+    tokens = np.full((len(sequences), longest), pad, dtype=np.int64)
+    targets = np.full((len(sequences), longest), ignore, dtype=np.int64)
+    attention_mask = np.zeros((len(sequences), longest), dtype=np.int64)
+    for row, sequence in enumerate(sequences):
+        length = len(sequence)
+        tokens[row, :length] = sequence
+        attention_mask[row, :length] = 1
+        # Next-token targets; the final real position has no successor.
+        targets[row, : length - 1] = sequence[1:]
+
+    losses = []
+    for _ in range(15):
+        optimizer.zero_grad()
+        loss = ops.cross_entropy(
+            model(tokens, attention_mask=attention_mask),
+            targets,
+            ignore_index=ignore,
+        )
+        loss.backward()
+        optimizer.step()
+        losses.append(float(loss.data))
+
+    assert np.isfinite(losses).all()
+    assert losses[-1] < losses[0] * 0.5
+
+    # Rewriting the padded slots must not change the loss at all.
+    reference = float(
+        ops.cross_entropy(
+            model(tokens, attention_mask=attention_mask), targets, ignore_index=ignore
+        ).data
+    )
+    scrambled = tokens.copy()
+    scrambled[attention_mask == 0] = 11
+    perturbed = float(
+        ops.cross_entropy(
+            model(scrambled, attention_mask=attention_mask),
+            targets,
+            ignore_index=ignore,
+        ).data
+    )
+    assert reference == perturbed
+
+
 def test_prompt_array_uses_custom_prompt_and_crops_context():
     tokenizer = CharTokenizer.train("hello world")
     args = Namespace(prompt="hello", prompt_file=None)
@@ -178,6 +230,7 @@ def test_benchmark_returns_positive_metrics():
         heads=2,
         layers=1,
         batch=1,
+        arch="gpt",
         steps=1,
         generate=1,
         seed=0,
@@ -197,6 +250,7 @@ def test_benchmark_rejects_invalid_head_shape():
         heads=2,
         layers=1,
         batch=1,
+        arch="gpt",
         steps=1,
         generate=1,
         seed=0,
@@ -213,6 +267,11 @@ def _valid_args(**overrides):
         "d": 8,
         "heads": 2,
         "layers": 1,
+        "arch": "gpt",
+        "data_format": "text",
+        "jsonl_field": "text",
+        "optimizer": "adam",
+        "grad_accum": 1,
         "eval_interval": 1,
         "eval_iters": 1,
         "warmup_iters": 0,
