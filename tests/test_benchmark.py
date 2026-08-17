@@ -56,6 +56,15 @@ class BenchmarkTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "--warmup must be non-negative"):
             _validate_args(benchmark_args(warmup=-1))
 
+    def test_programmatic_call_preserves_legacy_protocol_defaults(self):
+        args = benchmark_args()
+        del args.warmup
+        del args.repeats
+        report = run_benchmark(args)
+        self.assertEqual(report["warmup"], 1)
+        self.assertEqual(report["repeats"], 1)
+        self.assertTrue(all(len(samples) == 1 for samples in report["samples"].values()))
+
     def test_environment_metadata_avoids_identity_fields(self):
         metadata = environment_metadata()
         self.assertNotIn("hostname", metadata)

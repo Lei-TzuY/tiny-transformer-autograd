@@ -44,7 +44,7 @@ def parse_args():
 
 
 def run_benchmark(args):
-    _validate_args(args)
+    warmup, repeats = _validate_args(args)
     np.random.seed(args.seed)
 
     model = GPT(
@@ -71,15 +71,15 @@ def run_benchmark(args):
     def generate_uncached_once():
         model.generate(prompt, args.generate, strategy="greedy", use_cache=False)
 
-    for _ in range(args.warmup):
+    for _ in range(warmup):
         infer_once()
         generate_cached_once()
         generate_uncached_once()
 
-    infer_durations = [_time_call(infer_once) for _ in range(args.repeats)]
+    infer_durations = [_time_call(infer_once) for _ in range(repeats)]
     cached_durations = []
     uncached_durations = []
-    for _ in range(args.repeats):
+    for _ in range(repeats):
         # Keep the paired cache/no-cache samples adjacent so slow host drift
         # does not masquerade as a cache effect.
         cached_durations.append(_time_call(generate_cached_once))
@@ -120,8 +120,8 @@ def run_benchmark(args):
         "generate_tokens": args.generate,
         "generation_strategy": "greedy",
         "seed": args.seed,
-        "warmup": args.warmup,
-        "repeats": args.repeats,
+        "warmup": warmup,
+        "repeats": repeats,
         "environment": environment_metadata(),
         "infer_tokens_per_sec": summaries["infer_tokens_per_sec"]["median"],
         "generate_cached_tokens_per_sec": summaries[
@@ -214,6 +214,12 @@ def _summarize(samples):
 
 
 def _validate_args(args):
+    # Before the benchmark protocol was configurable, programmatic callers
+    # only supplied the model/workload fields. Preserve that API with the old
+    # one-warm-up/one-measurement behavior while the CLI uses its explicit
+    # defaults from parse_args().
+    warmup = getattr(args, "warmup", 1)
+    repeats = getattr(args, "repeats", 1)
     positive = [
         ("--vocab", args.vocab),
         ("--ctx", args.ctx),
@@ -223,7 +229,7 @@ def _validate_args(args):
         ("--batch", args.batch),
         ("--steps", args.steps),
         ("--generate", args.generate),
-        ("--repeats", args.repeats),
+        ("--repeats", repeats),
     ]
     for name, value in positive:
         if value <= 0:
@@ -232,8 +238,9 @@ def _validate_args(args):
         raise ValueError("--d must be divisible by --heads")
     if args.arch == "llama" and (args.d // args.heads) % 2 != 0:
         raise ValueError("--arch llama needs an even head dimension (d/heads) for RoPE")
-    if args.warmup < 0:
+    if warmup < 0:
         raise ValueError("--warmup must be non-negative")
+    return warmup, repeats
 
 
 def main():
