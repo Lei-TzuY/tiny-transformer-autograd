@@ -523,10 +523,11 @@ python src/benchmark.py --warmup 3 --repeats 7 --json > benchmark.json
 python src/benchmark.py --arch llama --warmup 3 --repeats 7
 ```
 
-The JSON report includes the seed, model shape, Python and NumPy versions,
-platform and CPU metadata, every sample, and median throughput. The human
-output also prints the minimum and maximum sample instead of implying that a
-single timing is stable.
+The JSON report includes the seed, model shape, parameter count, dtype, prompt
+length, Python and NumPy versions, path-free BLAS/SIMD metadata, thread-control
+environment, every raw duration and throughput sample, and summary statistics.
+The human output prints the median, range, and sample standard deviation
+instead of implying that a single timing is stable.
 
 There is intentionally no universal throughput claim in this README. Compare
 results only when the model shape, benchmark parameters, software versions,

@@ -16,6 +16,15 @@ from nn.transformer import GPT
 from train import _ARCH_PRESETS
 
 
+_THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Benchmark tiny GPT inference")
     parser.add_argument("--vocab", type=int, default=128)
@@ -84,6 +93,16 @@ def run_benchmark(args):
         uncached / cached
         for cached, uncached in zip(cached_durations, uncached_durations)
     ]
+    samples = {
+        "infer_seconds": infer_durations,
+        "generate_cached_seconds": cached_durations,
+        "generate_uncached_seconds": uncached_durations,
+        "infer_tokens_per_sec": infer_rates,
+        "generate_cached_tokens_per_sec": cached_rates,
+        "generate_uncached_tokens_per_sec": uncached_rates,
+        "cache_speedup": speedups,
+    }
+    summaries = {name: _summarize(values) for name, values in samples.items()}
     return {
         "benchmark_schema": 1,
         "arch": args.arch,
@@ -93,22 +112,27 @@ def run_benchmark(args):
         "heads": args.heads,
         "layers": args.layers,
         "batch": args.batch,
+        "d_ff": 4 * args.d,
+        "parameters": model.param_count(),
+        "dtype": str(model.token_emb.weight.data.dtype),
+        "prompt_length": int(prompt.shape[1]),
         "steps": args.steps,
         "generate_tokens": args.generate,
+        "generation_strategy": "greedy",
         "seed": args.seed,
         "warmup": args.warmup,
         "repeats": args.repeats,
         "environment": environment_metadata(),
-        "infer_tokens_per_sec": statistics.median(infer_rates),
-        "generate_cached_tokens_per_sec": statistics.median(cached_rates),
-        "generate_uncached_tokens_per_sec": statistics.median(uncached_rates),
-        "cache_speedup": statistics.median(speedups),
-        "samples": {
-            "infer_tokens_per_sec": infer_rates,
-            "generate_cached_tokens_per_sec": cached_rates,
-            "generate_uncached_tokens_per_sec": uncached_rates,
-            "cache_speedup": speedups,
-        },
+        "infer_tokens_per_sec": summaries["infer_tokens_per_sec"]["median"],
+        "generate_cached_tokens_per_sec": summaries[
+            "generate_cached_tokens_per_sec"
+        ]["median"],
+        "generate_uncached_tokens_per_sec": summaries[
+            "generate_uncached_tokens_per_sec"
+        ]["median"],
+        "cache_speedup": summaries["cache_speedup"]["median"],
+        "samples": samples,
+        "summary": summaries,
     }
 
 
@@ -132,6 +156,60 @@ def environment_metadata():
         "machine": platform.machine(),
         "processor": platform.processor() or "unknown",
         "cpu_count": os.cpu_count(),
+        "numpy_build": _numpy_build_metadata(),
+        "thread_controls": {name: os.environ.get(name) for name in _THREAD_ENV_VARS},
+    }
+
+
+def _numpy_build_metadata():
+    """Return a path-free description of NumPy's BLAS and SIMD build."""
+    result = {"blas": {}, "simd": {}}
+    config = getattr(np.__config__, "CONFIG", None)
+    if isinstance(config, dict):
+        dependencies = config.get("Build Dependencies", {})
+        blas = dependencies.get("blas", {}) if isinstance(dependencies, dict) else {}
+        if isinstance(blas, dict):
+            for source, target in (
+                ("name", "name"),
+                ("version", "version"),
+                ("openblas configuration", "configuration"),
+            ):
+                value = blas.get(source)
+                if isinstance(value, (str, int, float, bool)):
+                    result["blas"][target] = value
+        simd = config.get("SIMD Extensions", {})
+        if isinstance(simd, dict):
+            for name in ("baseline", "found", "not found"):
+                value = simd.get(name)
+                if isinstance(value, (list, tuple)):
+                    result["simd"][name.replace(" ", "_")] = list(value)
+        return result
+
+    # NumPy 1.x exposes a less structured API. Keep only library names and
+    # macros; directory fields can reveal local build paths and are omitted.
+    get_info = getattr(np.__config__, "get_info", None)
+    if get_info is not None:
+        legacy = get_info("blas_opt_info") or get_info("blas_info")
+        if isinstance(legacy, dict):
+            libraries = legacy.get("libraries")
+            if isinstance(libraries, (list, tuple)):
+                result["blas"]["libraries"] = list(libraries)
+            macros = legacy.get("define_macros")
+            if isinstance(macros, (list, tuple)):
+                result["blas"]["define_macros"] = [list(item) for item in macros]
+    return result
+
+
+def _summarize(samples):
+    if not samples:
+        raise ValueError("cannot summarize an empty sample set")
+    return {
+        "n": len(samples),
+        "median": statistics.median(samples),
+        "mean": statistics.fmean(samples),
+        "sample_stdev": statistics.stdev(samples) if len(samples) > 1 else 0.0,
+        "min": min(samples),
+        "max": max(samples),
     }
 
 
@@ -180,10 +258,11 @@ def main():
 
 
 def _print_metric(label, metrics, key, suffix):
-    samples = metrics["samples"][key]
+    summary = metrics["summary"][key]
     print(
-        f"  {label}: {metrics[key]:.1f}{suffix} median "
-        f"(min={min(samples):.1f}, max={max(samples):.1f}, n={len(samples)})"
+        f"  {label}: {summary['median']:.1f}{suffix} median "
+        f"(min={summary['min']:.1f}, max={summary['max']:.1f}, "
+        f"sample_stdev={summary['sample_stdev']:.1f}, n={summary['n']})"
     )
 
 
