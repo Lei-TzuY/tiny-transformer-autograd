@@ -3,6 +3,8 @@
 import argparse
 import json
 import os
+import platform
+import statistics
 import sys
 import time
 
@@ -25,6 +27,8 @@ def parse_args():
     parser.add_argument("--arch", choices=["gpt", "llama"], default="gpt")
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--generate", type=int, default=32)
+    parser.add_argument("--warmup", type=int, default=3)
+    parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     return parser.parse_args()
@@ -48,24 +52,40 @@ def run_benchmark(args):
     idx = np.random.randint(0, args.vocab, size=(args.batch, args.ctx))
     prompt = idx[:1, : min(args.ctx, max(1, args.ctx // 2))]
 
-    model.infer(idx)
-    start = time.perf_counter()
-    for _ in range(args.steps):
-        model.infer(idx)
-    infer_sec = time.perf_counter() - start
+    def infer_once():
+        for _ in range(args.steps):
+            model.infer(idx)
 
-    model.generate(prompt, args.generate, strategy="greedy", use_cache=True)
-    start = time.perf_counter()
-    model.generate(prompt, args.generate, strategy="greedy", use_cache=True)
-    cached_sec = time.perf_counter() - start
+    def generate_cached_once():
+        model.generate(prompt, args.generate, strategy="greedy", use_cache=True)
 
-    model.generate(prompt, args.generate, strategy="greedy", use_cache=False)
-    start = time.perf_counter()
-    model.generate(prompt, args.generate, strategy="greedy", use_cache=False)
-    uncached_sec = time.perf_counter() - start
+    def generate_uncached_once():
+        model.generate(prompt, args.generate, strategy="greedy", use_cache=False)
+
+    for _ in range(args.warmup):
+        infer_once()
+        generate_cached_once()
+        generate_uncached_once()
+
+    infer_durations = [_time_call(infer_once) for _ in range(args.repeats)]
+    cached_durations = []
+    uncached_durations = []
+    for _ in range(args.repeats):
+        # Keep the paired cache/no-cache samples adjacent so slow host drift
+        # does not masquerade as a cache effect.
+        cached_durations.append(_time_call(generate_cached_once))
+        uncached_durations.append(_time_call(generate_uncached_once))
 
     infer_tokens = args.steps * args.batch * args.ctx
+    infer_rates = [infer_tokens / seconds for seconds in infer_durations]
+    cached_rates = [args.generate / seconds for seconds in cached_durations]
+    uncached_rates = [args.generate / seconds for seconds in uncached_durations]
+    speedups = [
+        uncached / cached
+        for cached, uncached in zip(cached_durations, uncached_durations)
+    ]
     return {
+        "benchmark_schema": 1,
         "arch": args.arch,
         "vocab": args.vocab,
         "context_len": args.ctx,
@@ -73,10 +93,45 @@ def run_benchmark(args):
         "heads": args.heads,
         "layers": args.layers,
         "batch": args.batch,
-        "infer_tokens_per_sec": infer_tokens / infer_sec,
-        "generate_cached_tokens_per_sec": args.generate / cached_sec,
-        "generate_uncached_tokens_per_sec": args.generate / uncached_sec,
-        "cache_speedup": uncached_sec / cached_sec if cached_sec > 0 else float("inf"),
+        "steps": args.steps,
+        "generate_tokens": args.generate,
+        "seed": args.seed,
+        "warmup": args.warmup,
+        "repeats": args.repeats,
+        "environment": environment_metadata(),
+        "infer_tokens_per_sec": statistics.median(infer_rates),
+        "generate_cached_tokens_per_sec": statistics.median(cached_rates),
+        "generate_uncached_tokens_per_sec": statistics.median(uncached_rates),
+        "cache_speedup": statistics.median(speedups),
+        "samples": {
+            "infer_tokens_per_sec": infer_rates,
+            "generate_cached_tokens_per_sec": cached_rates,
+            "generate_uncached_tokens_per_sec": uncached_rates,
+            "cache_speedup": speedups,
+        },
+    }
+
+
+def _time_call(fn):
+    start = time.perf_counter()
+    fn()
+    elapsed = time.perf_counter() - start
+    if elapsed <= 0:
+        raise RuntimeError("benchmark timer did not advance")
+    return elapsed
+
+
+def environment_metadata():
+    """Return reproducibility metadata without exposing hostnames or user paths."""
+    return {
+        "python": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "numpy": np.__version__,
+        "platform": platform.system(),
+        "platform_release": platform.release(),
+        "machine": platform.machine(),
+        "processor": platform.processor() or "unknown",
+        "cpu_count": os.cpu_count(),
     }
 
 
@@ -90,6 +145,7 @@ def _validate_args(args):
         ("--batch", args.batch),
         ("--steps", args.steps),
         ("--generate", args.generate),
+        ("--repeats", args.repeats),
     ]
     for name, value in positive:
         if value <= 0:
@@ -98,6 +154,8 @@ def _validate_args(args):
         raise ValueError("--d must be divisible by --heads")
     if args.arch == "llama" and (args.d // args.heads) % 2 != 0:
         raise ValueError("--arch llama needs an even head dimension (d/heads) for RoPE")
+    if args.warmup < 0:
+        raise ValueError("--warmup must be non-negative")
 
 
 def main():
@@ -112,10 +170,21 @@ def main():
     print(f"  shape: vocab={metrics['vocab']} ctx={metrics['context_len']} "
           f"d={metrics['d_model']} heads={metrics['heads']} layers={metrics['layers']} "
           f"batch={metrics['batch']}")
-    print(f"  infer: {metrics['infer_tokens_per_sec']:.1f} tokens/s")
-    print(f"  generate cached: {metrics['generate_cached_tokens_per_sec']:.1f} tokens/s")
-    print(f"  generate uncached: {metrics['generate_uncached_tokens_per_sec']:.1f} tokens/s")
-    print(f"  cache speedup: {metrics['cache_speedup']:.2f}x")
+    print(f"  protocol: warmup={metrics['warmup']} repeats={metrics['repeats']} seed={metrics['seed']}")
+    print(f"  environment: Python {metrics['environment']['python']} / "
+          f"NumPy {metrics['environment']['numpy']} / {metrics['environment']['machine']}")
+    _print_metric("infer", metrics, "infer_tokens_per_sec", " tokens/s")
+    _print_metric("generate cached", metrics, "generate_cached_tokens_per_sec", " tokens/s")
+    _print_metric("generate uncached", metrics, "generate_uncached_tokens_per_sec", " tokens/s")
+    _print_metric("cache speedup", metrics, "cache_speedup", "x")
+
+
+def _print_metric(label, metrics, key, suffix):
+    samples = metrics["samples"][key]
+    print(
+        f"  {label}: {metrics[key]:.1f}{suffix} median "
+        f"(min={min(samples):.1f}, max={max(samples):.1f}, n={len(samples)})"
+    )
 
 
 if __name__ == "__main__":

@@ -515,17 +515,23 @@ because training and inference need only NumPy.
 
 ## Benchmark
 
-```text
-python src/benchmark.py            # or --arch llama
+Run repeated measurements and retain the machine-readable result with the
+environment metadata needed to interpret it:
 
-Tiny GPT benchmark
-  arch: gpt
-  shape: vocab=128 ctx=32 d=64 heads=4 layers=2 batch=4
-  infer:                ~48 000 tokens/s
-  generate cached:       ~6 600 tokens/s
-  generate uncached:     ~2 200 tokens/s
-  cache speedup:             ~2.9×
+```bash
+python src/benchmark.py --warmup 3 --repeats 7 --json > benchmark.json
+python src/benchmark.py --arch llama --warmup 3 --repeats 7
 ```
+
+The JSON report includes the seed, model shape, Python and NumPy versions,
+platform and CPU metadata, every sample, and median throughput. The human
+output also prints the minimum and maximum sample instead of implying that a
+single timing is stable.
+
+There is intentionally no universal throughput claim in this README. Compare
+results only when the model shape, benchmark parameters, software versions,
+and host are controlled; CI smoke tests establish that the benchmark runs, not
+that shared-runner timing is a performance baseline.
 
 ---
 
