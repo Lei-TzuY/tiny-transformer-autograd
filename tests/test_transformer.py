@@ -277,6 +277,147 @@ class TestCustomAttentionMask:
         assert out.shape == (1, T, 8)
         assert np.isfinite(out).all()
 
+    @pytest.mark.parametrize(
+        ("batch", "heads"),
+        [(2, 2), (3, 2)],
+        ids=["batch-equals-heads", "batch-differs-from-heads"],
+    )
+    def test_three_dimensional_multihead_mask_is_batch_major(
+        self, batch, heads
+    ):
+        """(B, Q, K) means per-batch even when B happens to equal H."""
+        from engine.tensor import Tensor
+
+        T = 4
+        attn = MultiHeadAttention(d_model=8, num_heads=heads)
+        x = RNG.standard_normal((batch, T, 8))
+        mask = np.zeros((batch, T, T))
+        for row in range(batch):
+            mask[row, :, row % T] = -2.0 * (row + 1)
+
+        forward_batched = attn(Tensor(x), Tensor(mask)).data
+        forward_explicit = attn(Tensor(x), Tensor(mask[:, None, :, :])).data
+        np.testing.assert_array_equal(forward_batched, forward_explicit)
+
+        inferred_batched, _ = attn.infer(x, key_bias=mask)
+        inferred_explicit, _ = attn.infer(
+            x, key_bias=mask[:, None, :, :]
+        )
+        np.testing.assert_array_equal(inferred_batched, inferred_explicit)
+
+    def test_three_dimensional_tensor_mask_keeps_its_gradient(self):
+        from engine.tensor import Tensor
+
+        B, T = 3, 4
+        attn = MultiHeadAttention(d_model=8, num_heads=2)
+        x = Tensor(RNG.standard_normal((B, T, 8)), requires_grad=True)
+        mask = Tensor(np.zeros((B, T, T)), requires_grad=True)
+
+        ops.sum(attn(x, mask)).backward()
+
+        assert mask.grad.shape == (B, T, T)
+        assert np.isfinite(mask.grad).all()
+        assert np.any(mask.grad != 0.0)
+
+    @pytest.mark.parametrize(
+        ("attention_cls", "kwargs"),
+        [
+            (SelfAttention, {}),
+            (MultiHeadAttention, {"num_heads": 2}),
+        ],
+        ids=["self", "multihead"],
+    )
+    @pytest.mark.parametrize(
+        ("key_bias", "message"),
+        [
+            (np.zeros((3, 4)), "does not broadcast"),
+            (np.zeros((2, 1, 1, 3)), "larger than"),
+            (np.full((3, 3), np.nan), "finite biases"),
+            (np.full((3, 3), np.inf), "finite biases"),
+            (np.full((3, 3), "invalid"), "numeric values"),
+        ],
+        ids=[
+            "non-broadcastable",
+            "oversized",
+            "nan",
+            "positive-infinity",
+            "non-numeric",
+        ],
+    )
+    def test_inference_rejects_malformed_key_bias(
+        self, attention_cls, kwargs, key_bias, message
+    ):
+        attn = attention_cls(d_model=8, **kwargs)
+        x = RNG.standard_normal((1, 3, 8))
+
+        with pytest.raises((TypeError, ValueError), match=message):
+            attn.infer(x, key_bias=key_bias)
+
+    @pytest.mark.parametrize(
+        ("attention_cls", "kwargs"),
+        [
+            (SelfAttention, {}),
+            (MultiHeadAttention, {"num_heads": 2}),
+        ],
+        ids=["self", "multihead"],
+    )
+    def test_fully_masked_inference_returns_projection_bias(
+        self, attention_cls, kwargs
+    ):
+        from engine.tensor import Tensor
+
+        B, T = 2, 3
+        attn = attention_cls(d_model=8, **kwargs)
+        attn.out_proj.bias.data[:] = np.arange(1.0, 9.0)
+        x = RNG.standard_normal((B, T, 8))
+        mask = np.full((B, T, T), -np.inf)
+
+        inferred, _ = attn.infer(x, key_bias=mask)
+        forwarded = attn(Tensor(x), Tensor(mask)).data
+        expected = np.broadcast_to(attn.out_proj.bias.data, (B, T, 8))
+
+        assert np.isfinite(inferred).all()
+        np.testing.assert_allclose(inferred, expected, atol=1e-12)
+        np.testing.assert_allclose(forwarded, expected, atol=1e-12)
+
+    @pytest.mark.parametrize(
+        ("attention_cls", "kwargs"),
+        [
+            (SelfAttention, {}),
+            (MultiHeadAttention, {"num_heads": 2}),
+        ],
+        ids=["self", "multihead"],
+    )
+    @pytest.mark.parametrize(
+        ("failure", "error", "message"),
+        [
+            ("missing-v", ValueError, "contain 'k' and 'v'"),
+            ("object", TypeError, "real numeric"),
+            ("nan", ValueError, "finite values"),
+        ],
+    )
+    def test_inference_rejects_malformed_cache(
+        self, attention_cls, kwargs, failure, error, message
+    ):
+        attn = attention_cls(d_model=8, **kwargs)
+        x = RNG.standard_normal((1, 2, 8))
+        shape = (1, 2, 8) if attention_cls is SelfAttention else (1, 2, 2, 4)
+        key = np.zeros(shape)
+        value = np.zeros(shape)
+        if failure == "missing-v":
+            cache = {"k": key}
+        elif failure == "object":
+            cache = {
+                "k": key.astype(object),
+                "v": value.astype(object),
+            }
+        else:
+            key[..., 0] = np.nan
+            cache = {"k": key, "v": value}
+
+        with pytest.raises(error, match=message):
+            attn.infer(x, cache=cache)
+
 
 # ---------------------------------------------------------------------------
 # Transformer blocks

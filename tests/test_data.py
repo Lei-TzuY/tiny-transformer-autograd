@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import engine.ops as ops
+from engine.grad_mode import is_grad_enabled, set_grad_enabled
 from nn.transformer import GPT
 from tokenizer import CharTokenizer
 from train import (
@@ -25,6 +26,7 @@ from train import (
     PAD_TOKEN,
     batch_loss,
     encode_documents,
+    evaluate_batches,
     evaluate_documents,
     get_document_batch,
     load_documents,
@@ -210,6 +212,35 @@ class TestEvaluation:
 
     def test_empty_split_is_skipped(self):
         assert evaluate_documents(_model(_tokenizer()), [], 2, 1) is None
+
+    @pytest.mark.parametrize("failure_site", ["sampler", "forward"])
+    @pytest.mark.parametrize("initial_training", [True, False])
+    @pytest.mark.parametrize("initial_grad_enabled", [True, False])
+    def test_failure_restores_model_and_grad_modes(
+        self, monkeypatch, failure_site, initial_training, initial_grad_enabled
+    ):
+        tokenizer = _tokenizer()
+        model = _model(tokenizer)
+        model.train(initial_training)
+        tokens = np.array([[0, 1]], dtype=np.int64)
+        targets = np.array([[1, 0]], dtype=np.int64)
+
+        if failure_site == "sampler":
+            def sample_batch():
+                raise RuntimeError("evaluation sampler failed")
+        else:
+            sample_batch = lambda: (tokens, targets, None)
+
+            def fail_forward(*args, **kwargs):
+                raise RuntimeError("evaluation forward failed")
+
+            monkeypatch.setattr(model, "forward", fail_forward)
+
+        with set_grad_enabled(initial_grad_enabled):
+            with pytest.raises(RuntimeError, match="evaluation .* failed"):
+                evaluate_batches(model, sample_batch, eval_iters=1)
+            assert model.training is initial_training
+            assert is_grad_enabled() is initial_grad_enabled
 
 
 class TestCommandLine:

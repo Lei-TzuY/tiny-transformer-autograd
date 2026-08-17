@@ -237,17 +237,22 @@ class GPT(Module):
         """
         idx = self._validate_token_batch(idx, max_time=self.context_len)
         _, time = idx.shape
+        key_padding_bias = None
+        if attention_mask is not None:
+            # Validate the public mask before dropout can consume randomness.
+            key_padding_bias = self._key_padding_bias(attention_mask, idx.shape)
+
         x = self.token_emb(idx)
         if self.pos_emb is not None:
             positions = np.arange(time, dtype=np.int64)
             x = x + self.pos_emb(positions)
         x = self.emb_drop(x)
         mask = self.causal_mask[:time, :time]
-        if attention_mask is not None:
+        if key_padding_bias is not None:
             # (batch, 1, 1, time) broadcasts over (batch, heads, time, time);
             # -inf + -inf stays -inf, so combining with the causal mask is
             # just an add.
-            mask = mask + Tensor(self._key_padding_bias(attention_mask, idx.shape))
+            mask = mask + Tensor(key_padding_bias)
         for block in self.blocks:
             if self.grad_checkpoint:
                 x = recompute(lambda inp, blk=block: blk(inp, mask), x)
@@ -261,6 +266,11 @@ class GPT(Module):
         keep = _validate_keep_mask(
             attention_mask, idx_shape, "matching the token ids"
         )
+        if np.any((~keep[:, :-1]) & keep[:, 1:]):
+            raise ValueError(
+                "attention_mask for forward must be right-padded: each row "
+                "must contain 1/True real tokens followed by 0/False padding"
+            )
         return np.where(keep, 0.0, -np.inf)[:, np.newaxis, np.newaxis, :]
 
     def infer(self, idx, kv_cache=None, attention_mask=None, position_ids=None):
@@ -272,7 +282,7 @@ class GPT(Module):
         idx : integer array, shape (batch, time)
             The tokens to process now — the whole prompt, or one step when a
             cache is supplied.
-        kv_cache : list or None
+        kv_cache : list, tuple, or None
             Per-block key/value cache returned by a previous call.
         attention_mask : array-like or None, shape (batch, past + time)
             Keep/pad mask covering **every key**, cached ones included: padded
@@ -283,10 +293,8 @@ class GPT(Module):
             to ``arange(past, past + time)`` for every row.
         """
         idx = self._validate_token_batch(idx, max_time=self.context_len)
-        if kv_cache is not None and len(kv_cache) != len(self.blocks):
-            raise ValueError("kv_cache must contain one entry per transformer block")
         batch, time = idx.shape
-        past_len = 0 if kv_cache is None else kv_cache[0]["k"].shape[2]
+        past_len = self._validate_kv_cache(kv_cache, batch)
         if past_len + time > self.context_len:
             raise ValueError("inference input and cache exceed context_len")
 
@@ -318,6 +326,68 @@ class GPT(Module):
             )
             caches.append(block_cache)
         return self.head.infer(self.ln_f.infer(x)), caches
+
+    def _validate_kv_cache(self, kv_cache, batch):
+        """Validate a caller-provided per-block cache and return its past length."""
+        if kv_cache is None:
+            return 0
+        if not isinstance(kv_cache, (list, tuple)):
+            raise TypeError("kv_cache must be a list or tuple")
+        if len(kv_cache) != len(self.blocks):
+            raise ValueError("kv_cache must contain one entry per transformer block")
+
+        head_dim = self.d_model // self.num_heads
+        past_len = None
+        for layer, entry in enumerate(kv_cache):
+            if not isinstance(entry, dict):
+                raise TypeError(f"kv_cache[{layer}] must be a dictionary")
+            if "k" not in entry or "v" not in entry:
+                raise ValueError(f"kv_cache[{layer}] must contain 'k' and 'v'")
+
+            key, value = entry["k"], entry["v"]
+            if not isinstance(key, np.ndarray) or not isinstance(value, np.ndarray):
+                raise TypeError(f"kv_cache[{layer}] k and v must be NumPy arrays")
+            if key.ndim != 4 or value.ndim != 4:
+                raise ValueError(f"kv_cache[{layer}] k and v must have rank 4")
+            if key.shape != value.shape:
+                raise ValueError(f"kv_cache[{layer}] k and v must have equal shapes")
+            if key.shape[0] != batch:
+                raise ValueError(
+                    f"kv_cache[{layer}] batch dimension must be {batch}, "
+                    f"got {key.shape[0]}"
+                )
+            if key.shape[1] != self.num_heads:
+                raise ValueError(
+                    f"kv_cache[{layer}] head count must be {self.num_heads}, "
+                    f"got {key.shape[1]}"
+                )
+            if key.shape[3] != head_dim:
+                raise ValueError(
+                    f"kv_cache[{layer}] head dimension must be {head_dim}, "
+                    f"got {key.shape[3]}"
+                )
+            if not all(
+                np.issubdtype(array.dtype, np.number)
+                and not np.issubdtype(array.dtype, np.complexfloating)
+                for array in (key, value)
+            ):
+                raise TypeError(
+                    f"kv_cache[{layer}] k and v must have real numeric dtypes"
+                )
+            if not np.isfinite(key).all() or not np.isfinite(value).all():
+                raise ValueError(
+                    f"kv_cache[{layer}] k and v must contain only finite values"
+                )
+
+            layer_past_len = key.shape[2]
+            if past_len is None:
+                past_len = layer_past_len
+            elif layer_past_len != past_len:
+                raise ValueError(
+                    "all kv_cache entries must have the same past length"
+                )
+
+        return past_len
 
     def _validate_position_ids(self, position_ids, expected_shape):
         positions = np.asarray(position_ids)

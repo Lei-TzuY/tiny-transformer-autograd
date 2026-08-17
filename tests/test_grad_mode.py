@@ -160,6 +160,24 @@ class TestScopeBehaviour:
         assert not out.requires_grad
         assert is_grad_enabled()
 
+    def test_decorator_rejects_deferred_function_bodies(self):
+        async def coroutine_function():
+            return None
+
+        def generator_function():
+            yield None
+
+        async def async_generator_function():
+            yield None
+
+        for function in (
+            coroutine_function,
+            generator_function,
+            async_generator_function,
+        ):
+            with pytest.raises(TypeError, match="only support synchronous"):
+                no_grad()(function)
+
     def test_set_grad_enabled_accepts_both_modes(self):
         with set_grad_enabled(False):
             assert not is_grad_enabled()
@@ -185,6 +203,60 @@ class TestScopeBehaviour:
 
         assert observed["enabled"] is True
 
+    def test_reused_guard_restores_each_threads_own_mode(self):
+        guard = set_grad_enabled(True)
+        first_entered = threading.Event()
+        second_entered = threading.Event()
+        first_exited = threading.Event()
+        observed = {}
+        errors = []
+
+        def first_worker():
+            try:
+                with no_grad():
+                    observed["first_before"] = is_grad_enabled()
+                    with guard:
+                        observed["first_inside"] = is_grad_enabled()
+                        first_entered.set()
+                        assert second_entered.wait(2.0)
+                    observed["first_after"] = is_grad_enabled()
+                    first_exited.set()
+            except BaseException as error:
+                errors.append(error)
+                first_entered.set()
+                first_exited.set()
+
+        def second_worker():
+            try:
+                assert first_entered.wait(2.0)
+                observed["second_before"] = is_grad_enabled()
+                with guard:
+                    observed["second_inside"] = is_grad_enabled()
+                    second_entered.set()
+                    assert first_exited.wait(2.0)
+                observed["second_after"] = is_grad_enabled()
+            except BaseException as error:
+                errors.append(error)
+                second_entered.set()
+
+        first = threading.Thread(target=first_worker)
+        second = threading.Thread(target=second_worker)
+        first.start()
+        second.start()
+        first.join(3.0)
+        second.join(3.0)
+
+        assert not first.is_alive() and not second.is_alive()
+        assert errors == []
+        assert observed == {
+            "first_before": False,
+            "first_inside": True,
+            "first_after": False,
+            "second_before": True,
+            "second_inside": True,
+            "second_after": True,
+        }
+
 
 class TestBackwardGuard:
     def test_backward_on_detached_tensor_under_no_grad_raises(self):
@@ -193,6 +265,23 @@ class TestBackwardGuard:
             loss = ops.sum(x * x)
             with pytest.raises(RuntimeError, match="no_grad"):
                 loss.backward()
+
+    def test_backward_on_suppressed_tensor_raises_after_leaving_no_grad(self):
+        x = Tensor([1.0, 2.0], requires_grad=True)
+        with no_grad():
+            loss = ops.sum(x * x)
+
+        with pytest.raises(RuntimeError, match="detached by no_grad"):
+            loss.backward()
+
+    def test_suppression_provenance_survives_a_detached_chain(self):
+        x = Tensor([2.0], requires_grad=True)
+        with no_grad():
+            detached = x * x
+        derived = detached + 1.0
+
+        with pytest.raises(RuntimeError, match="detached by no_grad"):
+            derived.backward()
 
     def test_backward_of_outer_graph_is_allowed_inside_no_grad(self):
         x = Tensor([1.0, 2.0], requires_grad=True)
@@ -205,6 +294,46 @@ class TestBackwardGuard:
         constant = Tensor([1.0, 2.0])
         constant.backward()
         assert constant.grad is None
+
+    def test_explicit_constant_backward_inside_no_grad_stays_a_no_op(self):
+        constant = Tensor([1.0, 2.0])
+        with no_grad():
+            constant.backward()
+        assert constant.grad is None
+
+    def test_constant_only_op_backward_inside_no_grad_stays_a_no_op(self):
+        with no_grad():
+            constant = Tensor([2.0]) * Tensor([3.0])
+            constant.backward()
+
+        assert constant.grad is None
+        assert constant._children == set()
+
+
+class TestGraphPruning:
+    def test_constant_only_result_does_not_retain_its_parents(self):
+        parent = Tensor([2.0])
+        reference = weakref.ref(parent)
+        result = parent * parent
+        del parent
+        gc.collect()
+
+        assert not result.requires_grad
+        assert result._children == set()
+        assert result._backward is _no_backward
+        assert reference() is None
+
+    def test_frozen_branch_value_can_feed_a_trainable_graph(self):
+        frozen = Tensor([2.0])
+        frozen_branch = frozen * frozen
+        trainable = Tensor([3.0], requires_grad=True)
+
+        loss = trainable * frozen_branch
+        loss.backward()
+
+        assert frozen_branch._children == set()
+        assert frozen.grad is None
+        np.testing.assert_allclose(trainable.grad, [4.0])
 
 
 class TestModelIntegration:

@@ -181,12 +181,15 @@ def evaluate_batches(model, sample_batch, eval_iters):
     previous_mode = getattr(model, "training", True)
     model.eval()
     losses = []
-    # eval() only disables dropout; no_grad() additionally stops every op from
-    # recording a node, so validation never allocates a backward graph.
-    with no_grad():
-        for _ in range(eval_iters):
-            losses.append(float(batch_loss(model, *sample_batch()).data))
-    model.train(previous_mode)
+    try:
+        # eval() only disables dropout; no_grad() additionally stops every op
+        # from recording a node, so validation never allocates a backward graph.
+        with no_grad():
+            for _ in range(eval_iters):
+                losses.append(float(batch_loss(model, *sample_batch()).data))
+    finally:
+        # A sampler/model failure must not leak eval mode into later training.
+        model.train(previous_mode)
     mean_loss = float(np.mean(losses))
     return mean_loss, float(np.exp(min(mean_loss, 700.0)))
 

@@ -13,15 +13,15 @@ NumPy is the only runtime dependency. Every addition must stay readable as a
 ## Commands
 
 ```bash
-python -m pytest -q -W error          # full suite — must stay green (324 tests, ~1s)
+python -m pytest -q -W error          # full suite — must stay green (380 tests, ~1s)
 python -m pytest tests/test_data.py -q # one module
 python -m compileall -q src tests plot_loss.py
 python src/train.py --iters 20 --no-sample          # smoke-train
 pip install -e ".[dev]" && tiny-train --help        # installed entry point
 ```
 
-Warnings are errors in CI and locally (`-W error`). A NumPy overflow/divide warning
-is a test failure, so numerically stable formulations are mandatory, not stylistic.
+Pytest warnings are errors in CI and locally (`-W error`). A NumPy overflow/divide
+warning is a test failure, so stable formulations are mandatory, not stylistic.
 
 ## Layout
 
@@ -30,7 +30,7 @@ src/engine/    tensor.py  ops.py  grad_mode.py  recompute.py
                optim.py  scheduler.py  checkpoint.py
 src/nn/        module.py  layers.py  attention.py  transformer.py
 src/           train.py (CLI)  tokenizer.py  benchmark.py
-tests/         9 modules, 324 tests
+tests/         9 modules, 380 tests
 ```
 
 Tests add `src` to `sys.path` themselves; scripts run from the repo root cannot
@@ -44,11 +44,11 @@ Break any of these and the project is silently wrong. Each has dedicated tests.
    place recording is gated (`is_grad_enabled()`), so a new op must construct its
    result there rather than mutating an existing tensor. Never bypass it.
 2. **`no_grad()` suppresses op results, never explicit leaves.** A model built inside
-   `no_grad()` must still be trainable. Only tensors arriving with `_children` get
-   detached.
+   `no_grad()` must still be trainable. Suppressed results retain creation provenance,
+   so delayed `backward()` misuse still raises after the scope exits.
 3. **A backward closure is stored only on a node that can hold a gradient.** The
    `_backward` property setter enforces this; it is also what prevents a gradient-less
-   node from being asked to split a `None` gradient.
+   node from being asked to split a `None` gradient. Such op results also drop parents.
 4. **A fully masked (`all -inf`) softmax row is zero weights, not NaN.** Defined
    identically in `ops.softmax` and `nn/attention._softmax` — the graph and NumPy
    inference paths must agree. Rounds 3 and 4 depend on this.
@@ -63,7 +63,7 @@ Break any of these and the project is silently wrong. Each has dedicated tests.
 8. **`forward(mask=None)` on `SelfAttention`/`MultiHeadAttention` is causal**, matching
    `infer()`. A parity test pins them together.
 9. **Training masks are right-padded; generation masks are left-padded.** Enforced at
-   the call sites (`_validate_keep_mask`, `_validate_generation_mask`), not assumed.
+   the call sites (`_key_padding_bias`, `_validate_generation_mask`), not assumed.
 10. **`recompute` replays from detached copies of its inputs** and captures/restores the
     NumPy RNG state. Differentiating into the originals discards a residual's already
     accumulated gradient; replaying without the RNG state differentiates a different
@@ -80,6 +80,12 @@ Break any of these and the project is silently wrong. Each has dedicated tests.
     absolute numbering across a crop. Carrying it over pushes `position_ids` past
     `context_len` — `_validate_position_ids` catches that, so the failure is loud
     rather than a silent position drift.
+15. **A 3-D multi-head additive mask is batch-major `(B,Q,K)`.** It is normalized to
+    `(B,1,Q,K)` before broadcasting; per-head masks must be explicit 4-D tensors.
+    Graph forward and NumPy inference share the same value/shape contract.
+16. **Caller-provided KV caches are validated before their past length is used.** Every
+    layer must carry matching rank-4, finite, real-valued `k`/`v` arrays with the
+    model's batch, head count, head width, and one common past length.
 
 ## Conventions
 
@@ -120,3 +126,5 @@ different approach on retry.
 - `git diff --check` reports pre-existing LF/CRLF notices; those are expected noise.
 - Checkpoints are pickles: only load trusted files. `plot_loss.py` is a
   source-checkout utility and is not part of the installed package.
+- Grad-mode decorators support ordinary synchronous functions only; coroutine and
+  generator targets fail explicitly instead of silently recording a graph.

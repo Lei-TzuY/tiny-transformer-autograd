@@ -3,7 +3,7 @@
 Handoff snapshot for `Tiny Transformer & Autograd`. Written so a session with no prior
 context can resume without re-deriving anything.
 
-**Last updated:** 2026-07-31 · **Branch:** `checkpoint/rounds-1-7` · **Suite:** 324 passing (`-W error`)
+**Last updated:** 2026-08-03 · **Branch:** `checkpoint/rounds-1-7` · **Suite:** 380 passing (`-W error`)
 
 Companions: `CLAUDE.md` (working rules and invariants), `task_plan.md` (phases,
 decisions, acceptance criteria), `findings.md` (per-round findings), `progress.md`
@@ -19,21 +19,21 @@ on Linux, development is on Windows.
 
 | Path | Lines | Responsibility |
 |------|-------|----------------|
-| `src/engine/tensor.py` | 311 | `Tensor`: data + grad, `_children`, `_backward` closures, iterative topological `backward()`, operators, `detach`. Recording is gated here. |
+| `src/engine/tensor.py` | 332 | `Tensor`: data + grad, `_children`, `_backward` closures, iterative topological `backward()`, operators, `detach`. Recording is gated here. |
 | `src/engine/ops.py` | 593 | 18 differentiable ops: add/mul/div/matmul, relu/sigmoid/exp/log/tanh/gelu/silu, softmax, cross_entropy, sum/mean, reshape/transpose/concat. |
-| `src/engine/grad_mode.py` | 108 | `no_grad` / `enable_grad` / `set_grad_enabled` / `is_grad_enabled`. Thread-local, reentrant, usable as decorators. |
+| `src/engine/grad_mode.py` | 127 | `no_grad` / `enable_grad` / `set_grad_enabled` / `is_grad_enabled`. Thread-local, reentrant, usable as synchronous decorators. |
 | `src/engine/recompute.py` | 112 | `recompute(function, *inputs)`: gradient checkpointing (activation recomputation). |
 | `src/engine/optim.py` | 238 | `SGD` (momentum, weight decay), `Adam`, `AdamW`, with `state_dict`/`load_state_dict`. |
 | `src/engine/scheduler.py` | 72 | `WarmupCosineScheduler`. |
 | `src/engine/checkpoint.py` | 78 | `save_checkpoint` / `read_checkpoint` / `restore_checkpoint`, format version 2, transactional restore. |
 | `src/nn/module.py` | 180 | `Module` base: `modules`, `parameters`, `named_parameters`, `state_dict`, `train`/`eval`, `param_count`. |
 | `src/nn/layers.py` | 235 | `Linear` (+LoRA), `Embedding`, `LayerNorm`, `RMSNorm`, `Dropout`, each with a NumPy `infer`. |
-| `src/nn/attention.py` | 393 | `SelfAttention`, `MultiHeadAttention`, `RotaryEmbedding`, mask preparation/validation, zero-row softmax. |
-| `src/nn/transformer.py` | 624 | `FeedForward`, `SwiGLU`, `TransformerBlock`, `GPT` (forward / infer / generate / generate_beam / LoRA / config). |
-| `src/train.py` | 630 | Training CLI: corpora, batching, loop, evaluation, checkpointing, sampling, arg validation. |
+| `src/nn/attention.py` | 497 | `SelfAttention`, `MultiHeadAttention`, `RotaryEmbedding`, shared graph/NumPy mask/cache validation, zero-row softmax. |
+| `src/nn/transformer.py` | 694 | `FeedForward`, `SwiGLU`, `TransformerBlock`, `GPT` (forward / infer / generate / generate_beam / LoRA / config). |
+| `src/train.py` | 633 | Training CLI: corpora, batching, loop, exception-safe evaluation, checkpointing, sampling, arg validation. |
 | `src/tokenizer.py` | 123 | `CharTokenizer`, `BPETokenizer`, build/restore helpers. |
 | `src/benchmark.py` | 122 | Throughput/timing harness. |
-| `plot_loss.py` | 105 | JSONL log plotting. Source-checkout only, not packaged. |
+| `plot_loss.py` | 99 | JSONL log plotting. Source-checkout only, not packaged. |
 
 **Model options.** `GPT(norm="layernorm"|"rmsnorm", pos_encoding="learned"|"rope",
 ffn="gelu"|"swiglu")` — defaults give GPT-2 style, the alternatives together give
@@ -65,7 +65,7 @@ validation across constructors, token inputs, RoPE bounds, and generation argume
 `no_grad`/`enable_grad`/`set_grad_enabled`, gated once inside `Tensor.__init__` so all
 18 ops are covered without per-op edits. Op results under `no_grad` lose parents,
 gradient buffer, and backward closure; explicit leaves stay trainable. `backward()` on a
-detached tensor inside a disabled block raises instead of silently doing nothing.
+suppressed result raises from creation provenance, even after the disabled scope exits.
 Defined an all-`-inf` softmax row as zero weights in both the autograd and NumPy paths.
 Added custom-mask validation (broadcast shape, NaN, `+inf`). `cross_entropy` rejects a
 scored row with no finite logit.
@@ -107,10 +107,24 @@ start moves. A prompt already longer than `context_len` is now accepted as well.
 
 ---
 
+**Round 9 — inference lifecycle and mask-contract hardening.**
+`Tensor` now remembers results detached by `no_grad`, so delayed `backward()` misuse
+raises after the scope exits; non-gradient results discard parents, and reusable guards
+keep restoration stacks per thread. Lazy async/generator decorators fail explicitly.
+Standalone attention inference now shares forward's mask validation, and 3-D multi-head
+masks are unambiguously batch-major. Training enforces right padding, evaluation restores
+mode in `finally`, and `GPT.infer` validates every caller-provided KV-cache layer before
+using its past length.
+
+---
+
 ## 3. Design decisions worth knowing
 
 | Decision | Why |
 |----------|-----|
+| Remember no-grad creation provenance | The mode at backward time cannot say how a result was created; provenance makes delayed misuse loud without changing explicit constant no-ops. |
+| Normalize 3-D multi-head masks as batch-major | `(B,T,T)` is the documented shape; right-aligned NumPy broadcasting otherwise mistakes batch for heads when `B == H`. |
+| Validate caches before deriving mask shapes | Every layer must agree on one past length before cached-key masks and positions can be checked coherently. |
 | Gate recording in `Tensor.__init__` | Every op constructs its result there, so one thread-local check covers all 18 primitives with no duplicated logic. |
 | Suppress op results, never explicit leaves | Matches PyTorch; avoids silently producing an untrainable model built inside `no_grad()`. |
 | Drop the backward closure on a node that cannot hold a gradient | Releases captured intermediates (the real memory win) and removes a latent crash where a gradient-less node was asked to split a `None` gradient. |
@@ -135,17 +149,17 @@ start moves. A prompt already longer than `context_len` is now accepted as well.
 
 ## 4. Test baseline
 
-`python -m pytest -q -W error` → **324 passed in ~1.2s**.
+`python -m pytest -q -W error` → **380 passed in ~1.3s**.
 
 | Module | Tests | Covers |
 |--------|-------|--------|
 | `tests/test_autograd.py` | 63 | Ops, VJPs with non-uniform cotangents, matmul broadcasting/1-D cases, stable CE, repeated backward, deep graphs, division, transpose/concat edge cases. |
-| `tests/test_transformer.py` | 77 | Attention parity, causality, masks, KV cache, RoPE, generation, ragged batches, batched masked generation, sliding-window masked decoding. |
-| `tests/test_validation.py` | 41 | Public-API argument validation across constructors, tokens, RoPE, generation, norms. |
+| `tests/test_transformer.py` | 98 | Attention parity, causality, graph/inference masks and caches, RoPE, generation, ragged batches, batched masked generation, sliding-window masked decoding. |
+| `tests/test_validation.py` | 60 | Public-API validation across constructors, tokens, padding masks, KV caches, RoPE, generation, and norms. |
 | `tests/test_modern.py` | 37 | Llama-style stack: RMSNorm, RoPE, SwiGLU, AdamW, gradient accumulation, LoRA. |
 | `tests/test_training.py` | 28 | Training loop, checkpoint save/resume/transactionality, optimizer identity, RNG state, CLI. |
-| `tests/test_data.py` | 23 | Document corpora: parsing, encoding, batch layout, loss/gradient equivalence, evaluation, 4 in-process CLI runs. |
-| `tests/test_grad_mode.py` | 21 | Suppression, leaf semantics, nesting/exceptions/decorators/thread-locality, backward errors. |
+| `tests/test_data.py` | 31 | Document corpora: parsing, encoding, batch layout, loss/gradient equivalence, exception-safe evaluation, 4 in-process CLI runs. |
+| `tests/test_grad_mode.py` | 29 | Suppression provenance, parent pruning, leaf semantics, nesting/exceptions/decorators/thread-locality, backward errors. |
 | `tests/test_recompute.py` | 19 | Plain-call equivalence, residual-consumer safety, RNG neutrality, dropout replay, model-level trajectory equality, LoRA. |
 | `tests/test_features.py` | 15 | Tokenizers, schedulers, sampling filters, misc CLI features. |
 
@@ -194,6 +208,8 @@ These are stated in the README and enforced with clear errors — none is an ope
 - **`plot_loss.py` is source-checkout only**, not part of the installed wheel.
 - **BPE is a teaching implementation** — training is O(merges × corpus) and not intended
   for large corpora.
+- **Grad-mode decorators are synchronous-only.** Coroutine and generator targets are
+  rejected; task-local asynchronous grad mode would require a separate `ContextVar` design.
 
 ## 6. Repository state
 
@@ -207,6 +223,7 @@ These are stated in the README and enforced with clear errors — none is an ope
   `git checkout main && git merge --ff-only checkpoint/rounds-1-7`.
 - `git diff --check` is clean apart from pre-existing LF/CRLF notices on Windows.
 - No build/dist/venv/checkpoint artifacts are left in the tree.
+- Round 9 is currently an uncommitted, reviewable working-tree change on top of `5195930`.
 
 ---
 

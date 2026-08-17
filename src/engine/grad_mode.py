@@ -31,6 +31,7 @@ if the body raises.
 """
 
 import functools
+import inspect
 import threading
 
 
@@ -42,6 +43,13 @@ class _GradState(threading.local):
 
 
 _state = _GradState()
+
+
+class _ModeStack(threading.local):
+    """Per-thread entry stack for a reusable grad-mode guard."""
+
+    def __init__(self):
+        self.values = []
 
 
 def is_grad_enabled() -> bool:
@@ -70,18 +78,29 @@ class set_grad_enabled:
         if not isinstance(mode, bool):
             raise TypeError("grad mode must be a bool")
         self.mode = mode
-        self._previous = []
+        # A guard may be shared by worker threads. The recording flag itself is
+        # thread-local, so its restoration stack must be thread-local too.
+        self._previous = _ModeStack()
 
     def __enter__(self):
-        self._previous.append(_state.enabled)
+        self._previous.values.append(_state.enabled)
         _state.enabled = self.mode
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        _state.enabled = self._previous.pop()
+        _state.enabled = self._previous.values.pop()
         return False
 
     def __call__(self, function):
+        if (
+            inspect.iscoroutinefunction(function)
+            or inspect.isgeneratorfunction(function)
+            or inspect.isasyncgenfunction(function)
+        ):
+            raise TypeError(
+                "grad mode decorators only support synchronous, "
+                "non-generator functions"
+            )
         mode = self.mode
 
         @functools.wraps(function)
