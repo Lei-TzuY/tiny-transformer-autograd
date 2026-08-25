@@ -1,28 +1,18 @@
-"""Counterexample for treating a shifted RoPE KV cache as an exact re-prefill.
-
-RoPE makes a global position shift cheap: cached keys can be rotated back by
-one position after the oldest key is dropped.  That is sufficient for the
-first Transformer block because its K/V projections depend only on the token
-embedding entering that block.
-
-It is not sufficient for deeper blocks.  Their cached K/V tensors were built
-from hidden states that had already attended to the now-removed oldest token.
-A strict sliding-window re-prefill recomputes those hidden states without that
-token, while a ring/shift cache preserves the old influence.  The two policies
-therefore have different semantics once the model has more than one block.
-"""
+"""Streaming-cache parity, cost, and semantic-boundary tests."""
 
 import os
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from nn.streaming import stream_generate
 from nn.transformer import GPT
 
 
-def _model(num_layers):
+def _model(num_layers, pos_encoding="rope"):
     np.random.seed(21)
     model = GPT(
         vocab_size=16,
@@ -31,7 +21,7 @@ def _model(num_layers):
         num_heads=2,
         d_ff=16,
         num_layers=num_layers,
-        pos_encoding="rope",
+        pos_encoding=pos_encoding,
     )
     # The normal tiny initialization makes the semantic difference very small.
     # Scaling the learned matrices keeps the same architecture while making the
@@ -86,6 +76,120 @@ def test_shifted_rope_cache_is_not_an_exact_multiblock_replacement():
     exact, streamed = _next_logits(_model(num_layers=2))
     difference = float(np.max(np.abs(streamed - exact)))
 
-    # This is the key counterexample: position rebasing is correct, yet stale
-    # higher-layer K/V still carry information from the dropped token.
+    # Position rebasing is correct, yet stale higher-layer K/V still carry
+    # information from the dropped token.
     assert difference > 1e-8
+
+
+def test_one_block_streaming_generation_matches_strict_window():
+    prompt = np.array([[1, 3, 5, 7]], dtype=np.int64)
+    exact = _model(1).generate(prompt, 8, strategy="greedy")
+    streamed = stream_generate(_model(1), prompt, 8, strategy="greedy")
+
+    np.testing.assert_array_equal(streamed, exact)
+
+
+def test_one_block_masked_streaming_matches_strict_window():
+    prompt = np.array(
+        [
+            [0, 1, 3, 5],
+            [0, 0, 2, 4],
+        ],
+        dtype=np.int64,
+    )
+    mask = np.array(
+        [
+            [0, 1, 1, 1],
+            [0, 0, 1, 1],
+        ],
+        dtype=np.int64,
+    )
+
+    exact = _model(1).generate(
+        prompt,
+        7,
+        strategy="greedy",
+        attention_mask=mask,
+    )
+    streamed = stream_generate(
+        _model(1),
+        prompt,
+        7,
+        strategy="greedy",
+        attention_mask=mask,
+    )
+
+    np.testing.assert_array_equal(streamed, exact)
+
+
+def test_streaming_stays_incremental_after_the_window_fills():
+    prompt = np.array([[1, 3, 5, 7]], dtype=np.int64)
+    model = _model(2)
+    widths = []
+    infer = model.infer
+
+    def counted(idx, *args, **kwargs):
+        widths.append(np.asarray(idx).shape[1])
+        return infer(idx, *args, **kwargs)
+
+    model.infer = counted
+    stream_generate(model, prompt, 6, strategy="greedy")
+
+    # One prompt prefill, then one-token cache extensions only. The strict
+    # generate() path would re-prefill four positions at every post-window step.
+    assert widths == [4, 1, 1, 1, 1, 1]
+
+
+def test_zero_new_tokens_returns_a_copy_without_inference():
+    prompt = np.array([[1, 3]], dtype=np.int64)
+    model = _model(1)
+
+    def fail_infer(*_args, **_kwargs):
+        raise AssertionError("zero-token generation must not run inference")
+
+    model.infer = fail_infer
+    result = stream_generate(model, prompt, 0, strategy="greedy")
+
+    np.testing.assert_array_equal(result, prompt)
+    assert result is not prompt
+
+
+@pytest.mark.parametrize(
+    ("call", "error", "message"),
+    [
+        (
+            lambda: stream_generate(
+                _model(1, pos_encoding="learned"),
+                np.array([[1, 2]]),
+                1,
+            ),
+            ValueError,
+            "pos_encoding='rope'",
+        ),
+        (
+            lambda: stream_generate(_model(1), np.array([[1, 2]]), -1),
+            ValueError,
+            "non-negative integer",
+        ),
+        (
+            lambda: stream_generate(
+                _model(1), np.array([[1, 2]]), 1, strategy="beam"
+            ),
+            ValueError,
+            "sample.*greedy",
+        ),
+        (
+            lambda: stream_generate(
+                _model(1),
+                np.array([[0, 1]]),
+                1,
+                attention_mask=np.array([[1, 0]]),
+            ),
+            ValueError,
+            "left-padded",
+        ),
+    ],
+)
+def test_streaming_validates_its_contract(call, error, message):
+    with pytest.raises(error, match=message):
+        call()
