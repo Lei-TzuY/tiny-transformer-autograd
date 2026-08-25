@@ -10,6 +10,20 @@ import engine.ops as ops
 from .module import Module
 
 
+_NORMALIZATION_SCALE_THRESHOLD = np.sqrt(np.finfo(np.float64).max) / 2.0
+
+
+def _normalization_scale(data):
+    """Return per-row scaling only when centering/squaring can overflow."""
+    max_abs = np.max(np.abs(data), axis=-1, keepdims=True)
+    needs_scaling = np.isfinite(max_abs) & (
+        max_abs > _NORMALIZATION_SCALE_THRESHOLD
+    )
+    if not np.any(needs_scaling):
+        return None
+    return np.where(needs_scaling, max_abs, 1.0)
+
+
 def _positive_int(name, value):
     """Validate a positive integral layer dimension and normalize it to int."""
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
@@ -190,18 +204,37 @@ class LayerNorm(Module):
 
     def forward(self, x: Tensor) -> Tensor:
         self._validate_input_shape(x.shape)
-        mu = ops.mean(x, axis=-1, keepdims=True)        # (..., 1)
-        diff = x - mu                                    # (..., C)
-        var = ops.mean(diff ** 2, axis=-1, keepdims=True)  # (..., 1)
-        x_hat = diff * ((var + self.eps) ** -0.5)       # (..., C)
-        return x_hat * self.gamma + self.beta            # (..., C)
+        scale = _normalization_scale(x.data)
+        if scale is None:
+            mu = ops.mean(x, axis=-1, keepdims=True)        # (..., 1)
+            diff = x - mu                                    # (..., C)
+            var = ops.mean(diff ** 2, axis=-1, keepdims=True)  # (..., 1)
+            x_hat = diff * ((var + self.eps) ** -0.5)       # (..., C)
+            return x_hat * self.gamma + self.beta            # (..., C)
+
+        scaled = x / scale
+        mu = ops.mean(scaled, axis=-1, keepdims=True)
+        diff = scaled - mu
+        var = ops.mean(diff ** 2, axis=-1, keepdims=True)
+        eps_scaled = (self.eps / scale) / scale
+        x_hat = diff * ((var + eps_scaled) ** -0.5)
+        return x_hat * self.gamma + self.beta
 
     def infer(self, x):
         x = np.asarray(x)
         self._validate_input_shape(x.shape)
-        mu = x.mean(axis=-1, keepdims=True)
-        var = ((x - mu) ** 2).mean(axis=-1, keepdims=True)
-        return (x - mu) * ((var + self.eps) ** -0.5) * self.gamma.data + self.beta.data
+        scale = _normalization_scale(x)
+        if scale is None:
+            mu = x.mean(axis=-1, keepdims=True)
+            var = ((x - mu) ** 2).mean(axis=-1, keepdims=True)
+            return (x - mu) * ((var + self.eps) ** -0.5) * self.gamma.data + self.beta.data
+
+        scaled = x / scale
+        mu = scaled.mean(axis=-1, keepdims=True)
+        diff = scaled - mu
+        var = (diff ** 2).mean(axis=-1, keepdims=True)
+        eps_scaled = (self.eps / scale) / scale
+        return diff * ((var + eps_scaled) ** -0.5) * self.gamma.data + self.beta.data
 
     def _validate_input_shape(self, shape):
         if not shape or shape[-1] != self.normalized_shape:
@@ -234,14 +267,28 @@ class RMSNorm(Module):
 
     def forward(self, x: Tensor) -> Tensor:
         self._validate_input_shape(x.shape)
-        ms = ops.mean(x ** 2, axis=-1, keepdims=True)   # (..., 1)
-        return x * ((ms + self.eps) ** -0.5) * self.gamma
+        scale = _normalization_scale(x.data)
+        if scale is None:
+            ms = ops.mean(x ** 2, axis=-1, keepdims=True)   # (..., 1)
+            return x * ((ms + self.eps) ** -0.5) * self.gamma
+
+        scaled = x / scale
+        ms = ops.mean(scaled ** 2, axis=-1, keepdims=True)
+        eps_scaled = (self.eps / scale) / scale
+        return scaled * ((ms + eps_scaled) ** -0.5) * self.gamma
 
     def infer(self, x):
         x = np.asarray(x)
         self._validate_input_shape(x.shape)
-        ms = (x ** 2).mean(axis=-1, keepdims=True)
-        return x * ((ms + self.eps) ** -0.5) * self.gamma.data
+        scale = _normalization_scale(x)
+        if scale is None:
+            ms = (x ** 2).mean(axis=-1, keepdims=True)
+            return x * ((ms + self.eps) ** -0.5) * self.gamma.data
+
+        scaled = x / scale
+        ms = (scaled ** 2).mean(axis=-1, keepdims=True)
+        eps_scaled = (self.eps / scale) / scale
+        return scaled * ((ms + eps_scaled) ** -0.5) * self.gamma.data
 
     def _validate_input_shape(self, shape):
         if not shape or shape[-1] != self.normalized_shape:
