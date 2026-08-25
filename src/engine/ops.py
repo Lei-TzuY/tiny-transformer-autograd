@@ -605,7 +605,11 @@ def silu(x: Tensor) -> Tensor:
 def gelu(x: Tensor) -> Tensor:
     """GELU(x) ≈ 0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))"""
     c = np.sqrt(2.0 / np.pi)
-    inner = c * (x.data + 0.044715 * x.data ** 3)
+    # For large finite |x| the cubic can overflow even though tanh should simply
+    # saturate to ±1. Treat that overflow as the mathematically correct saturated
+    # intermediate instead of leaking a RuntimeWarning from a finite input.
+    with np.errstate(over="ignore"):
+        inner = c * (x.data + 0.044715 * x.data ** 3)
     t = np.tanh(inner)
     val = 0.5 * x.data * (1.0 + t)
     out = Tensor(val, requires_grad=x.requires_grad, _children=(x,), _op="gelu")
@@ -614,7 +618,11 @@ def gelu(x: Tensor) -> Tensor:
         if x.requires_grad:
             x._ensure_grad()
             sech2 = 1.0 - t * t
-            dtanh_dx = c * (1.0 + 3.0 * 0.044715 * x.data ** 2)
+            # Preserve the historical whole-array arithmetic for every
+            # non-saturated element. Only replace saturated x values before the
+            # polynomial derivative so huge finite inputs cannot overflow x**2.
+            safe_x = np.where(sech2 == 0.0, 0.0, x.data)
+            dtanh_dx = c * (1.0 + 3.0 * 0.044715 * safe_x ** 2)
             dx = 0.5 * (1.0 + t) + 0.5 * x.data * sech2 * dtanh_dx
             x.grad += out.grad * dx
 
