@@ -27,15 +27,16 @@ def beam_generate(
     real. The returned array preserves the original shared padded width and
     appends exactly ``max_new_tokens`` columns.
 
-    The prompt prefill is batched across every row, then each row receives its
-    own logits and cache slice and runs an independent beam tree. Scores are
-    never compared across prompts. With ``use_cache=True`` every cache retained
-    by the beam tree is an immutable snapshot. Branches may therefore share a
-    parent cache without copying it. Selected siblings are scored together in
-    one batched inference call, whose returned child cache is split back into
-    immutable per-beam views. Once a cache fills ``context_len``, selected
-    children are re-prefilled together from their cropped strict windows so
-    positions are renumbered and out-of-window tokens are genuinely forgotten.
+    Beam scores and candidate selection stay independent per prompt row, but
+    inference is tensorized wherever the rows share compatible shapes. Prompt
+    prefill runs once for the whole request. On later steps, every row selects
+    its own best children, then all selected children across all prompt rows are
+    flattened into one inference batch. Immutable KV snapshots make that cache
+    batching safe even when siblings share the same parent state.
+
+    When a cache fills ``context_len``, all selected children are re-prefilled
+    together from their cropped strict windows so positions are renumbered and
+    out-of-window tokens are genuinely forgotten.
     """
     if not isinstance(max_new_tokens, (int, np.integer)) or max_new_tokens < 0:
         raise ValueError("max_new_tokens must be a non-negative integer")
@@ -53,83 +54,104 @@ def beam_generate(
     if max_new_tokens == 0:
         return idx
 
-    # Every row shares the same padded slot width, so the expensive prompt
-    # prefill can be one batched inference even when real prompt lengths differ.
-    # Per-row position_ids preserve ragged left-padding semantics.
+    # Every row shares the same padded slot width, so prompt prefill is one
+    # batched inference even when real prompt lengths differ. Per-row
+    # position_ids preserve ragged left-padding semantics.
     logits, cache = _prefill(model, idx, mask)
 
-    rows = []
+    beam_groups = []
+    row_masks = []
     for row in range(idx.shape[0]):
-        row_mask = None if mask is None else mask[row : row + 1]
         row_cache = _slice_cache(cache, row) if use_cache else None
-        rows.append(
-            _beam_generate_one(
-                model,
-                idx[row : row + 1],
-                max_new_tokens,
-                beam_width,
-                temperature,
-                row_mask,
-                use_cache,
-                logits[row : row + 1],
-                row_cache,
-            )
+        beam_groups.append(
+            [(idx[row : row + 1], 0.0, logits[row : row + 1], row_cache)]
         )
-    return np.concatenate(rows, axis=0)
-
-
-def _beam_generate_one(
-    model,
-    idx,
-    max_new_tokens,
-    beam_width,
-    temperature,
-    mask,
-    use_cache,
-    initial_logits,
-    initial_cache,
-):
-    """Decode one validated prompt row from its batched-prefill state."""
-    beams = [(idx, 0.0, initial_logits, initial_cache)]
+        row_masks.append(None if mask is None else mask[row : row + 1])
 
     for step in range(max_new_tokens):
-        candidates = []
-        for sequence, score, logits, cache in beams:
-            log_probs = _log_softmax(logits[0, -1] / temperature)
-            best = np.argsort(log_probs)[-beam_width:]
-            for token in best:
-                extended = np.concatenate([sequence, [[token]]], axis=1)
-                candidates.append(
-                    (
-                        extended,
-                        score + float(log_probs[token]),
-                        cache,
-                    )
-                )
-
-        selected = sorted(
-            candidates,
-            key=lambda item: item[1],
-            reverse=True,
-        )[:beam_width]
+        selected_groups = [
+            _select_children(beams, beam_width, temperature)
+            for beams in beam_groups
+        ]
         if step + 1 == max_new_tokens:
-            return selected[0][0]
+            return np.concatenate(
+                [selected[0][0] for selected in selected_groups],
+                axis=0,
+            )
 
         if mask is not None:
-            mask = np.concatenate([mask, np.ones((1, 1), dtype=bool)], axis=1)
+            row_masks = [
+                np.concatenate(
+                    [row_mask, np.ones((1, 1), dtype=bool)],
+                    axis=1,
+                )
+                for row_mask in row_masks
+            ]
 
-        beams = _advance_selected(model, selected, mask, use_cache)
+        beam_groups = _advance_selected_groups(
+            model,
+            selected_groups,
+            row_masks,
+            use_cache,
+        )
 
     # The loop returns on its final iteration for every positive token count.
-    return beams[0][0]
+    return idx
+
+
+def _select_children(beams, beam_width, temperature):
+    """Select one prompt row's highest-scoring next beam candidates."""
+    candidates = []
+    for sequence, score, logits, cache in beams:
+        log_probs = _log_softmax(logits[0, -1] / temperature)
+        best = np.argsort(log_probs)[-beam_width:]
+        for token in best:
+            extended = np.concatenate([sequence, [[token]]], axis=1)
+            candidates.append(
+                (
+                    extended,
+                    score + float(log_probs[token]),
+                    cache,
+                )
+            )
+    return sorted(
+        candidates,
+        key=lambda item: item[1],
+        reverse=True,
+    )[:beam_width]
 
 
 def _advance_selected(model, selected, mask, use_cache):
-    """Score all selected children together, then split state back per beam."""
-    sequences = np.concatenate([sequence for sequence, _, _ in selected], axis=0)
-    count = len(selected)
-    batch_mask = None if mask is None else np.repeat(mask, count, axis=0)
-    parent_caches = [parent_cache for _, _, parent_cache in selected]
+    """Compatibility wrapper for advancing one prompt row's selected beams."""
+    return _advance_selected_groups(model, [selected], [mask], use_cache)[0]
+
+
+def _advance_selected_groups(model, selected_groups, row_masks, use_cache):
+    """Score selected children from every prompt row in one inference batch."""
+    if len(selected_groups) != len(row_masks):
+        raise ValueError("selected beam groups and masks must have equal length")
+
+    flattened = [item for group in selected_groups for item in group]
+    if not flattened:
+        raise ValueError("cannot advance an empty beam selection")
+
+    sequences = np.concatenate([sequence for sequence, _, _ in flattened], axis=0)
+    parent_caches = [parent_cache for _, _, parent_cache in flattened]
+
+    if row_masks[0] is None:
+        if any(row_mask is not None for row_mask in row_masks):
+            raise ValueError("beam row masks must be either all present or all absent")
+        batch_mask = None
+    else:
+        if any(row_mask is None for row_mask in row_masks):
+            raise ValueError("beam row masks must be either all present or all absent")
+        batch_mask = np.concatenate(
+            [
+                np.repeat(row_mask, len(group), axis=0)
+                for group, row_mask in zip(selected_groups, row_masks)
+            ],
+            axis=0,
+        )
 
     if use_cache and all(
         _can_extend_cache(parent_cache, model.context_len)
@@ -142,11 +164,23 @@ def _advance_selected(model, selected, mask, use_cache):
         if not use_cache:
             cache = None
 
-    next_beams = []
-    for row, (sequence, score, _) in enumerate(selected):
-        row_cache = None if cache is None else _slice_cache(cache, row)
-        next_beams.append((sequence, score, logits[row : row + 1], row_cache))
-    return next_beams
+    next_groups = []
+    flat_row = 0
+    for group in selected_groups:
+        next_group = []
+        for sequence, score, _ in group:
+            row_cache = None if cache is None else _slice_cache(cache, flat_row)
+            next_group.append(
+                (
+                    sequence,
+                    score,
+                    logits[flat_row : flat_row + 1],
+                    row_cache,
+                )
+            )
+            flat_row += 1
+        next_groups.append(next_group)
+    return next_groups
 
 
 def _freeze_cache(cache):
