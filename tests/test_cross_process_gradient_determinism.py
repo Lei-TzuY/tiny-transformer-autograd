@@ -28,6 +28,13 @@ _SCRIPT = textwrap.dedent(
     _address_junk = [object() for _ in range(perturbation)]
 
 
+    def _update_array(digest, array):
+        array = np.asarray(array)
+        digest.update(str(array.shape).encode("ascii"))
+        digest.update(array.dtype.str.encode("ascii"))
+        digest.update(array.tobytes(order="C"))
+
+
     def gradient_digest(label, architecture):
         np.random.seed(20260825)
         model = GPT(
@@ -47,14 +54,12 @@ _SCRIPT = textwrap.dedent(
 
         digest = hashlib.sha256()
         digest.update(label.encode("utf-8"))
-        digest.update(np.asarray(loss.data, dtype=np.float64).tobytes())
+        _update_array(digest, np.asarray(loss.data, dtype=np.float64))
         for name, parameter in model.named_parameters():
             assert parameter.grad is not None
-            gradient = np.asarray(parameter.grad)
             digest.update(name.encode("utf-8"))
-            digest.update(str(gradient.shape).encode("ascii"))
-            digest.update(gradient.dtype.str.encode("ascii"))
-            digest.update(gradient.tobytes(order="C"))
+            _update_array(digest, parameter.data)
+            _update_array(digest, parameter.grad)
         return digest.hexdigest()
 
 
