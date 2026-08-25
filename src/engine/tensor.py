@@ -38,6 +38,19 @@ def _snapshot_index(index):
     return index
 
 
+def _ordered_unique_children(children):
+    """Deduplicate Tensor parents by identity while preserving first-seen order."""
+    unique = []
+    seen = set()
+    for child in children:
+        child_id = id(child)
+        if child_id in seen:
+            continue
+        seen.add(child_id)
+        unique.append(child)
+    return tuple(unique)
+
+
 class _VersionedArray(np.ndarray):
     """ndarray view that increments its owning Tensor version on normal writes."""
 
@@ -160,7 +173,7 @@ class Tensor:
     __array_priority__ = 1000
 
     def __init__(self, data, requires_grad=False, _children=(), _op=""):
-        children = tuple(_children)
+        children = _ordered_unique_children(_children)
         is_op_result = bool(children)
         recording = is_grad_enabled()
         requested_grad = bool(requires_grad)
@@ -189,13 +202,14 @@ class Tensor:
         self._version = 0
         self._data = _VersionedArray(data, owner=self)
         self.requires_grad = requires_grad
-        self.grad = np.zeros(self._data.shape, dtype=np.float64) if requires_grad else None
+        self.grad = (
+            np.zeros(self._data.shape, dtype=np.float64) if requires_grad else None
+        )
         self._detached_by_no_grad = detached_by_no_grad and not requires_grad
 
-        # Computational graph bookkeeping. Every graph edge stores the parent
-        # data version observed by the forward pass. A later in-place write then
-        # invalidates this graph instead of silently differentiating new values.
-        self._children = set(children)
+        # Keep parent traversal deterministic. A set would deduplicate identities
+        # but would also make reverse-mode accumulation order depend on hashes / ids.
+        self._children = children
         self._parent_versions = {
             child: child._version for child in self._children
         }
