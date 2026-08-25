@@ -74,8 +74,6 @@ def clip_grad_norm_(params, max_norm=1.0):
     if max_norm < 0.0:
         raise ValueError("max_norm must be non-negative")
 
-    # Materialise once: clipping needs two passes, and callers may supply a
-    # generator rather than a reusable list.
     try:
         params = tuple(params)
     except TypeError as exc:
@@ -102,8 +100,6 @@ def clip_grad_norm_(params, max_norm=1.0):
     if largest == 0.0:
         return 0.0
 
-    # Scale before squaring. Directly evaluating grad**2 overflows for values
-    # above sqrt(float_max), even though their L2 norm may still be representable.
     scaled_sumsq = 0.0
     for grad in gradients:
         scaled = grad / largest
@@ -118,8 +114,6 @@ def clip_grad_norm_(params, max_norm=1.0):
     )
 
     if max_norm > 0.0 and (not np.isfinite(total) or total > max_norm):
-        # Compute the ratio in scaled coordinates as well; max_norm / total
-        # would underflow to zero when the true norm exceeds float64 range.
         scale = (max_norm / largest) / scaled_norm
         for grad in gradients:
             grad *= scale
@@ -137,11 +131,6 @@ def get_batch(data, context_len, batch_size):
     return x, y
 
 
-# ---------------------------------------------------------------------------
-# Document corpora (one document per line, or per JSONL record)
-# ---------------------------------------------------------------------------
-# Padding is masked out of attention and its targets are ignored by the loss,
-# so the id is arbitrary; 0 is simply always a valid token.
 PAD_TOKEN = 0
 IGNORE_INDEX = -1
 
@@ -173,14 +162,6 @@ def load_documents(text, data_format, jsonl_field="text"):
 
 
 def encode_documents(documents, tokenizer, context_len):
-    """
-    Encode documents and keep the ones that can be trained on.
-
-    Each document is truncated to ``context_len + 1`` tokens, because the input
-    is the document without its last token and the target is the document
-    without its first. Anything shorter than two tokens has no such pair and is
-    dropped.
-    """
     encoded = []
     for document in documents:
         tokens = np.asarray(tokenizer.encode(document), dtype=np.int64)
@@ -192,14 +173,6 @@ def encode_documents(documents, tokenizer, context_len):
 
 def get_document_batch(documents, batch_size, pad_token=PAD_TOKEN,
                        ignore_index=IGNORE_INDEX):
-    """
-    Sample documents into a right-padded batch.
-
-    Returns (tokens, targets, attention_mask). Padding sits on the right, which
-    is what the forward pass expects: position i is slot i. Padded keys are
-    hidden by the mask and padded targets hold ``ignore_index``, so a padded
-    batch trains exactly like the documents would on their own.
-    """
     if not documents:
         raise ValueError("no documents are long enough to train on")
     if batch_size <= 0:
@@ -222,7 +195,6 @@ def get_document_batch(documents, batch_size, pad_token=PAD_TOKEN,
 
 
 def batch_loss(model, tokens, targets, mask=None):
-    """Cross entropy for one batch, scoring only real (unpadded) positions."""
     if mask is None:
         return ops.cross_entropy(model(tokens), targets)
     return ops.cross_entropy(
@@ -231,18 +203,6 @@ def batch_loss(model, tokens, targets, mask=None):
 
 
 def accumulate_document_gradients(model, sample_batch, params, grad_accum):
-    """Accumulate ragged document gradients as one token-weighted mean loss.
-
-    ``cross_entropy`` returns a mean over the scored targets in each individual
-    micro-batch. Averaging those means would give a short document batch the
-    same influence as a long one. Instead, seed each scalar backward pass with
-    its scored-token count to recover a loss sum, accumulate those sums, and
-    divide the resulting leaf gradients by the total number of scored tokens.
-
-    This helper is used only for document training with ``grad_accum > 1``;
-    the historical single-micro-batch and plain token-stream paths stay
-    byte-for-byte equivalent in their numerical operations.
-    """
     if grad_accum <= 1:
         raise ValueError("document gradient accumulation requires grad_accum > 1")
 
@@ -269,14 +229,11 @@ def accumulate_document_gradients(model, sample_batch, params, grad_accum):
 def evaluate_batches(
     model, sample_batch, eval_iters, weight_by_scored_tokens=False
 ):
-    """Mean loss and perplexity over batches sampled for validation."""
     previous_mode = getattr(model, "training", True)
     model.eval()
     losses = []
     weights = []
     try:
-        # eval() only disables dropout; no_grad() additionally stops every op
-        # from recording a node, so validation never allocates a backward graph.
         with no_grad():
             for _ in range(eval_iters):
                 batch = sample_batch()
@@ -288,7 +245,6 @@ def evaluate_batches(
                         raise ValueError("evaluation batch contains no scored tokens")
                     weights.append(scored)
     finally:
-        # A sampler/model failure must not leak eval mode into later training.
         model.train(previous_mode)
     mean_loss = float(
         np.average(losses, weights=weights)
@@ -299,7 +255,6 @@ def evaluate_batches(
 
 
 def evaluate(model, data, context_len, batch_size, eval_iters):
-    """Return mean validation loss and perplexity, or None for short data."""
     if len(data) <= context_len:
         return None
     return evaluate_batches(
@@ -310,7 +265,6 @@ def evaluate(model, data, context_len, batch_size, eval_iters):
 
 
 def evaluate_documents(model, documents, batch_size, eval_iters):
-    """Token-weighted validation over documents, or None for an empty split."""
     if not documents:
         return None
     return evaluate_batches(
@@ -325,82 +279,44 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Pure-NumPy tiny GPT trainer")
     parser.add_argument("--data", type=str, default=None, help="Path to plain-text data")
     parser.add_argument(
-        "--data-format",
-        choices=["text", "lines", "jsonl"],
-        default="text",
-        help=(
-            "text: one token stream, random windows; "
-            "lines: one document per line; "
-            "jsonl: one JSON record per line (padded, masked batches)"
-        ),
+        "--data-format", choices=["text", "lines", "jsonl"], default="text",
+        help="text: one token stream, random windows; lines: one document per line; jsonl: one JSON record per line (padded, masked batches)",
     )
-    parser.add_argument(
-        "--jsonl-field",
-        type=str,
-        default="text",
-        help="Field holding the document text with --data-format jsonl",
-    )
-    parser.add_argument("--iters", type=int, default=1000, help="Total training iterations")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Peak learning rate")
-    parser.add_argument("--min-lr", type=float, default=0.0, help="Final cosine-decay LR")
-    parser.add_argument("--warmup-iters", type=int, default=100, help="Linear warmup steps")
-    parser.add_argument("--batch", type=int, default=8, help="Batch size")
-    parser.add_argument("--ctx", type=int, default=32, help="Context length")
-    parser.add_argument("--d", type=int, default=64, help="Model width")
-    parser.add_argument("--heads", type=int, default=4, help="Attention heads")
-    parser.add_argument("--layers", type=int, default=2, help="Transformer layers")
-    parser.add_argument("--dropout", type=float, default=0.0, help="Dropout probability")
-    parser.add_argument(
-        "--arch",
-        choices=["gpt", "llama"],
-        default="gpt",
-        help="gpt: LayerNorm+learned pos+GELU; llama: RMSNorm+RoPE+SwiGLU",
-    )
+    parser.add_argument("--jsonl-field", type=str, default="text")
+    parser.add_argument("--iters", type=int, default=1000)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--min-lr", type=float, default=0.0)
+    parser.add_argument("--warmup-iters", type=int, default=100)
+    parser.add_argument("--batch", type=int, default=8)
+    parser.add_argument("--ctx", type=int, default=32)
+    parser.add_argument("--d", type=int, default=64)
+    parser.add_argument("--heads", type=int, default=4)
+    parser.add_argument("--layers", type=int, default=2)
+    parser.add_argument("--dropout", type=float, default=0.0)
+    parser.add_argument("--arch", choices=["gpt", "llama"], default="gpt")
     parser.add_argument("--tokenizer", choices=["char", "bpe"], default="char")
-    parser.add_argument("--bpe-merges", type=int, default=100, help="BPE merge operations")
-    parser.add_argument("--lora-rank", type=int, default=0, help="Enable LoRA with this rank")
-    parser.add_argument("--lora-alpha", type=float, default=1.0, help="LoRA scaling alpha")
-    parser.add_argument(
-        "--optimizer",
-        choices=["adam", "adamw"],
-        default=None,
-        help=(
-            "adam: L2-coupled decay; adamw: decoupled decay "
-            "(default: Adam for new runs, saved optimizer when resuming)"
-        ),
-    )
-    parser.add_argument("--weight-decay", type=float, default=1e-2, help="Weight decay")
-    parser.add_argument(
-        "--grad-accum",
-        type=int,
-        default=1,
-        help="Micro-batches accumulated per optimizer step (simulates batch×N)",
-    )
-    parser.add_argument("--grad-clip", type=float, default=1.0, help="0 disables clipping")
-    parser.add_argument(
-        "--grad-checkpoint",
-        action="store_true",
-        help="Recompute block activations in backward (less memory, ~1 extra forward)",
-    )
-    parser.add_argument("--val-frac", type=float, default=0.1, help="Validation split fraction")
-    parser.add_argument("--eval-interval", type=int, default=100, help="Validation interval")
-    parser.add_argument("--eval-iters", type=int, default=10, help="Validation batches")
-    parser.add_argument("--eval-only", action="store_true", help="Evaluate and exit")
-    parser.add_argument("--log-jsonl", type=str, default=None, help="Append metrics as JSONL")
-    parser.add_argument("--save", type=str, default=None, help="Checkpoint output path")
-    parser.add_argument("--resume", type=str, default=None, help="Checkpoint to resume")
-    parser.add_argument("--save-every", type=int, default=0, help="Periodic save interval")
-    parser.add_argument("--sample", type=int, default=200, help="Generated tokens at end")
-    parser.add_argument("--no-sample", action="store_true", help="Skip final generation")
-    parser.add_argument("--generate-only", action="store_true", help="Skip training and only sample")
-    parser.add_argument("--prompt", type=str, default=None, help="Prompt text for generation")
-    parser.add_argument("--prompt-file", type=str, default=None, help="Prompt text file")
-    parser.add_argument(
-        "--strategy",
-        choices=["sample", "greedy", "beam"],
-        default="sample",
-        help="Generation strategy",
-    )
+    parser.add_argument("--bpe-merges", type=int, default=100)
+    parser.add_argument("--lora-rank", type=int, default=0)
+    parser.add_argument("--lora-alpha", type=float, default=1.0)
+    parser.add_argument("--optimizer", choices=["adam", "adamw"], default=None)
+    parser.add_argument("--weight-decay", type=float, default=1e-2)
+    parser.add_argument("--grad-accum", type=int, default=1)
+    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--grad-checkpoint", action="store_true")
+    parser.add_argument("--val-frac", type=float, default=0.1)
+    parser.add_argument("--eval-interval", type=int, default=100)
+    parser.add_argument("--eval-iters", type=int, default=10)
+    parser.add_argument("--eval-only", action="store_true")
+    parser.add_argument("--log-jsonl", type=str, default=None)
+    parser.add_argument("--save", type=str, default=None)
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--save-every", type=int, default=0)
+    parser.add_argument("--sample", type=int, default=200)
+    parser.add_argument("--no-sample", action="store_true")
+    parser.add_argument("--generate-only", action="store_true")
+    parser.add_argument("--prompt", type=str, default=None)
+    parser.add_argument("--prompt-file", type=str, default=None)
+    parser.add_argument("--strategy", choices=["sample", "greedy", "beam"], default="sample")
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--top-p", type=float, default=None)
@@ -422,8 +338,6 @@ def main():
         text = _BUILTIN_TEXT
         print("[info] Using built-in Shakespeare excerpt. Pass --data FILE for custom text.")
 
-    # Split into documents first: the tokenizer must see the document text, not
-    # the JSON scaffolding around it, or braces and quotes end up in the vocab.
     documents = None
     corpus = text
     if args.data_format != "text":
@@ -468,78 +382,39 @@ def main():
         if split <= context_len:
             raise ValueError("dataset is too short for train and validation context windows")
         train_data, val_data = data[:split], data[split:]
-        print(
-            f"[info] tokenizer={tokenizer.kind}  vocab={tokenizer.vocab_size}  "
-            f"train={len(train_data):,}  val={len(val_data):,} tokens"
-        )
     else:
         encoded = encode_documents(documents, tokenizer, model_config["context_len"])
         if len(encoded) < 2:
-            raise ValueError(
-                "need at least two documents of two or more tokens; found "
-                f"{len(encoded)} usable of {len(documents)}"
-            )
+            raise ValueError("need at least two documents of two or more tokens")
         split = min(max(1, int((1.0 - args.val_frac) * len(encoded))), len(encoded) - 1)
         train_docs, val_docs = encoded[:split], encoded[split:]
-        dropped = len(documents) - len(encoded)
-        dropped_text = f"  dropped={dropped}" if dropped else ""
-        print(
-            f"[info] tokenizer={tokenizer.kind}  vocab={tokenizer.vocab_size}  "
-            f"format={args.data_format}  train={len(train_docs):,}  "
-            f"val={len(val_docs):,} documents{dropped_text}"
-        )
 
     model = GPT(**model_config)
-    # A runtime toggle rather than architecture, so it applies to resumed runs
-    # too and is not read back from the checkpoint's model config.
     model.grad_checkpoint = args.grad_checkpoint
     params = model.parameters()
     optimizer_name = _resolve_optimizer_name(args.optimizer, checkpoint)
     optimizer_cls = {"adam": Adam, "adamw": AdamW}[optimizer_name]
     optimizer = optimizer_cls(params, lr=args.lr, weight_decay=args.weight_decay)
     scheduler = WarmupCosineScheduler(
-        optimizer,
-        total_steps=args.iters,
-        warmup_steps=min(args.warmup_iters, args.iters),
-        min_lr=args.min_lr,
+        optimizer, total_steps=args.iters,
+        warmup_steps=min(args.warmup_iters, args.iters), min_lr=args.min_lr,
     )
-    start_step = (
-        restore_checkpoint(checkpoint, model, optimizer, scheduler)
-        if checkpoint
-        else 0
-    )
-    if not (args.eval_only or args.generate_only) and start_step > args.iters:
-        raise ValueError(
-            f"checkpoint step {start_step} exceeds requested --iters {args.iters}"
-        )
+    start_step = restore_checkpoint(checkpoint, model, optimizer, scheduler) if checkpoint else 0
     scheduler.total_steps = args.iters
     scheduler.warmup_steps = min(scheduler.warmup_steps, args.iters)
-    print(f"[info] {model}")
-    accum_text = f"  grad_accum={args.grad_accum}" if args.grad_accum > 1 else ""
-    print(
-        f"[info] optimizer={optimizer.__class__.__name__}  peak_lr={scheduler.base_lr:g}  "
-        f"warmup={scheduler.warmup_steps}  steps={args.iters}  "
-        f"resume_step={start_step}{accum_text}"
-    )
 
     if args.generate_only:
         _print_sample(model, tokenizer, corpus, args)
         return
 
-    # One sampler interface for both corpora: a stream yields unmasked windows,
-    # a document corpus yields right-padded batches plus their mask.
     if train_docs is None:
         def sample_batch():
             return (*get_batch(train_data, model.context_len, args.batch), None)
-
         def run_eval():
-            return evaluate(
-                model, val_data, model.context_len, args.batch, args.eval_iters
-            )
+            return evaluate(model, val_data, model.context_len, args.batch, args.eval_iters)
     else:
         def sample_batch():
             return get_document_batch(train_docs, args.batch)
-
         def run_eval():
             return evaluate_documents(model, val_docs, args.batch, args.eval_iters)
 
@@ -553,19 +428,10 @@ def main():
     started = time.time()
     for step in range(start_step + 1, args.iters + 1):
         lr = scheduler.step(step - 1)
-
-        # Gradient accumulation: backward() adds into .grad, so running
-        # several micro-batches before step() simulates a larger batch without
-        # retaining every micro-batch graph at once. Ragged document batches
-        # need token weighting because each individual CE is already a mean.
         optimizer.zero_grad()
         if train_docs is not None and args.grad_accum > 1:
-            step_loss = accumulate_document_gradients(
-                model, sample_batch, params, args.grad_accum
-            )
+            step_loss = accumulate_document_gradients(model, sample_batch, params, args.grad_accum)
         else:
-            # Keep the historical stream path (and document grad_accum=1) in
-            # exactly the same arithmetic order for seeded trajectory stability.
             micro_losses = []
             for _ in range(args.grad_accum):
                 loss = batch_loss(model, *sample_batch())
@@ -587,40 +453,16 @@ def main():
             validation = run_eval()
             val_loss = None if validation is None else validation[0]
             val_ppl = None if validation is None else validation[1]
-            val_text = (
-                "val=skipped"
-                if validation is None
-                else f"val_loss={val_loss:.4f}  val_ppl={val_ppl:.2f}"
-            )
             elapsed = time.time() - started
-            print(
-                f"step {step:>5}/{args.iters}  train_loss={average:.4f}  "
-                f"{val_text}  lr={lr:.6g}  gnorm={grad_norm:.3f}  "
-                f"elapsed={elapsed:.1f}s"
-            )
+            print(f"step {step:>5}/{args.iters}  train_loss={average:.4f}  lr={lr:.6g}  gnorm={grad_norm:.3f}  elapsed={elapsed:.1f}s")
             if args.log_jsonl:
-                _append_jsonl(
-                    args.log_jsonl,
-                    {
-                        "step": step,
-                        "total_steps": args.iters,
-                        "train_loss": average,
-                        "val_loss": val_loss,
-                        "val_ppl": val_ppl,
-                        "lr": lr,
-                        "grad_norm": grad_norm,
-                        "elapsed_sec": elapsed,
-                    },
-                )
+                _append_jsonl(args.log_jsonl, {"step": step, "total_steps": args.iters, "train_loss": average, "val_loss": val_loss, "val_ppl": val_ppl, "lr": lr, "grad_norm": grad_norm, "elapsed_sec": elapsed})
 
         if args.save and args.save_every and step % args.save_every == 0:
             save_checkpoint(args.save, model, optimizer, scheduler, step, _metadata(model, tokenizer))
 
     if args.save:
-        save_checkpoint(
-            args.save, model, optimizer, scheduler, args.iters, _metadata(model, tokenizer)
-        )
-        print(f"[info] saved checkpoint: {args.save}")
+        save_checkpoint(args.save, model, optimizer, scheduler, args.iters, _metadata(model, tokenizer))
 
     if not args.no_sample:
         _print_sample(model, tokenizer, corpus, args)
@@ -635,26 +477,16 @@ def _print_eval(run_eval):
 
 
 def _print_sample(model, tokenizer, corpus, args):
-    print("\n" + "=" * 60)
-    print("Sample generation:")
-    print("=" * 60)
     prompt = _prompt_array(args, tokenizer, corpus, model.context_len)
     generated = model.generate(
-        prompt,
-        max_new_tokens=args.sample,
-        temperature=args.temperature,
-        top_k=args.top_k,
-        top_p=args.top_p,
-        strategy=args.strategy,
-        beam_width=args.beam_width,
-        use_cache=not args.no_kv_cache,
+        prompt, max_new_tokens=args.sample, temperature=args.temperature,
+        top_k=args.top_k, top_p=args.top_p, strategy=args.strategy,
+        beam_width=args.beam_width, use_cache=not args.no_kv_cache,
     )
     print(tokenizer.decode(generated[0]))
-    print("=" * 60)
 
 
 def _prompt_array(args, tokenizer, corpus, context_len):
-    """Build the generation prompt; the default comes from the corpus itself."""
     if args.prompt_file:
         with open(args.prompt_file, "r", encoding="utf-8") as handle:
             prompt_text = handle.read()
@@ -662,36 +494,27 @@ def _prompt_array(args, tokenizer, corpus, context_len):
         prompt_text = args.prompt
     else:
         prompt_text = corpus[: max(context_len, 10)]
-
     try:
         encoded = tokenizer.encode(prompt_text)
     except KeyError as exc:
-        raise ValueError(
-            f"prompt contains token not present in the tokenizer vocabulary: {exc}"
-        ) from exc
+        raise ValueError(f"prompt contains token not present in the tokenizer vocabulary: {exc}") from exc
     if len(encoded) == 0:
         raise ValueError("generation prompt must not be empty")
     return np.array([encoded[-context_len:]], dtype=np.int64)
 
 
 def _metadata(model, tokenizer):
-    return {
-        "model_config": model.config(),
-        "tokenizer": tokenizer.state_dict(),
-    }
+    return {"model_config": model.config(), "tokenizer": tokenizer.state_dict()}
 
 
 def _resolve_optimizer_name(requested, checkpoint):
-    """Choose an optimizer while preserving checkpoint update semantics."""
     saved_type = checkpoint.get("optimizer_type") if checkpoint else None
     saved = saved_type.lower() if saved_type is not None else None
     supported = {"adam", "adamw"}
     if saved is not None and saved not in supported:
         raise ValueError(f"unsupported checkpoint optimizer type: {saved_type}")
     if requested is not None and saved is not None and requested != saved:
-        raise ValueError(
-            f"--optimizer {requested} conflicts with checkpoint optimizer {saved}"
-        )
+        raise ValueError(f"--optimizer {requested} conflicts with checkpoint optimizer {saved}")
     return saved or requested or "adam"
 
 
@@ -724,18 +547,15 @@ def _validate_real_arg(args, name):
 
 
 def _validate_args(args):
-    # argparse already parses these types for normal CLI use, but this function
-    # is also the last fail-fast boundary before numeric values reach model,
-    # optimizer, scheduler, and generation code. Explicit checks prevent NaN,
-    # infinities, bool-as-int values, and malformed programmatic Namespaces from
-    # slipping through comparison-only range validation.
     integer_names = (
         "iters", "batch", "ctx", "d", "heads", "layers", "grad_accum",
         "eval_interval", "eval_iters", "warmup_iters", "save_every",
-        "bpe_merges", "lora_rank", "sample", "beam_width", "seed",
+        "bpe_merges", "lora_rank", "sample", "beam_width",
     )
     for name in integer_names:
         _validate_int_arg(args, name)
+    if hasattr(args, "seed"):
+        _validate_int_arg(args, "seed")
     if args.top_k is not None:
         _validate_int_arg(args, "top_k")
 
