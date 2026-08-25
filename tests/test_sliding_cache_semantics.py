@@ -67,6 +67,12 @@ def _next_logits(model):
     return exact[:, -1, :], streamed[:, -1, :]
 
 
+def _assert_rng_state_equal(left, right):
+    assert left[0] == right[0]
+    np.testing.assert_array_equal(left[1], right[1])
+    assert left[2:] == right[2:]
+
+
 def test_shifted_rope_cache_is_exact_for_one_block():
     exact, streamed = _next_logits(_model(num_layers=1))
     np.testing.assert_allclose(streamed, exact, atol=1e-12, rtol=1e-12)
@@ -152,6 +158,30 @@ def test_zero_new_tokens_returns_a_copy_without_inference():
 
     np.testing.assert_array_equal(result, prompt)
     assert result is not prompt
+
+
+@pytest.mark.parametrize("strategy", ["greedy", "sample"])
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf])
+def test_streaming_rejects_invalid_selection_logits_without_consuming_rng(
+    strategy, bad_value
+):
+    prompt = np.array([[1, 3]], dtype=np.int64)
+    model = _model(1)
+
+    def invalid_infer(idx, *_args, **_kwargs):
+        batch, time = np.asarray(idx).shape
+        logits = np.zeros((batch, time, model.vocab_size), dtype=np.float64)
+        logits[:, -1, 0] = bad_value
+        return logits, []
+
+    model.infer = invalid_infer
+    np.random.seed(12345)
+    rng_before = np.random.get_state()
+
+    with pytest.raises(ValueError, match=r"NaN|\+inf"):
+        stream_generate(model, prompt, 1, strategy=strategy)
+
+    _assert_rng_state_equal(np.random.get_state(), rng_before)
 
 
 @pytest.mark.parametrize(
