@@ -275,6 +275,7 @@ def _parameter_steps_from_state(saved_steps, total_step, parameter_count):
         return [total_step for _ in range(parameter_count)]
     if not isinstance(saved_steps, (list, tuple)):
         raise TypeError("Adam parameter steps must be a list or tuple")
+    saved_steps = tuple(saved_steps)
     if len(saved_steps) != parameter_count:
         raise ValueError(
             "Adam parameter step count mismatch: "
