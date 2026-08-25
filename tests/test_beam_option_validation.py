@@ -29,12 +29,17 @@ def _model():
     ("kwargs", "error", "message"),
     [
         ({"max_new_tokens": True}, TypeError, "max_new_tokens"),
+        ({"max_new_tokens": 1.0}, TypeError, "max_new_tokens"),
+        ({"max_new_tokens": np.float64(1.0)}, TypeError, "max_new_tokens"),
         ({"max_new_tokens": -1}, ValueError, "max_new_tokens"),
         ({"beam_width": True}, TypeError, "beam_width"),
+        ({"beam_width": 2.0}, TypeError, "beam_width"),
+        ({"beam_width": np.float64(2.0)}, TypeError, "beam_width"),
         ({"beam_width": 0}, ValueError, "beam_width"),
         ({"temperature": True}, TypeError, "temperature"),
         ({"temperature": np.nan}, ValueError, "finite"),
         ({"temperature": np.inf}, ValueError, "finite"),
+        ({"temperature": -np.inf}, ValueError, "finite"),
         ({"temperature": 0.0}, ValueError, "positive"),
         ({"use_cache": 1}, TypeError, "use_cache"),
     ],
@@ -68,3 +73,24 @@ def test_numpy_scalar_options_remain_supported():
     )
 
     assert result.shape == (1, 4)
+
+
+def test_zero_token_generation_validates_input_without_running_inference():
+    model = _model()
+    prompt = np.array([[1, 2]], dtype=np.int64)
+
+    def unexpected_infer(*args, **kwargs):
+        raise AssertionError("zero-token generation must not run model inference")
+
+    model.infer = unexpected_infer
+    result = beam_generate(
+        model,
+        prompt,
+        np.int64(0),
+        beam_width=np.int64(2),
+        temperature=np.float64(1.0),
+        use_cache=np.bool_(False),
+    )
+
+    np.testing.assert_array_equal(result, prompt)
+    assert result is not prompt
