@@ -8,7 +8,13 @@ strict sliding-window semantics require a re-prefill.
 
 import numpy as np
 
-from .transformer import _left_padded_positions, _log_softmax
+from .transformer import (
+    _left_padded_positions,
+    _log_softmax,
+    _validate_non_negative_int,
+    _validate_positive_finite_real,
+    _validate_positive_int,
+)
 
 
 def beam_generate(
@@ -38,14 +44,12 @@ def beam_generate(
     together from their cropped strict windows so positions are renumbered and
     out-of-window tokens are genuinely forgotten.
     """
-    if not isinstance(max_new_tokens, (int, np.integer)) or max_new_tokens < 0:
-        raise ValueError("max_new_tokens must be a non-negative integer")
-    if not isinstance(beam_width, (int, np.integer)) or beam_width <= 0:
-        raise ValueError("beam_width must be a positive integer")
-    if temperature <= 0:
-        raise ValueError("temperature must be positive")
+    max_new_tokens = _validate_non_negative_int(max_new_tokens, "max_new_tokens")
+    beam_width = _validate_positive_int(beam_width, "beam_width")
+    temperature = _validate_positive_finite_real(temperature, "temperature")
     if not isinstance(use_cache, (bool, np.bool_)):
         raise TypeError("use_cache must be boolean")
+    use_cache = bool(use_cache)
 
     idx = np.array(model._validate_token_batch(idx), dtype=np.int64, copy=True)
     mask = None
