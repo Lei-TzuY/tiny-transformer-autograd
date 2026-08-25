@@ -12,6 +12,21 @@ from engine.optim import Adam, AdamW, SGD
 from engine.tensor import Tensor
 
 
+class _ChangingBuffers(list):
+    """List-shaped state source that changes values on a second iteration."""
+
+    def __init__(self, first, second):
+        super().__init__(first)
+        self.first = first
+        self.second = second
+        self.iterations = 0
+
+    def __iter__(self):
+        self.iterations += 1
+        values = self.first if self.iterations == 1 else self.second
+        return iter(values)
+
+
 def _parameter():
     return Tensor([1.0, -2.0], requires_grad=True)
 
@@ -50,6 +65,20 @@ def test_adam_load_snapshots_cross_group_moment_aliases_before_commit(optimizer_
     assert optimizer._v[0] is second_moment
     np.testing.assert_array_equal(optimizer._m[0], [10.0, 20.0])
     np.testing.assert_array_equal(optimizer._v[0], [1.0, 2.0])
+
+
+def test_buffer_container_is_materialized_once_before_validation_and_copy():
+    optimizer = SGD([_parameter()], momentum=0.9)
+    good = np.array([3.0, 4.0])
+    bad = np.array([np.nan, 99.0])
+    changing = _ChangingBuffers([good], [bad])
+    state = optimizer.state_dict()
+    state["v"] = changing
+
+    optimizer.load_state_dict(state)
+
+    assert changing.iterations == 1
+    np.testing.assert_array_equal(optimizer._v[0], good)
 
 
 def test_adam_late_invalid_group_still_cannot_partially_commit_snapshots():
