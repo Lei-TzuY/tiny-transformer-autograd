@@ -26,6 +26,7 @@ class SGD:
         self._v = [np.zeros_like(p.data) for p in self.parameters]
 
     def step(self):
+        _validate_step_inputs(self.parameters)
         for p, v in zip(self.parameters, self._v):
             if p.grad is None:
                 continue
@@ -95,6 +96,7 @@ class Adam:
         self._v = [np.zeros_like(p.data) for p in self.parameters]
 
     def step(self):
+        _validate_step_inputs(self.parameters)
         self.t += 1
         bc1 = 1.0 - self.beta1 ** self.t
         bc2 = 1.0 - self.beta2 ** self.t
@@ -154,6 +156,7 @@ class AdamW(Adam):
     """Adam with decoupled weight decay."""
 
     def step(self):
+        _validate_step_inputs(self.parameters)
         self.t += 1
         bc1 = 1.0 - self.beta1 ** self.t
         bc2 = 1.0 - self.beta2 ** self.t
@@ -222,6 +225,36 @@ def _nonnegative_step(value, name):
     if value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
     return value
+
+
+def _validate_step_inputs(parameters):
+    """Validate every active gradient before an optimizer mutates any state."""
+    for index, parameter in enumerate(parameters):
+        gradient = parameter.grad
+        if gradient is None:
+            continue
+        if not isinstance(gradient, np.ndarray):
+            raise TypeError(f"gradient for parameter {index} must be a NumPy array")
+        if gradient.shape != parameter.data.shape:
+            raise ValueError(
+                f"gradient shape mismatch for parameter {index}: expected "
+                f"{parameter.data.shape}, got {gradient.shape}"
+            )
+        if (
+            not np.issubdtype(gradient.dtype, np.number)
+            or np.issubdtype(gradient.dtype, np.complexfloating)
+        ):
+            raise TypeError(
+                f"gradient for parameter {index} must have a real numeric dtype"
+            )
+        if not np.isfinite(gradient).all():
+            raise ValueError(
+                f"gradient for parameter {index} must contain only finite values"
+            )
+        if not np.isfinite(parameter.data).all():
+            raise ValueError(
+                f"parameter {index} must contain only finite values before step()"
+            )
 
 
 def _validate_buffers(destination, source, label):
