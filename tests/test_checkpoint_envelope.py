@@ -1,6 +1,7 @@
 """Regression tests for checkpoint envelope validation."""
 
 import os
+import pickle
 import sys
 
 import numpy as np
@@ -36,6 +37,11 @@ def _assert_rng_equal(actual, expected):
     assert actual[2:] == expected[2:]
 
 
+def _write_trusted_pickle(path, state):
+    with open(path, "wb") as handle:
+        pickle.dump(state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+
 @pytest.mark.parametrize("state", [None, [], (), "checkpoint"])
 def test_restore_requires_mapping_before_touching_model(state):
     with pytest.raises(TypeError, match="mapping"):
@@ -50,7 +56,9 @@ def test_restore_rejects_non_integral_format_version_before_snapshot(bad_version
 
 
 @pytest.mark.parametrize("bad_version", [0, -1, 3, 999])
-def test_restore_rejects_unsupported_integral_format_version_before_snapshot(bad_version):
+def test_restore_rejects_unsupported_integral_format_version_before_snapshot(
+    bad_version,
+):
     state = {"format_version": bad_version, "model": {}}
     with pytest.raises(ValueError, match="format version"):
         restore_checkpoint(state, _SnapshotBomb())
@@ -88,7 +96,9 @@ def test_restore_rejects_negative_step_before_snapshot():
 
 
 @pytest.mark.parametrize("bad_optimizer_type", [1, False, "", [], {}])
-def test_restore_rejects_malformed_optimizer_type_even_without_optimizer(bad_optimizer_type):
+def test_restore_rejects_malformed_optimizer_type_even_without_optimizer(
+    bad_optimizer_type,
+):
     state = {
         "format_version": 2,
         "model": {},
@@ -117,7 +127,7 @@ def test_malformed_rng_state_is_rejected_without_touching_global_rng_or_model():
     _assert_rng_equal(np.random.get_state(), before)
 
 
-def test_legacy_missing_version_step_and_rng_still_restore():
+def test_legacy_missing_version_step_rng_and_metadata_still_restore():
     source = _StateModel(5.0)
     target = _StateModel(-1.0)
     state = {"model": source.state_dict()}
@@ -137,6 +147,18 @@ def test_save_rejects_invalid_step_before_reading_model_state(tmp_path, bad_step
     assert not path.exists()
 
 
+@pytest.mark.parametrize("bad_metadata", [[], (), "metadata", 3, False])
+def test_save_rejects_non_mapping_metadata_before_reading_model_state(
+    tmp_path, bad_metadata
+):
+    path = tmp_path / "invalid-metadata.ckpt"
+
+    with pytest.raises(TypeError, match="metadata"):
+        save_checkpoint(path, _SnapshotBomb(), metadata=bad_metadata)
+
+    assert not path.exists()
+
+
 def test_save_normalizes_numpy_integral_step(tmp_path):
     path = tmp_path / "valid.ckpt"
     model = _StateModel(3.0)
@@ -146,3 +168,45 @@ def test_save_normalizes_numpy_integral_step(tmp_path):
 
     assert state["step"] == 6
     assert type(state["step"]) is int
+
+
+def test_read_rejects_malformed_envelope_before_caller_can_use_metadata(tmp_path):
+    path = tmp_path / "bad-envelope.ckpt"
+    _write_trusted_pickle(
+        path,
+        {
+            "format_version": 2,
+            "model": {"value": np.array([1.0])},
+            "step": "not-an-integer",
+            "metadata": {},
+        },
+    )
+
+    with pytest.raises(TypeError, match="non-negative integer"):
+        read_checkpoint(path)
+
+
+def test_read_rejects_non_mapping_metadata(tmp_path):
+    path = tmp_path / "bad-metadata.ckpt"
+    _write_trusted_pickle(
+        path,
+        {
+            "format_version": 2,
+            "model": {"value": np.array([1.0])},
+            "metadata": [],
+        },
+    )
+
+    with pytest.raises(TypeError, match="metadata"):
+        read_checkpoint(path)
+
+
+def test_read_preserves_legacy_checkpoint_without_metadata(tmp_path):
+    path = tmp_path / "legacy.ckpt"
+    state = {"model": {"value": np.array([2.0])}}
+    _write_trusted_pickle(path, state)
+
+    loaded = read_checkpoint(path)
+
+    np.testing.assert_array_equal(loaded["model"]["value"], state["model"]["value"])
+    assert "metadata" not in loaded
