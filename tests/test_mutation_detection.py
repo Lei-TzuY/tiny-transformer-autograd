@@ -8,7 +8,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from engine.optim import SGD
 from engine.tensor import Tensor
+from nn.module import Module
 
 
 def _assert_clean_failure(output, leaf):
@@ -96,3 +98,41 @@ def test_independent_copy_does_not_invalidate_graph():
     copied[:] = 99.0
     y.backward()
     np.testing.assert_allclose(x.grad, np.array([4.0, 6.0]))
+
+
+def test_optimizer_step_invalidates_old_graph_but_new_forward_is_valid():
+    x = Tensor([2.0, 3.0], requires_grad=True)
+    old_graph = x * x
+    old_graph.backward()
+
+    optimizer = SGD([x], lr=0.1)
+    optimizer.step()
+    after_step = np.asarray(x.data).copy()
+    _assert_clean_failure(old_graph, x)
+
+    optimizer.zero_grad()
+    new_graph = x * x
+    new_graph.backward()
+    np.testing.assert_allclose(x.grad, 2.0 * after_step)
+
+
+class _OneParameter(Module):
+    def __init__(self):
+        self.weight = Tensor([2.0, 3.0], requires_grad=True)
+
+    def forward(self):
+        return self.weight * self.weight
+
+
+def test_state_load_invalidates_old_graph_but_new_forward_is_valid():
+    module = _OneParameter()
+    old_graph = module()
+    state = module.state_dict()
+    state["weight"] = np.array([5.0, 7.0])
+    module.load_state_dict(state)
+
+    _assert_clean_failure(old_graph, module.weight)
+    module.zero_grad()
+    new_graph = module()
+    new_graph.backward()
+    np.testing.assert_allclose(module.weight.grad, np.array([10.0, 14.0]))
