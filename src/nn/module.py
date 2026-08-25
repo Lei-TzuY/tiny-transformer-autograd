@@ -109,6 +109,7 @@ class Module:
     def named_tensors(self, prefix=""):
         """Yield all persistent tensors, including frozen tensors and buffers."""
         seen_tensors = set()
+        seen_names = {}
         seen_modules = set()
         seen_containers = set()
 
@@ -116,6 +117,11 @@ class Module:
             if isinstance(obj, Tensor):
                 marker = id(obj)
                 if marker not in seen_tensors:
+                    if pfx in seen_names and seen_names[pfx] != marker:
+                        raise ValueError(
+                            f"ambiguous persistent tensor name {pfx!r} maps to multiple tensors"
+                        )
+                    seen_names[pfx] = marker
                     seen_tensors.add(marker)
                     yield pfx, obj
             elif isinstance(obj, Module):
