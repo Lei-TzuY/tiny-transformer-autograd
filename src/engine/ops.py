@@ -272,7 +272,16 @@ def softmax(x: Tensor) -> Tensor:
     standard masked-attention convention: the query attends to nothing, so its
     context vector is zero and its gradient is zero (``S = 0`` makes the VJP
     above vanish).  Rows with at least one finite entry are unaffected.
+
+    Invalid non-finite values
+    -------------------------
+    ``-inf`` is meaningful as an attention mask, but NaN and ``+inf`` are not:
+    the latter would make the usual max-shift evaluate ``inf - inf``. Reject
+    them explicitly instead of silently returning a NaN probability row.
     """
+    if np.isnan(x.data).any() or np.isposinf(x.data).any():
+        raise ValueError("softmax inputs must not contain NaN or +inf")
+
     row_max = x.data.max(axis=-1, keepdims=True)
     # Shift by 0 where no finite maximum exists so the exponent stays defined.
     shift = np.where(np.isneginf(row_max), 0.0, row_max)
@@ -367,6 +376,11 @@ def cross_entropy(logits: Tensor, targets, ignore_index=None) -> Tensor:
     # softmax-minus-one-hot derivative for extremely unlikely targets.
     logits_flat = logits.data.reshape(-1, num_classes)
     scored_logits = logits_flat if rows is None else logits_flat[rows]
+    if np.isnan(scored_logits).any() or np.isposinf(scored_logits).any():
+        raise ValueError(
+            "cross_entropy scored logits must not contain NaN or +inf"
+        )
+
     row_max = scored_logits.max(axis=-1, keepdims=True)
     # softmax() defines an all −∞ row as zero attention weights, but a loss has
     # no such reading: every class is impossible, so no target can be scored.
