@@ -250,23 +250,23 @@ def test_overlong_masked_prompt_crops_to_same_real_window(architecture):
     np.testing.assert_array_equal(padded[0, -new_tokens:], plain[0, -new_tokens:])
 
 
-def test_cached_beams_extend_one_token_until_strict_window_fills():
+def test_cached_beam_siblings_share_one_batched_infer_per_step():
     model = _model(ARCHITECTURES[0].values[0], context_len=5)
     prompt = np.array([[1, 4, 2]], dtype=np.int64)
-    widths = []
+    shapes = []
     original_infer = model.infer
 
     def recording_infer(tokens, *args, **kwargs):
-        widths.append(np.asarray(tokens).shape[1])
+        shapes.append(np.asarray(tokens).shape)
         return original_infer(tokens, *args, **kwargs)
 
     model.infer = recording_infer
     beam_generate(model, prompt, 4, beam_width=2, use_cache=True)
 
-    # Initial prefill at width 3; each of the two selected beams then extends
-    # one token twice. Once both caches reach context_len=5, strict semantics
-    # require a full width-5 re-prefill for their next selected children.
-    assert widths == [3, 1, 1, 1, 1, 5, 5]
+    # One prompt prefill. The two selected siblings are then scored together
+    # while cache extension fits, and are re-prefilled together once the strict
+    # context window is full. The old path made one infer call per sibling.
+    assert shapes == [(1, 3), (2, 1), (2, 1), (2, 5)]
 
 
 def test_padding_token_values_cannot_change_beam_result():
