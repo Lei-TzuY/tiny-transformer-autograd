@@ -27,7 +27,14 @@ jobs:
         run: |
           python -m benchmark --ctx 4 --d 8 --heads 2 --layers 1 --batch 1 \
             --steps 1 --generate 2 --warmup 0 --repeats 2 --json > /tmp/benchmark.json
-          python -c "import json; report=json.load(open('/tmp/benchmark.json')); assert report['benchmark_schema'] == 1; assert report['repeats'] == 2"
+          python - <<'PY'
+          import json
+          report = json.load(open("/tmp/benchmark.json"))
+          assert report["benchmark_schema"] == 1
+          assert report["repeats"] == 2
+          assert report["numpy_infer_speedup"] > 0
+          print(f"NumPy infer speedup: {report['numpy_infer_speedup']:.3f}x")
+          PY
       - name: Run tests
         run: python -m pytest tests -q -W error
       - name: Compile sources
