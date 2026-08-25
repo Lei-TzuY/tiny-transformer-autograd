@@ -63,12 +63,66 @@ _ARCH_PRESETS = {
 
 
 def clip_grad_norm_(params, max_norm=1.0):
-    total = np.sqrt(sum(np.sum(p.grad ** 2) for p in params if p.grad is not None))
-    if max_norm > 0 and total > max_norm:
-        scale = max_norm / (total + 1e-6)
-        for parameter in params:
-            if parameter.grad is not None:
-                parameter.grad *= scale
+    """Return the global L2 gradient norm and clip it without squaring overflow."""
+    if isinstance(max_norm, (bool, np.bool_)) or not isinstance(
+        max_norm, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError("max_norm must be a real number")
+    max_norm = float(max_norm)
+    if not np.isfinite(max_norm):
+        raise ValueError("max_norm must be finite")
+    if max_norm < 0.0:
+        raise ValueError("max_norm must be non-negative")
+
+    # Materialise once: clipping needs two passes, and callers may supply a
+    # generator rather than a reusable list.
+    try:
+        params = tuple(params)
+    except TypeError as exc:
+        raise TypeError("params must be an iterable") from exc
+
+    gradients = []
+    largest = 0.0
+    for number, parameter in enumerate(params):
+        grad = getattr(parameter, "grad", None)
+        if grad is None:
+            continue
+        if not isinstance(grad, np.ndarray):
+            raise TypeError(f"gradient {number} must be a NumPy array")
+        if not np.issubdtype(grad.dtype, np.number) or np.issubdtype(
+            grad.dtype, np.complexfloating
+        ):
+            raise TypeError(f"gradient {number} must have a real numeric dtype")
+        if not np.isfinite(grad).all():
+            raise ValueError(f"gradient {number} must contain only finite values")
+        gradients.append(grad)
+        if grad.size:
+            largest = max(largest, float(np.max(np.abs(grad))))
+
+    if largest == 0.0:
+        return 0.0
+
+    # Scale before squaring. Directly evaluating grad**2 overflows for values
+    # above sqrt(float_max), even though their L2 norm may still be representable.
+    scaled_sumsq = 0.0
+    for grad in gradients:
+        scaled = grad / largest
+        scaled_sumsq += float(np.sum(scaled * scaled, dtype=np.float64))
+    scaled_norm = float(np.sqrt(scaled_sumsq))
+
+    float_max = np.finfo(np.float64).max
+    total = (
+        float("inf")
+        if scaled_norm > 0.0 and largest > float_max / scaled_norm
+        else largest * scaled_norm
+    )
+
+    if max_norm > 0.0 and (not np.isfinite(total) or total > max_norm):
+        # Compute the ratio in scaled coordinates as well; max_norm / total
+        # would underflow to zero when the true norm exceeds float64 range.
+        scale = (max_norm / largest) / scaled_norm
+        for grad in gradients:
+            grad *= scale
     return float(total)
 
 
