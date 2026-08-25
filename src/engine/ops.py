@@ -23,8 +23,48 @@ softmax(x)     : ∂L/∂xᵢ = Sᵢ(δᵢⱼ - Sⱼ) · gradⱼ  →  S*(grad -
 cross_entropy  : combined softmax + NLL; ∂L/∂logits = (softmax - one_hot) / N
 """
 
+from fractions import Fraction
+
 import numpy as np
 from .tensor import Tensor
+
+
+def _exact_float64_sum(values):
+    """Correctly round the exact sum of finite float64 inputs."""
+    exact = Fraction()
+    for value in values:
+        exact += Fraction.from_float(float(value))
+    try:
+        return float(exact)
+    except OverflowError:
+        return -np.inf if exact < 0 else np.inf
+
+
+def _exact_sum_data(data, axis=None, keepdims=False):
+    """Exactly accumulate finite reduction slices, then round once to float64."""
+    if axis is None:
+        axes = tuple(range(data.ndim))
+    elif isinstance(axis, tuple):
+        axes = tuple(int(item) % data.ndim for item in axis)
+    else:
+        axes = (int(axis) % data.ndim,)
+
+    kept_axes = tuple(index for index in range(data.ndim) if index not in axes)
+    permutation = kept_axes + axes
+    transposed = np.transpose(data, permutation) if data.ndim else data
+    kept_shape = tuple(data.shape[index] for index in kept_axes)
+    reduced_size = int(
+        np.prod([data.shape[index] for index in axes], dtype=np.int64)
+    )
+    rows = transposed.reshape((-1, reduced_size))
+    exact = np.array([_exact_float64_sum(row) for row in rows], dtype=np.float64)
+    result = exact.reshape(kept_shape)
+    if keepdims:
+        output_shape = tuple(
+            1 if index in axes else data.shape[index] for index in range(data.ndim)
+        )
+        result = result.reshape(output_shape)
+    return result
 
 
 def _stable_sum_data(data, axis=None, keepdims=False):
@@ -41,24 +81,18 @@ def _stable_sum_data(data, axis=None, keepdims=False):
     if np.isfinite(historical).all():
         return historical
 
-    # Scale each reduction slice by its largest magnitude before summing. This
-    # keeps every addend in [-1, 1], so cancellation can recover a finite true
-    # sum even when the historical reduction overflowed along the way.
-    scale_keepdims = np.max(np.abs(data), axis=axis, keepdims=True)
-    scale_output = np.max(np.abs(data), axis=axis, keepdims=keepdims)
-    safe_scale = np.where(scale_keepdims == 0.0, 1.0, scale_keepdims)
-    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        fallback = (
-            (data / safe_scale).sum(axis=axis, keepdims=keepdims) * scale_output
-        )
-
+    # Only a historically non-finite reduction reaches this rare path. Exact
+    # rational accumulation preserves every binary64 addend across arbitrary
+    # dynamic range, then Python performs the single correctly-rounded float
+    # conversion. Safe sibling slices still return their historical NumPy bits.
+    fallback = _exact_sum_data(data, axis=axis, keepdims=keepdims)
     recover = ~np.isfinite(historical) & np.isfinite(fallback)
     if np.all(recover | np.isfinite(historical)):
         return np.where(recover, fallback, historical)
 
-    # At least one output is genuinely still non-finite. Re-evaluate the
-    # historical reduction outside the local errstate so existing overflow
-    # warning semantics are retained for that unrecoverable result.
+    # At least one exact result is genuinely outside float64. Re-evaluate the
+    # historical reduction outside the local errstate so its warning semantics
+    # remain unchanged for every unrecoverable output.
     warned = data.sum(axis=axis, keepdims=keepdims)
     return np.where(recover, fallback, warned)
 
