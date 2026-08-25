@@ -13,6 +13,7 @@ or Tensor instances with requires_grad=True.
 """
 
 from collections.abc import Mapping
+from reprlib import recursive_repr
 
 import numpy as np
 
@@ -232,6 +233,7 @@ class Module:
         """Total number of trainable scalar parameters."""
         return sum(p.data.size for p in self.parameters())
 
+    @recursive_repr(fillvalue="...")
     def __repr__(self):
         lines = [f"{self.__class__.__name__}("]
         for name, val in vars(self).items():
