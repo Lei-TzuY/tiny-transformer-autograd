@@ -17,7 +17,13 @@ instead of silently changing ``GPT.generate`` in the name of performance.
 
 import numpy as np
 
-from .transformer import _left_padded_positions, _sample, _validate_selection_logits
+from .transformer import (
+    _left_padded_positions,
+    _sample,
+    _validate_non_negative_int,
+    _validate_sampling_options,
+    _validate_selection_logits,
+)
 
 
 def stream_generate(
@@ -42,12 +48,14 @@ def stream_generate(
     """
     if getattr(model, "rope", None) is None:
         raise ValueError("stream_generate requires a model with pos_encoding='rope'")
-    if not isinstance(max_new_tokens, (int, np.integer)) or max_new_tokens < 0:
-        raise ValueError("max_new_tokens must be a non-negative integer")
+    max_new_tokens = _validate_non_negative_int(max_new_tokens, "max_new_tokens")
+    if not isinstance(strategy, str):
+        raise TypeError("strategy must be a string")
     if strategy not in {"sample", "greedy"}:
         raise ValueError("strategy must be 'sample' or 'greedy'")
-    if temperature <= 0:
-        raise ValueError("temperature must be positive")
+    temperature, top_k, top_p = _validate_sampling_options(
+        temperature, top_k, top_p
+    )
 
     idx = np.array(model._validate_token_batch(idx), dtype=np.int64, copy=True)
     keep = None
