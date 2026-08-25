@@ -82,6 +82,31 @@ def test_left_padded_beam_matches_unpadded_prompt(architecture):
 
 
 @pytest.mark.parametrize("architecture", ARCHITECTURES)
+def test_cached_and_uncached_masked_beam_match(architecture):
+    model = _model(architecture)
+    tokens, mask = _left_pad([1, 4, 2], width=5)
+
+    cached = beam_generate(
+        model,
+        tokens,
+        4,
+        beam_width=3,
+        attention_mask=mask,
+        use_cache=True,
+    )
+    uncached = beam_generate(
+        model,
+        tokens,
+        4,
+        beam_width=3,
+        attention_mask=mask,
+        use_cache=False,
+    )
+
+    np.testing.assert_array_equal(cached, uncached)
+
+
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
 def test_masked_beam_stays_equivalent_after_window_crop(architecture):
     model = _model(architecture, context_len=5)
     prompt = [1, 4, 2]
@@ -107,6 +132,32 @@ def test_masked_beam_stays_equivalent_after_window_crop(architecture):
 
 
 @pytest.mark.parametrize("architecture", ARCHITECTURES)
+def test_cached_and_uncached_match_after_window_crop(architecture):
+    model = _model(architecture, context_len=5)
+    tokens, mask = _left_pad([1, 4, 2], width=5)
+    new_tokens = 7
+
+    cached = beam_generate(
+        model,
+        tokens,
+        new_tokens,
+        beam_width=2,
+        attention_mask=mask,
+        use_cache=True,
+    )
+    uncached = beam_generate(
+        model,
+        tokens,
+        new_tokens,
+        beam_width=2,
+        attention_mask=mask,
+        use_cache=False,
+    )
+
+    np.testing.assert_array_equal(cached, uncached)
+
+
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
 def test_overlong_masked_prompt_crops_to_same_real_window(architecture):
     model = _model(architecture, context_len=5)
     prompt = [1, 4, 2, 6, 3, 7]
@@ -128,6 +179,25 @@ def test_overlong_masked_prompt_crops_to_same_real_window(architecture):
     )
 
     np.testing.assert_array_equal(padded[0, -new_tokens:], plain[0, -new_tokens:])
+
+
+def test_cached_beams_extend_one_token_until_strict_window_fills():
+    model = _model(ARCHITECTURES[0].values[0], context_len=5)
+    prompt = np.array([[1, 4, 2]], dtype=np.int64)
+    widths = []
+    original_infer = model.infer
+
+    def recording_infer(tokens, *args, **kwargs):
+        widths.append(np.asarray(tokens).shape[1])
+        return original_infer(tokens, *args, **kwargs)
+
+    model.infer = recording_infer
+    beam_generate(model, prompt, 4, beam_width=2, use_cache=True)
+
+    # Initial prefill at width 3; each of the two selected beams then extends
+    # one token twice. Once both caches reach context_len=5, strict semantics
+    # require a full width-5 re-prefill for their next selected children.
+    assert widths == [3, 1, 1, 1, 1, 5, 5]
 
 
 def test_padding_token_values_cannot_change_beam_result():
@@ -181,3 +251,10 @@ def test_rejects_batched_beam_search_even_with_a_valid_mask():
 
     with pytest.raises(ValueError, match="batch size 1"):
         beam_generate(model, tokens, 2, attention_mask=mask)
+
+
+def test_rejects_non_boolean_cache_switch():
+    model = _model(ARCHITECTURES[0].values[0])
+
+    with pytest.raises(TypeError, match="use_cache must be boolean"):
+        beam_generate(model, np.array([[1, 2]]), 2, use_cache=1)
