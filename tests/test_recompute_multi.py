@@ -110,7 +110,7 @@ class TestMultiOutputRecompute:
         assert isinstance(outputs, tuple)
         assert len(outputs) == 2
         assert all(not value.requires_grad for value in outputs)
-        assert all(value._children == set() for value in outputs)
+        assert all(not value._children for value in outputs)
 
     @pytest.mark.parametrize(
         ("function", "error"),
