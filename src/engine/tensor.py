@@ -331,7 +331,8 @@ class Tensor:
         grad : array-like or None
             Gradient flowing into this tensor. If None, defaults to an array
             of ones with this tensor's shape. For non-scalar tensors this is
-            equivalent to differentiating ``self.sum()``.
+            equivalent to differentiating ``self.sum()``. Explicit seeds must
+            contain real finite numeric values and match this tensor's shape.
 
         Raises
         ------
@@ -339,6 +340,11 @@ class Tensor:
             If this tensor was produced by an operation while recording was
             disabled, or if tracked tensor data used by this graph was mutated
             after the forward pass.
+        TypeError
+            If an explicit backward gradient is not real numeric data.
+        ValueError
+            If an explicit backward gradient has the wrong shape or contains
+            NaN or infinity.
         """
         if not self.requires_grad:
             if self._detached_by_no_grad:
@@ -349,15 +355,27 @@ class Tensor:
                 )
             return
 
-        # Prepare and validate the incoming vector-Jacobian product seed.
+        # Prepare and validate the incoming vector-Jacobian product seed before
+        # traversing the graph or touching any existing gradient buffers.
         if grad is None:
-            grad = np.ones_like(self.data, dtype=np.float64)
-        incoming = np.asarray(grad, dtype=np.float64)
+            incoming = np.ones_like(self.data, dtype=np.float64)
+        else:
+            raw = np.asarray(grad)
+            is_integer = np.issubdtype(raw.dtype, np.integer)
+            is_floating = np.issubdtype(raw.dtype, np.floating)
+            if np.issubdtype(raw.dtype, np.bool_) or not (
+                is_integer or is_floating
+            ):
+                raise TypeError("backward gradient must contain real numeric values")
+            incoming = np.asarray(raw, dtype=np.float64)
+
         if incoming.shape != self.shape:
             raise ValueError(
                 f"backward gradient shape mismatch: expected {self.shape}, "
                 f"got {incoming.shape}"
             )
+        if not np.isfinite(incoming).all():
+            raise ValueError("backward gradient must contain only finite values")
 
         # Build a post-order topological traversal iteratively. A recursive
         # DFS fails on perfectly valid long chains at Python's recursion limit.
