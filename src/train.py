@@ -168,12 +168,87 @@ def get_document_batch(documents, batch_size, pad_token=PAD_TOKEN,
 
 
 def batch_loss(model, tokens, targets, mask=None):
-    """Cross entropy for one batch, scoring only real (unpadded) positions."""
+    """Cross entropy for one training batch, tracked by the autograd graph."""
     if mask is None:
         return ops.cross_entropy(model(tokens), targets)
     return ops.cross_entropy(
         model(tokens, attention_mask=mask), targets, ignore_index=IGNORE_INDEX
     )
+
+
+def _cross_entropy_np(logits, targets, ignore_index=None):
+    """NumPy mirror of ``ops.cross_entropy`` for inference-only validation."""
+    logits = np.asarray(logits)
+    if logits.ndim == 0:
+        raise ValueError("cross_entropy logits must have a class dimension")
+    if logits.size == 0 or logits.shape[-1] == 0:
+        raise ValueError("cross_entropy inputs must be non-empty")
+
+    targets_np = np.asarray(targets)
+    expected_shape = logits.shape[:-1]
+    if targets_np.shape != expected_shape:
+        raise ValueError(
+            "cross_entropy target shape mismatch: "
+            f"expected {expected_shape}, got {targets_np.shape}"
+        )
+    if targets_np.size == 0:
+        raise ValueError("cross_entropy targets must be non-empty")
+    if not np.issubdtype(targets_np.dtype, np.integer):
+        raise TypeError("cross_entropy targets must contain integers")
+    if ignore_index is not None and not isinstance(ignore_index, (int, np.integer)):
+        raise TypeError("cross_entropy ignore_index must be an integer or None")
+
+    num_classes = logits.shape[-1]
+    targets_flat = np.array(targets_np, dtype=np.int64, copy=True).reshape(-1)
+    rows = None
+    if ignore_index is not None:
+        scored = targets_flat != int(ignore_index)
+        if not scored.any():
+            raise ValueError(
+                "cross_entropy has no scored target: every position equals "
+                f"ignore_index={ignore_index}"
+            )
+        if not scored.all():
+            rows = np.flatnonzero(scored)
+            targets_flat = targets_flat[rows]
+
+    if np.any(targets_flat < 0) or np.any(targets_flat >= num_classes):
+        raise ValueError(f"cross_entropy targets must be in [0, {num_classes})")
+
+    logits_flat = logits.reshape(-1, num_classes)
+    scored_logits = logits_flat if rows is None else logits_flat[rows]
+    row_max = scored_logits.max(axis=-1, keepdims=True)
+    if np.isneginf(row_max).any():
+        raise ValueError(
+            "cross_entropy requires at least one finite logit per scored row"
+        )
+    shifted = scored_logits - row_max
+    normalisers = np.exp(shifted).sum(axis=-1)
+    target_shifted = shifted[np.arange(targets_flat.size), targets_flat]
+    return float(np.mean(np.log(normalisers) - target_shifted))
+
+
+def batch_eval_loss(model, tokens, targets, mask=None):
+    """Inference-only batch loss, falling back for models without ``infer``."""
+    infer = getattr(model, "infer", None)
+    if not callable(infer):
+        with no_grad():
+            return float(batch_loss(model, tokens, targets, mask).data)
+
+    if mask is None:
+        logits, _ = infer(tokens)
+        ignore_index = None
+    else:
+        # ``GPT.infer`` accepts generation-style masks too, while validation
+        # historically follows ``GPT.forward`` and therefore requires right
+        # padding. Reuse that validator before taking the fast path so the
+        # public evaluation contract does not silently broaden.
+        validate_mask = getattr(model, "_key_padding_bias", None)
+        if callable(validate_mask):
+            validate_mask(mask, np.asarray(tokens).shape)
+        logits, _ = infer(tokens, attention_mask=mask)
+        ignore_index = IGNORE_INDEX
+    return _cross_entropy_np(logits, targets, ignore_index=ignore_index)
 
 
 def evaluate_batches(
@@ -185,18 +260,15 @@ def evaluate_batches(
     losses = []
     weights = []
     try:
-        # eval() only disables dropout; no_grad() additionally stops every op
-        # from recording a node, so validation never allocates a backward graph.
-        with no_grad():
-            for _ in range(eval_iters):
-                batch = sample_batch()
-                losses.append(float(batch_loss(model, *batch).data))
-                if weight_by_scored_tokens:
-                    targets = np.asarray(batch[1])
-                    scored = int(np.count_nonzero(targets != IGNORE_INDEX))
-                    if scored == 0:
-                        raise ValueError("evaluation batch contains no scored tokens")
-                    weights.append(scored)
+        for _ in range(eval_iters):
+            batch = sample_batch()
+            losses.append(batch_eval_loss(model, *batch))
+            if weight_by_scored_tokens:
+                targets = np.asarray(batch[1])
+                scored = int(np.count_nonzero(targets != IGNORE_INDEX))
+                if scored == 0:
+                    raise ValueError("evaluation batch contains no scored tokens")
+                weights.append(scored)
     finally:
         # A sampler/model failure must not leak eval mode into later training.
         model.train(previous_mode)
