@@ -1,9 +1,9 @@
 """Beam search helpers with explicit left-padding support.
 
 ``GPT.generate_beam`` predates ragged prompt masks and intentionally remains a
-small unmasked reference path. ``beam_generate`` adds the missing masked form
-without changing that public method's behaviour, and can keep one KV cache per
-selected beam until strict sliding-window semantics require a re-prefill.
+small unmasked reference path. ``beam_generate`` adds masked and batched forms
+without changing that method, and can keep one KV cache per selected beam until
+strict sliding-window semantics require a re-prefill.
 """
 
 import numpy as np
@@ -20,18 +20,20 @@ def beam_generate(
     attention_mask=None,
     use_cache=True,
 ):
-    """Return the highest-scoring sequence from strict-window beam search.
+    """Return the best strict-window beam independently for every prompt row.
 
-    ``attention_mask`` follows generation semantics: one left-padded row where
-    0 marks padding and 1 marks real prompt tokens. Generated tokens are always
-    real. The returned array preserves the original padding columns.
+    ``attention_mask`` follows generation semantics: rows are left padded, 0
+    marks padding, and 1 marks real prompt tokens. Generated tokens are always
+    real. The returned array preserves the original shared padded width and
+    appends exactly ``max_new_tokens`` columns.
 
-    With ``use_cache=True`` each selected beam owns the KV cache for its current
-    strict window. Branches may safely share a parent cache because inference
-    concatenates new K/V arrays instead of mutating the input cache. Once that
-    cache fills ``context_len``, the next selected child is re-prefilled from
-    its cropped window so surviving positions are renumbered from zero and
-    tokens outside the strict window are genuinely forgotten.
+    Each batch row owns an independent beam tree; scores are never compared
+    across prompts. With ``use_cache=True`` each selected beam in that tree owns
+    the KV cache for its current strict window. Branches may safely share a
+    parent cache because inference concatenates new arrays instead of mutating
+    it. Once a cache fills ``context_len``, the next selected child is
+    re-prefilled from its cropped window so positions are renumbered from zero
+    and out-of-window tokens are genuinely forgotten.
     """
     if not isinstance(max_new_tokens, (int, np.integer)) or max_new_tokens < 0:
         raise ValueError("max_new_tokens must be a non-negative integer")
@@ -43,21 +45,45 @@ def beam_generate(
         raise TypeError("use_cache must be boolean")
 
     idx = np.array(model._validate_token_batch(idx), dtype=np.int64, copy=True)
-    if idx.shape[0] != 1:
-        raise ValueError("beam search currently supports batch size 1")
-
     mask = None
     if attention_mask is not None:
         mask = model._validate_generation_mask(attention_mask, idx.shape).copy()
     if max_new_tokens == 0:
         return idx
 
+    rows = []
+    for row in range(idx.shape[0]):
+        row_mask = None if mask is None else mask[row : row + 1]
+        rows.append(
+            _beam_generate_one(
+                model,
+                idx[row : row + 1],
+                max_new_tokens,
+                beam_width,
+                temperature,
+                row_mask,
+                use_cache,
+            )
+        )
+    return np.concatenate(rows, axis=0)
+
+
+def _beam_generate_one(
+    model,
+    idx,
+    max_new_tokens,
+    beam_width,
+    temperature,
+    mask,
+    use_cache,
+):
+    """Decode one already-validated prompt row."""
     logits, initial_cache = _prefill(model, idx, mask)
     beams = [(idx, 0.0, logits, initial_cache if use_cache else None)]
 
     for step in range(max_new_tokens):
         candidates = []
-        for parent, (sequence, score, logits, cache) in enumerate(beams):
+        for sequence, score, logits, cache in beams:
             log_probs = _log_softmax(logits[0, -1] / temperature)
             best = np.argsort(log_probs)[-beam_width:]
             for token in best:
@@ -66,8 +92,6 @@ def beam_generate(
                     (
                         extended,
                         score + float(log_probs[token]),
-                        parent,
-                        int(token),
                         cache,
                     )
                 )
@@ -84,7 +108,7 @@ def beam_generate(
             mask = np.concatenate([mask, np.ones((1, 1), dtype=bool)], axis=1)
 
         next_beams = []
-        for sequence, score, _parent, _token, parent_cache in selected:
+        for sequence, score, parent_cache in selected:
             if use_cache and _can_extend_cache(parent_cache, model.context_len):
                 logits, cache = _extend_cache(model, sequence, parent_cache, mask)
             else:
@@ -94,8 +118,7 @@ def beam_generate(
             next_beams.append((sequence, score, logits, cache))
         beams = next_beams
 
-    # ``max_new_tokens`` is validated above and the loop returns on its final
-    # iteration. This line is unreachable but keeps static type readers happy.
+    # The loop returns on its final iteration for every positive token count.
     return beams[0][0]
 
 
