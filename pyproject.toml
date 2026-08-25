@@ -14,10 +14,11 @@ dev = ["pytest>=7.0"]
 
 [project.scripts]
 tiny-train = "train:main"
+tiny-stream = "streaming_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["train", "tokenizer", "benchmark"]
+py-modules = ["train", "tokenizer", "benchmark", "streaming_cli"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
