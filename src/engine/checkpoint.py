@@ -160,7 +160,7 @@ def _validate_checkpoint_envelope(state):
         probe = np.random.RandomState()
         try:
             probe.set_state(rng_state)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, IndexError) as exc:
             raise ValueError("invalid checkpoint NumPy RNG state") from exc
 
     return step
