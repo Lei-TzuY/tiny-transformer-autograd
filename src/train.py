@@ -260,15 +260,19 @@ def evaluate_batches(
     losses = []
     weights = []
     try:
-        for _ in range(eval_iters):
-            batch = sample_batch()
-            losses.append(batch_eval_loss(model, *batch))
-            if weight_by_scored_tokens:
-                targets = np.asarray(batch[1])
-                scored = int(np.count_nonzero(targets != IGNORE_INDEX))
-                if scored == 0:
-                    raise ValueError("evaluation batch contains no scored tokens")
-                weights.append(scored)
+        # Keep the historical validation contract even though GPT.infer is
+        # pure NumPy: custom infer implementations must also run with gradients
+        # disabled, and the caller's grad mode is restored by the context.
+        with no_grad():
+            for _ in range(eval_iters):
+                batch = sample_batch()
+                losses.append(batch_eval_loss(model, *batch))
+                if weight_by_scored_tokens:
+                    targets = np.asarray(batch[1])
+                    scored = int(np.count_nonzero(targets != IGNORE_INDEX))
+                    if scored == 0:
+                        raise ValueError("evaluation batch contains no scored tokens")
+                    weights.append(scored)
     finally:
         # A sampler/model failure must not leak eval mode into later training.
         model.train(previous_mode)
