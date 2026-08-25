@@ -213,7 +213,7 @@ class TestEvaluation:
     def test_empty_split_is_skipped(self):
         assert evaluate_documents(_model(_tokenizer()), [], 2, 1) is None
 
-    @pytest.mark.parametrize("failure_site", ["sampler", "forward"])
+    @pytest.mark.parametrize("failure_site", ["sampler", "infer"])
     @pytest.mark.parametrize("initial_training", [True, False])
     @pytest.mark.parametrize("initial_grad_enabled", [True, False])
     def test_failure_restores_model_and_grad_modes(
@@ -231,10 +231,10 @@ class TestEvaluation:
         else:
             sample_batch = lambda: (tokens, targets, None)
 
-            def fail_forward(*args, **kwargs):
-                raise RuntimeError("evaluation forward failed")
+            def fail_infer(*args, **kwargs):
+                raise RuntimeError("evaluation infer failed")
 
-            monkeypatch.setattr(model, "forward", fail_forward)
+            monkeypatch.setattr(model, "infer", fail_infer)
 
         with set_grad_enabled(initial_grad_enabled):
             with pytest.raises(RuntimeError, match="evaluation .* failed"):
