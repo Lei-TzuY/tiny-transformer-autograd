@@ -105,7 +105,7 @@ class Linear(Module):
     def enable_lora(self, rank, alpha=1.0):
         """Freeze this linear layer and add trainable low-rank adapters."""
         rank = _positive_int("LoRA rank", rank)
-        alpha = _real_scalar("LoRA alpha", alpha)
+        alpha = _real_scalar("LoRA alpha", alpha, positive=True)
         if self.lora_A is not None:
             return
         self.weight.requires_grad = False
