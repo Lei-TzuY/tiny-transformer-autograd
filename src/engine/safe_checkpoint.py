@@ -10,13 +10,18 @@ The format protects against pickle-style arbitrary code execution; it is not a
 resource-exhaustion sandbox for adversarially huge compressed files.
 """
 
+from collections.abc import Mapping
 import json
 import os
 import tempfile
 
 import numpy as np
 
-from .checkpoint import CHECKPOINT_VERSION
+from .checkpoint import (
+    CHECKPOINT_VERSION,
+    _nonnegative_checkpoint_step,
+    _validate_checkpoint_envelope,
+)
 
 
 SAFE_CHECKPOINT_VERSION = 1
@@ -34,10 +39,18 @@ def save_safe_checkpoint(
 ):
     """Save training state atomically without using pickle.
 
-    The decoded state has the same structure as ``read_checkpoint`` returns, so
-    callers can pass ``read_safe_checkpoint(path)`` directly to the existing
-    transactional ``restore_checkpoint`` function.
+    The decoded state has the same structure and envelope contract as
+    ``read_checkpoint`` returns, so callers can pass ``read_safe_checkpoint``
+    output directly to the existing transactional ``restore_checkpoint``.
     """
+    step = _nonnegative_checkpoint_step(step)
+    if metadata is None:
+        metadata = {}
+    elif not isinstance(metadata, Mapping):
+        raise TypeError("checkpoint metadata must be a mapping or None")
+    else:
+        metadata = dict(metadata)
+
     state = {
         "format_version": CHECKPOINT_VERSION,
         "model": model.state_dict(),
@@ -48,13 +61,14 @@ def save_safe_checkpoint(
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "rng_state": np.random.get_state(),
         "step": step,
-        "metadata": metadata or {},
+        "metadata": metadata,
     }
+    _validate_checkpoint_envelope(state)
     _write_safe_state(path, state)
 
 
 def read_safe_checkpoint(path):
-    """Read a safe checkpoint into the ordinary checkpoint-state structure."""
+    """Read and envelope-validate a non-executable safe checkpoint."""
     path = os.fspath(path)
     try:
         archive = np.load(path, allow_pickle=False)
@@ -101,6 +115,7 @@ def read_safe_checkpoint(path):
             )
         if not isinstance(state, dict):
             raise ValueError("safe checkpoint root state must decode to a dictionary")
+        _validate_checkpoint_envelope(state)
         return state
 
 
