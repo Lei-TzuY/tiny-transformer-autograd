@@ -187,6 +187,9 @@ class Module:
 
     def train(self, mode=True):
         """Set training mode recursively and return self."""
+        if not isinstance(mode, (bool, np.bool_)):
+            raise TypeError("training mode must be boolean")
+        mode = bool(mode)
         for module in self.modules():
             module.training = mode
         return self

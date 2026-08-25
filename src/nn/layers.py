@@ -20,6 +20,13 @@ def _positive_int(name, value):
     return value
 
 
+def _bool_flag(name, value):
+    """Validate a boolean layer option and normalize NumPy booleans."""
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be boolean")
+    return bool(value)
+
+
 def _real_scalar(
     name,
     value,
@@ -58,6 +65,7 @@ class Linear(Module):
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
         in_features = _positive_int("in_features", in_features)
         out_features = _positive_int("out_features", out_features)
+        bias = _bool_flag("bias", bias)
         self.in_features = in_features
         self.out_features = out_features
 
