@@ -208,6 +208,11 @@ class Module:
             raise TypeError("state_dict must be a mapping")
         if not isinstance(strict, (bool, np.bool_)):
             raise TypeError("state_dict strict flag must be boolean")
+
+        # Freeze a Mapping's key/value view once. Custom Mapping implementations
+        # may compute values dynamically; validation and commit must observe the
+        # same payload rather than re-reading it after validation has completed.
+        state = dict(state.items())
         for key in state:
             if not isinstance(key, str):
                 raise TypeError("state_dict keys must be strings")
@@ -221,15 +226,18 @@ class Module:
             )
 
         # Validate every destination before copying any value so a malformed
-        # late entry cannot leave the module partially restored.
+        # late entry cannot leave the module partially restored. Snapshot every
+        # matched source as well: a caller may legally pass live NumPy views of
+        # another destination Tensor, and earlier writes must not mutate later
+        # sources during the same atomic load.
+        snapshots = {}
         for name, value in state.items():
             if name not in tensors:
                 continue
             _validate_state_tensor(name, tensors[name], value)
+            snapshots[name] = np.array(value, copy=True, subok=False)
 
-        for name, value in state.items():
-            if name not in tensors:
-                continue
+        for name, value in snapshots.items():
             tensors[name].data[:] = value
 
     def param_count(self):
