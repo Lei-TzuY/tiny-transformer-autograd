@@ -149,6 +149,9 @@ class Module:
             raise TypeError("state_dict must be a mapping")
         if not isinstance(strict, (bool, np.bool_)):
             raise TypeError("state_dict strict flag must be boolean")
+        for key in state:
+            if not isinstance(key, str):
+                raise TypeError("state_dict keys must be strings")
 
         tensors = dict(self.named_tensors())
         missing = sorted(set(tensors) - set(state))
