@@ -200,6 +200,68 @@ def _rotate_half_np(x):
     return np.concatenate([-x[..., half:], x[..., :half]], axis=-1)
 
 
+def _select_score_paths(raw_scaled: Tensor, fallback: Tensor, unsafe) -> Tensor:
+    """Select fallback scores without changing safe entries' autograd path."""
+    unsafe = np.array(unsafe, dtype=bool, copy=True)
+    value = np.where(unsafe, fallback.data, raw_scaled.data)
+    needs_grad = raw_scaled.requires_grad or fallback.requires_grad
+    out = Tensor(
+        value,
+        requires_grad=needs_grad,
+        _children=(raw_scaled, fallback),
+        _op="attention_score_select",
+    )
+
+    def _backward():
+        if raw_scaled.requires_grad:
+            raw_scaled._ensure_grad()
+            raw_scaled.grad += np.where(unsafe, 0.0, out.grad)
+        if fallback.requires_grad:
+            fallback._ensure_grad()
+            fallback.grad += np.where(unsafe, out.grad, 0.0)
+
+    out._backward = _backward
+    return out
+
+
+def _scaled_dot_product_scores(query: Tensor, key_t: Tensor, scale: float) -> Tensor:
+    """Apply attention scaling early only where a finite-input raw dot overflows."""
+    if not np.isfinite(query.data).all() or not np.isfinite(key_t.data).all():
+        return ops.matmul(query, key_t) * scale
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        raw = ops.matmul(query, key_t)
+    unsafe = ~np.isfinite(raw.data)
+    raw_scaled = raw * scale
+    if not np.any(unsafe):
+        return raw_scaled
+
+    # The textbook scale is <= 1. Moving it onto Q is algebraically identical,
+    # but can keep products/sums representable when Q@K overflows before the
+    # scale is applied. Select this graph only for the scores that overflowed;
+    # every safe score keeps the historical raw-dot-then-scale path exactly.
+    with np.errstate(over="ignore", invalid="ignore"):
+        fallback = ops.matmul(query * scale, key_t)
+    return _select_score_paths(raw_scaled, fallback, unsafe)
+
+
+def _scaled_dot_product_scores_np(query, key_t, scale: float):
+    """NumPy equivalent of _scaled_dot_product_scores for inference."""
+    if not np.isfinite(query).all() or not np.isfinite(key_t).all():
+        return query @ key_t * scale
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        raw = query @ key_t
+    unsafe = ~np.isfinite(raw)
+    raw_scaled = raw * scale
+    if not np.any(unsafe):
+        return raw_scaled
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        fallback = (query * scale) @ key_t
+    return np.where(unsafe, fallback, raw_scaled)
+
+
 class SelfAttention(Module):
     """Single-head causal self-attention."""
 
@@ -232,7 +294,7 @@ class SelfAttention(Module):
 
         # scores: (B, T, T)
         K_T = ops.transpose(K, (0, 2, 1))          # (B, d_model, T)
-        scores = ops.matmul(Q, K_T) * self.scale    # (B, T, T)
+        scores = _scaled_dot_product_scores(Q, K_T, self.scale)
 
         if mask is None:
             mask = Tensor(_causal_mask(x.shape[1], x.shape[1], 0))
@@ -265,7 +327,9 @@ class SelfAttention(Module):
         if cache is not None:
             K = np.concatenate([cache["k"], K], axis=1)
             V = np.concatenate([cache["v"], V], axis=1)
-        scores = Q @ np.swapaxes(K, -1, -2) * self.scale
+        scores = _scaled_dot_product_scores_np(
+            Q, np.swapaxes(K, -1, -2), self.scale
+        )
         scores += _causal_mask(x.shape[1], K.shape[1], past_len)
         if key_bias is not None:
             key_bias = _prepare_mask(
@@ -342,7 +406,7 @@ class MultiHeadAttention(Module):
 
         # Scaled dot-product: (B, H, T, T)
         K_T = ops.transpose(K, (0, 1, 3, 2))             # (B, H, d_k, T)
-        scores = ops.matmul(Q, K_T) * self.scale         # (B, H, T, T)
+        scores = _scaled_dot_product_scores(Q, K_T, self.scale)
 
         if mask is None:
             mask = Tensor(_causal_mask(T, T, 0))
@@ -396,7 +460,9 @@ class MultiHeadAttention(Module):
             K = np.concatenate([cache["k"], K], axis=2)
             V = np.concatenate([cache["v"], V], axis=2)
 
-        scores = Q @ K.transpose(0, 1, 3, 2) * self.scale
+        scores = _scaled_dot_product_scores_np(
+            Q, K.transpose(0, 1, 3, 2), self.scale
+        )
         scores += _causal_mask(T, K.shape[2], past_len)
         if key_bias is not None:
             key_bias = _prepare_mask(
