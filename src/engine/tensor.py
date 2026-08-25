@@ -209,10 +209,14 @@ class Tensor:
     __array_priority__ = 1000
 
     def __init__(self, data, requires_grad=False, _children=(), _op=""):
+        if not isinstance(requires_grad, (bool, np.bool_)):
+            raise TypeError("requires_grad must be boolean")
+        requires_grad = bool(requires_grad)
+
         children = _ordered_unique_children(_children)
         is_op_result = bool(children)
         recording = is_grad_enabled()
-        requested_grad = bool(requires_grad)
+        requested_grad = requires_grad
 
         # Remember why a result became detached before discarding its parents.
         # The marker propagates through further constant-only arithmetic so a
