@@ -15,7 +15,7 @@ class SGD:
     """Stochastic Gradient Descent (with optional momentum)."""
 
     def __init__(self, parameters, lr=0.01, momentum=0.0, weight_decay=0.0):
-        self.parameters = list(parameters)
+        self.parameters = _unique_parameters(parameters)
         self.lr = _real_scalar("lr", lr, positive=True)
         self.momentum = _real_scalar(
             "momentum", momentum, lower=0.0, upper=1.0, upper_inclusive=False
@@ -87,7 +87,7 @@ class Adam:
         eps=1e-8,
         weight_decay=0.0,
     ):
-        self.parameters = list(parameters)
+        self.parameters = _unique_parameters(parameters)
         self.lr = _real_scalar("lr", lr, positive=True)
         self.beta1, self.beta2 = _validate_betas(betas, "betas")
         self.eps = _real_scalar("eps", eps, positive=True)
@@ -190,6 +190,21 @@ class AdamW(Adam):
             if self.weight_decay != 0.0:
                 p.data -= self.lr * self.weight_decay * p.data
             p.data -= self.lr * (m / bc1) / (np.sqrt(v / bc2) + self.eps)
+
+
+def _unique_parameters(parameters):
+    """Materialize parameters and reject duplicate Tensor references."""
+    materialized = list(parameters)
+    seen = set()
+    for index, parameter in enumerate(materialized):
+        marker = id(parameter)
+        if marker in seen:
+            raise ValueError(
+                "optimizer parameters must not contain duplicate references: "
+                f"duplicate at index {index}"
+            )
+        seen.add(marker)
+    return materialized
 
 
 def _bool_flag(name, value):
