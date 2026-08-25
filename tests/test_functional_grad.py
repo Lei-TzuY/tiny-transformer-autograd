@@ -16,10 +16,14 @@ from engine.tensor import Tensor
 def test_grad_returns_scalar_loss_gradient_without_persisting_buffers():
     x = Tensor([2.0, 3.0], requires_grad=True)
     output = ops.sum(x * x)
+    x_buffer = x.grad
+    output_buffer = output.grad
 
     (dx,) = grad(output, x)
 
     np.testing.assert_allclose(dx, np.array([4.0, 6.0]))
+    assert x.grad is x_buffer
+    assert output.grad is output_buffer
     np.testing.assert_array_equal(x.grad, np.zeros_like(x.data))
     np.testing.assert_array_equal(output.grad, np.zeros_like(output.data))
 
@@ -44,6 +48,9 @@ def test_grad_restores_preexisting_leaf_and_intermediate_gradients():
     hidden.grad[:] = np.array([23.0, 29.0])
     output.grad[...] = 31.0
 
+    x_buffer = x.grad
+    hidden_buffer = hidden.grad
+    output_buffer = output.grad
     x_before = x.grad.copy()
     hidden_before = hidden.grad.copy()
     output_before = output.grad.copy()
@@ -51,6 +58,9 @@ def test_grad_restores_preexisting_leaf_and_intermediate_gradients():
     (dx,) = grad(output, x)
 
     np.testing.assert_allclose(dx, np.array([4.0, 6.0]))
+    assert x.grad is x_buffer
+    assert hidden.grad is hidden_buffer
+    assert output.grad is output_buffer
     np.testing.assert_array_equal(x.grad, x_before)
     np.testing.assert_array_equal(hidden.grad, hidden_before)
     np.testing.assert_array_equal(output.grad, output_before)
@@ -85,6 +95,8 @@ def test_grad_restores_buffers_when_backward_rejects_stale_graph():
     output = ops.sum(x * x)
     x.grad[:] = np.array([5.0, 7.0])
     output.grad[...] = 11.0
+    x_buffer = x.grad
+    output_buffer = output.grad
     x_before = x.grad.copy()
     output_before = output.grad.copy()
     x.data[0] = 99.0
@@ -92,6 +104,8 @@ def test_grad_restores_buffers_when_backward_rejects_stale_graph():
     with pytest.raises(RuntimeError, match="modified after forward"):
         grad(output, x)
 
+    assert x.grad is x_buffer
+    assert output.grad is output_buffer
     np.testing.assert_array_equal(x.grad, x_before)
     np.testing.assert_array_equal(output.grad, output_before)
 
