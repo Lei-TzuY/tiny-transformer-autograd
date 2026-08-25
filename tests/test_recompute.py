@@ -119,7 +119,7 @@ class TestPrimitive:
         with no_grad():
             out = recompute(layer, x)
         assert not out.requires_grad
-        assert out._children == set()
+        assert out._children == ()
 
     def test_leaves_the_random_stream_untouched(self):
         from nn.layers import Dropout
