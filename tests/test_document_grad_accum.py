@@ -4,6 +4,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -56,12 +57,11 @@ def test_document_accumulation_matches_one_token_weighted_large_batch():
     short, long = _ragged_microbatches()
 
     model.zero_grad()
-    accumulated_loss = train.accumulate_gradients(
+    accumulated_loss = train.accumulate_document_gradients(
         model,
-        model.parameters(),
         _sampler([short, long]),
+        model.parameters(),
         grad_accum=2,
-        weight_by_scored_tokens=True,
     )
     accumulated_grads = _grads(model)
 
@@ -77,63 +77,59 @@ def test_document_accumulation_matches_one_token_weighted_large_batch():
         )
 
 
-def test_equal_microbatch_path_preserves_historical_accumulation_math():
-    """The default token-stream path keeps the previous operation sequence."""
+def test_equal_microbatch_count_is_not_used_for_ragged_losses():
+    """Pin the old mean-of-means bug with deliberately unequal token counts."""
     model = _tiny_model(seed=2)
-    batch_a = (
-        np.array([[0, 1, 2]], dtype=np.int64),
-        np.array([[1, 2, 3]], dtype=np.int64),
-        None,
-    )
-    batch_b = (
-        np.array([[3, 4, 5]], dtype=np.int64),
-        np.array([[4, 5, 6]], dtype=np.int64),
-        None,
-    )
+    short, long = _ragged_microbatches()
 
+    individual_losses = [
+        float(train.batch_loss(model, *batch).data)
+        for batch in (short, long)
+    ]
     model.zero_grad()
-    actual_loss = train.accumulate_gradients(
+    weighted = train.accumulate_document_gradients(
         model,
+        _sampler([short, long]),
         model.parameters(),
-        _sampler([batch_a, batch_b]),
         grad_accum=2,
-        weight_by_scored_tokens=False,
     )
-    actual_grads = _grads(model)
 
-    model.zero_grad()
-    losses = []
-    for batch in (batch_a, batch_b):
-        loss = train.batch_loss(model, *batch)
-        loss.backward()
-        losses.append(float(loss.data))
-    for parameter in model.parameters():
-        parameter.grad /= 2
-
-    assert actual_loss == float(np.mean(losses))
-    for name, parameter in model.named_parameters():
-        np.testing.assert_array_equal(actual_grads[name], parameter.grad)
+    expected = (individual_losses[0] + 3.0 * individual_losses[1]) / 4.0
+    assert weighted == pytest.approx(expected, abs=1e-12)
+    assert weighted != pytest.approx(float(np.mean(individual_losses)), abs=1e-8)
 
 
-def test_single_document_microbatch_keeps_direct_backward_path():
-    """Token weighting is a no-op when there is only one micro-batch."""
+def test_document_accumulation_is_only_used_for_multiple_microbatches():
     model = _tiny_model(seed=3)
     short, _ = _ragged_microbatches()
 
-    model.zero_grad()
-    actual_loss = train.accumulate_gradients(
-        model,
-        model.parameters(),
-        _sampler([short]),
-        grad_accum=1,
-        weight_by_scored_tokens=True,
+    with pytest.raises(ValueError, match="grad_accum > 1"):
+        train.accumulate_document_gradients(
+            model,
+            _sampler([short]),
+            model.parameters(),
+            grad_accum=1,
+        )
+
+
+def test_unscored_document_microbatch_fails_before_backward():
+    model = _tiny_model(seed=4)
+    bad = (
+        np.array([[1, 0, 0]], dtype=np.int64),
+        np.full((1, 3), train.IGNORE_INDEX, dtype=np.int64),
+        np.zeros((1, 3), dtype=np.int64),
     )
-    actual_grads = _grads(model)
-
     model.zero_grad()
-    direct_loss = train.batch_loss(model, *short)
-    direct_loss.backward()
+    before = _grads(model)
 
-    assert actual_loss == float(direct_loss.data)
-    for name, parameter in model.named_parameters():
-        np.testing.assert_array_equal(actual_grads[name], parameter.grad)
+    with pytest.raises(ValueError, match="no scored tokens"):
+        train.accumulate_document_gradients(
+            model,
+            _sampler([bad, bad]),
+            model.parameters(),
+            grad_accum=2,
+        )
+
+    after = _grads(model)
+    for name in before:
+        np.testing.assert_array_equal(after[name], before[name])
