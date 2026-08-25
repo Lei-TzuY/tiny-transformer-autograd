@@ -14,6 +14,9 @@ class FeedForward(Module):
     """Position-wise feed-forward network with GELU activation."""
 
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.0):
+        d_model = _validate_positive_int(d_model, "d_model")
+        d_ff = _validate_positive_int(d_ff, "d_ff")
+        dropout = _validate_dropout_probability(dropout, "dropout")
         self.fc1 = Linear(d_model, d_ff)
         self.fc2 = Linear(d_ff, d_model)
         self.drop = Dropout(dropout)
@@ -38,6 +41,9 @@ class SwiGLU(Module):
     """
 
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.0):
+        d_model = _validate_positive_int(d_model, "d_model")
+        d_ff = _validate_positive_int(d_ff, "d_ff")
+        dropout = _validate_dropout_probability(dropout, "dropout")
         self.fc_gate = Linear(d_model, d_ff, bias=False)
         self.fc_up = Linear(d_model, d_ff, bias=False)
         self.fc_down = Linear(d_ff, d_model, bias=False)
@@ -69,10 +75,14 @@ class TransformerBlock(Module):
         ffn: str = "gelu",
         rope: RotaryEmbedding = None,
     ):
-        if norm not in _NORMS:
-            raise ValueError(f"norm must be one of {sorted(_NORMS)}")
-        if ffn not in _FFNS:
-            raise ValueError(f"ffn must be one of {sorted(_FFNS)}")
+        d_model = _validate_positive_int(d_model, "d_model")
+        num_heads = _validate_positive_int(num_heads, "num_heads")
+        d_ff = _validate_positive_int(d_ff, "d_ff")
+        dropout = _validate_dropout_probability(dropout, "dropout")
+        norm = _validate_choice(norm, "norm", tuple(_NORMS))
+        ffn = _validate_choice(ffn, "ffn", tuple(_FFNS))
+        if d_model % num_heads != 0:
+            raise ValueError("d_model must be divisible by num_heads")
         norm_cls = _NORMS[norm]
         self.ln1 = norm_cls(d_model)
         self.attn = MultiHeadAttention(d_model, num_heads, dropout, rope=rope)
@@ -118,29 +128,23 @@ class GPT(Module):
         ffn: str = "gelu",
         grad_checkpoint: bool = False,
     ):
-        dimensions = {
-            "vocab_size": vocab_size,
-            "context_len": context_len,
-            "d_model": d_model,
-            "num_heads": num_heads,
-            "d_ff": d_ff,
-            "num_layers": num_layers,
-        }
-        invalid = [name for name, value in dimensions.items() if value <= 0]
-        if invalid:
-            raise ValueError(f"{', '.join(invalid)} must be positive")
+        vocab_size = _validate_positive_int(vocab_size, "vocab_size")
+        context_len = _validate_positive_int(context_len, "context_len")
+        d_model = _validate_positive_int(d_model, "d_model")
+        num_heads = _validate_positive_int(num_heads, "num_heads")
+        d_ff = _validate_positive_int(d_ff, "d_ff")
+        num_layers = _validate_positive_int(num_layers, "num_layers")
+        dropout = _validate_dropout_probability(dropout, "dropout")
+        lora_rank = _validate_non_negative_int(lora_rank, "lora_rank")
+        lora_alpha = _validate_positive_finite_real(lora_alpha, "lora_alpha")
+        norm = _validate_choice(norm, "norm", tuple(_NORMS))
+        pos_encoding = _validate_choice(
+            pos_encoding, "pos_encoding", ("learned", "rope")
+        )
+        ffn = _validate_choice(ffn, "ffn", tuple(_FFNS))
+        grad_checkpoint = _validate_bool_flag(grad_checkpoint, "grad_checkpoint")
         if d_model % num_heads != 0:
             raise ValueError("d_model must be divisible by num_heads")
-        if norm not in _NORMS:
-            raise ValueError(f"norm must be one of {sorted(_NORMS)}")
-        if ffn not in _FFNS:
-            raise ValueError(f"ffn must be one of {sorted(_FFNS)}")
-        if not 0.0 <= dropout < 1.0:
-            raise ValueError("dropout must be in [0, 1)")
-        if lora_rank < 0 or lora_alpha <= 0:
-            raise ValueError("lora_rank must be non-negative and lora_alpha positive")
-        if pos_encoding not in {"learned", "rope"}:
-            raise ValueError("pos_encoding must be 'learned' or 'rope'")
         if pos_encoding == "rope" and (d_model // num_heads) % 2 != 0:
             raise ValueError("RoPE requires an even head dimension")
         self.vocab_size = vocab_size
@@ -159,7 +163,7 @@ class GPT(Module):
         # block's activations are recomputed in the backward pass instead of
         # being kept. Weights, outputs, and gradients are unaffected, so it is
         # deliberately absent from config() and safe to flip on a resumed run.
-        self.grad_checkpoint = bool(grad_checkpoint)
+        self.grad_checkpoint = grad_checkpoint
 
         self.token_emb = Embedding(vocab_size, d_model)
         if pos_encoding == "learned":
@@ -562,8 +566,8 @@ class GPT(Module):
 
     def enable_lora(self, rank, alpha=1.0):
         """Freeze the backbone and train only low-rank adapters on linear layers."""
-        if rank <= 0:
-            raise ValueError("LoRA rank must be positive")
+        rank = _validate_positive_int(rank, "LoRA rank")
+        alpha = _validate_positive_finite_real(alpha, "LoRA alpha")
         if self.lora_rank:
             if rank == self.lora_rank and alpha == self.lora_alpha:
                 return self
@@ -698,6 +702,33 @@ def _validate_positive_finite_real(value, name):
         raise ValueError(f"{name} must be finite")
     if value <= 0:
         raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _validate_dropout_probability(value, name):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError(f"{name} must be a real number")
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    if not 0.0 <= value < 1.0:
+        raise ValueError(f"{name} must be in [0, 1)")
+    return value
+
+
+def _validate_bool_flag(value, name):
+    if not isinstance(value, (bool, np.bool_)):
+        raise TypeError(f"{name} must be a boolean")
+    return bool(value)
+
+
+def _validate_choice(value, name, choices):
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if value not in choices:
+        raise ValueError(f"{name} must be one of {sorted(choices)}")
     return value
 
 
