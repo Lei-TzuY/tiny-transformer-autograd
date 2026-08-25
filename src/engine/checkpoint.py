@@ -12,14 +12,31 @@ CHECKPOINT_VERSION = 2
 
 
 def read_checkpoint(path):
-    """Read a trusted local checkpoint file."""
+    """Read and validate a trusted local checkpoint file.
+
+    Pickle itself is executable and therefore remains restricted to trusted
+    files. Envelope validation happens immediately after deserialization so
+    callers cannot accidentally consume malformed metadata before reaching
+    ``restore_checkpoint``.
+    """
     with open(path, "rb") as handle:
-        return pickle.load(handle)
+        state = pickle.load(handle)
+    _validate_checkpoint_envelope(state)
+    return state
 
 
 def save_checkpoint(path, model, optimizer=None, scheduler=None, step=0, metadata=None):
     """Save training state atomically."""
     step = _nonnegative_checkpoint_step(step)
+    if metadata is None:
+        metadata = {}
+    elif not isinstance(metadata, Mapping):
+        raise TypeError("checkpoint metadata must be a mapping or None")
+    else:
+        # Snapshot the outer mapping itself before model serialization; nested
+        # values retain their existing checkpoint representation.
+        metadata = dict(metadata)
+
     state = {
         "format_version": CHECKPOINT_VERSION,
         "model": model.state_dict(),
@@ -28,7 +45,7 @@ def save_checkpoint(path, model, optimizer=None, scheduler=None, step=0, metadat
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "rng_state": np.random.get_state(),
         "step": step,
-        "metadata": metadata or {},
+        "metadata": metadata,
     }
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
@@ -40,7 +57,9 @@ def save_checkpoint(path, model, optimizer=None, scheduler=None, step=0, metadat
 
 def restore_checkpoint(state, model, optimizer=None, scheduler=None, strict=True):
     """Restore an already-read checkpoint and return its completed step."""
-    step = _validate_checkpoint_envelope(state, strict=strict)
+    if not isinstance(strict, bool):
+        raise TypeError("strict must be a boolean")
+    step = _validate_checkpoint_envelope(state)
 
     if optimizer is not None and state.get("optimizer") is not None:
         saved_type = state.get("optimizer_type")
@@ -79,12 +98,10 @@ def restore_checkpoint(state, model, optimizer=None, scheduler=None, strict=True
     return step
 
 
-def _validate_checkpoint_envelope(state, *, strict):
-    """Validate restore metadata before snapshotting or mutating caller state."""
+def _validate_checkpoint_envelope(state):
+    """Validate outer checkpoint metadata without mutating caller state."""
     if not isinstance(state, Mapping):
         raise TypeError("checkpoint state must be a mapping")
-    if not isinstance(strict, bool):
-        raise TypeError("strict must be a boolean")
 
     version = state.get("format_version", 1)
     if isinstance(version, (bool, np.bool_)) or not isinstance(version, Integral):
@@ -103,6 +120,9 @@ def _validate_checkpoint_envelope(state, *, strict):
         not isinstance(optimizer_type, str) or not optimizer_type
     ):
         raise TypeError("checkpoint optimizer_type must be a non-empty string or None")
+
+    if "metadata" in state and not isinstance(state["metadata"], Mapping):
+        raise TypeError("checkpoint metadata must be a mapping")
 
     rng_state = state.get("rng_state")
     if rng_state is not None:
