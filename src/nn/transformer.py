@@ -431,8 +431,19 @@ class GPT(Module):
         surviving real tokens from 0 — a row that has not filled the window
         yet loses padding, one that has loses its oldest tokens.
         """
-        if not isinstance(max_new_tokens, (int, np.integer)) or max_new_tokens < 0:
-            raise ValueError("max_new_tokens must be a non-negative integer")
+        max_new_tokens = _validate_non_negative_int(max_new_tokens, "max_new_tokens")
+        if not isinstance(strategy, str):
+            raise TypeError("strategy must be a string")
+        if strategy not in {"sample", "greedy", "beam"}:
+            raise ValueError("strategy must be 'sample', 'greedy', or 'beam'")
+        temperature, top_k, top_p = _validate_sampling_options(
+            temperature, top_k, top_p
+        )
+        beam_width = _validate_positive_int(beam_width, "beam_width")
+        if not isinstance(use_cache, (bool, np.bool_)):
+            raise TypeError("use_cache must be a bool")
+        use_cache = bool(use_cache)
+
         idx = self._validate_token_batch(idx)
         if strategy == "beam":
             if attention_mask is not None:
@@ -441,10 +452,6 @@ class GPT(Module):
                     "attention_mask"
                 )
             return self.generate_beam(idx, max_new_tokens, beam_width, temperature)
-        if strategy not in {"sample", "greedy"}:
-            raise ValueError("strategy must be 'sample', 'greedy', or 'beam'")
-        if temperature <= 0:
-            raise ValueError("temperature must be positive")
 
         idx = np.array(idx, dtype=np.int64, copy=True)
         mask = positions = None
@@ -533,12 +540,9 @@ class GPT(Module):
 
     def generate_beam(self, idx, max_new_tokens, beam_width=3, temperature=1.0):
         """Return the highest-scoring sequence from deterministic beam search."""
-        if not isinstance(max_new_tokens, (int, np.integer)) or max_new_tokens < 0:
-            raise ValueError("max_new_tokens must be a non-negative integer")
-        if beam_width <= 0:
-            raise ValueError("beam_width must be positive")
-        if temperature <= 0:
-            raise ValueError("temperature must be positive")
+        max_new_tokens = _validate_non_negative_int(max_new_tokens, "max_new_tokens")
+        beam_width = _validate_positive_int(beam_width, "beam_width")
+        temperature = _validate_positive_finite_real(temperature, "temperature")
         idx = np.array(self._validate_token_batch(idx), dtype=np.int64, copy=True)
         if idx.shape[0] != 1:
             raise ValueError("beam search currently supports batch size 1")
@@ -666,13 +670,58 @@ def _log_softmax(logits):
     return shifted - np.log(np.exp(shifted).sum())
 
 
+def _validate_non_negative_int(value, name):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be a non-negative integer")
+    value = int(value)
+    if value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _validate_positive_int(value, name):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be a positive integer")
+    value = int(value)
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _validate_positive_finite_real(value, name):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError(f"{name} must be a real number")
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _validate_sampling_options(temperature, top_k, top_p):
+    temperature = _validate_positive_finite_real(temperature, "temperature")
+    if top_k is not None:
+        top_k = _validate_positive_int(top_k, "top_k")
+    if top_p is not None:
+        if isinstance(top_p, (bool, np.bool_)) or not isinstance(
+            top_p, (int, float, np.integer, np.floating)
+        ):
+            raise TypeError("top_p must be a real number")
+        top_p = float(top_p)
+        if not np.isfinite(top_p):
+            raise ValueError("top_p must be finite")
+        if not 0.0 < top_p <= 1.0:
+            raise ValueError("top_p must be in (0, 1]")
+    return temperature, top_k, top_p
+
+
 def _sample(logits, temperature=1.0, top_k=None, top_p=None):
-    if temperature <= 0:
-        raise ValueError("temperature must be positive")
-    if top_k is not None and top_k <= 0:
-        raise ValueError("top_k must be positive")
-    if top_p is not None and not 0 < top_p <= 1:
-        raise ValueError("top_p must be in (0, 1]")
+    temperature, top_k, top_p = _validate_sampling_options(
+        temperature, top_k, top_p
+    )
 
     filtered = np.array(logits, dtype=np.float64, copy=True) / temperature
     if top_k is not None and top_k < len(filtered):
