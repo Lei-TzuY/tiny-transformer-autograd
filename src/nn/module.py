@@ -34,20 +34,30 @@ class Module:
     def modules(self):
         """Yield this module and all nested child modules once."""
         found = []
-        seen = set()
+        seen_modules = set()
+        seen_containers = set()
 
         def _collect(obj):
             if isinstance(obj, Module):
-                if id(obj) in seen:
+                marker = id(obj)
+                if marker in seen_modules:
                     return
-                seen.add(id(obj))
+                seen_modules.add(marker)
                 found.append(obj)
                 for val in vars(obj).values():
                     _collect(val)
             elif isinstance(obj, (list, tuple)):
+                marker = id(obj)
+                if marker in seen_containers:
+                    return
+                seen_containers.add(marker)
                 for item in obj:
                     _collect(item)
             elif isinstance(obj, dict):
+                marker = id(obj)
+                if marker in seen_containers:
+                    return
+                seen_containers.add(marker)
                 for item in obj.values():
                     _collect(item)
 
@@ -60,20 +70,35 @@ class Module:
         Returns a flat list with no duplicates.
         """
         params = []
-        seen = set()
+        seen_tensors = set()
+        seen_modules = set()
+        seen_containers = set()
 
         def _collect(obj):
             if isinstance(obj, Tensor) and obj.requires_grad:
-                if id(obj) not in seen:
-                    seen.add(id(obj))
+                marker = id(obj)
+                if marker not in seen_tensors:
+                    seen_tensors.add(marker)
                     params.append(obj)
             elif isinstance(obj, Module):
-                for name in vars(obj):
-                    _collect(getattr(obj, name))
+                marker = id(obj)
+                if marker in seen_modules:
+                    return
+                seen_modules.add(marker)
+                for val in vars(obj).values():
+                    _collect(val)
             elif isinstance(obj, (list, tuple)):
+                marker = id(obj)
+                if marker in seen_containers:
+                    return
+                seen_containers.add(marker)
                 for item in obj:
                     _collect(item)
             elif isinstance(obj, dict):
+                marker = id(obj)
+                if marker in seen_containers:
+                    return
+                seen_containers.add(marker)
                 for item in obj.values():
                     _collect(item)
 
@@ -82,21 +107,36 @@ class Module:
 
     def named_tensors(self, prefix=""):
         """Yield all persistent tensors, including frozen tensors and buffers."""
-        seen = set()
+        seen_tensors = set()
+        seen_modules = set()
+        seen_containers = set()
 
         def _collect(obj, pfx):
             if isinstance(obj, Tensor):
-                if id(obj) not in seen:
-                    seen.add(id(obj))
+                marker = id(obj)
+                if marker not in seen_tensors:
+                    seen_tensors.add(marker)
                     yield pfx, obj
             elif isinstance(obj, Module):
+                marker = id(obj)
+                if marker in seen_modules:
+                    return
+                seen_modules.add(marker)
                 for name, val in vars(obj).items():
                     full = f"{pfx}.{name}" if pfx else name
                     yield from _collect(val, full)
             elif isinstance(obj, (list, tuple)):
+                marker = id(obj)
+                if marker in seen_containers:
+                    return
+                seen_containers.add(marker)
                 for i, item in enumerate(obj):
                     yield from _collect(item, f"{pfx}[{i}]")
             elif isinstance(obj, dict):
+                marker = id(obj)
+                if marker in seen_containers:
+                    return
+                seen_containers.add(marker)
                 for key, item in obj.items():
                     yield from _collect(item, f"{pfx}[{key}]")
 
@@ -104,21 +144,36 @@ class Module:
 
     def named_parameters(self, prefix=""):
         """Yield (name, tensor) pairs for all trainable parameters."""
-        seen = set()
+        seen_tensors = set()
+        seen_modules = set()
+        seen_containers = set()
 
         def _collect(obj, pfx):
             if isinstance(obj, Tensor) and obj.requires_grad:
-                if id(obj) not in seen:
-                    seen.add(id(obj))
+                marker = id(obj)
+                if marker not in seen_tensors:
+                    seen_tensors.add(marker)
                     yield pfx, obj
             elif isinstance(obj, Module):
+                marker = id(obj)
+                if marker in seen_modules:
+                    return
+                seen_modules.add(marker)
                 for name, val in vars(obj).items():
                     full = f"{pfx}.{name}" if pfx else name
                     yield from _collect(val, full)
             elif isinstance(obj, (list, tuple)):
+                marker = id(obj)
+                if marker in seen_containers:
+                    return
+                seen_containers.add(marker)
                 for i, item in enumerate(obj):
                     yield from _collect(item, f"{pfx}[{i}]")
             elif isinstance(obj, dict):
+                marker = id(obj)
+                if marker in seen_containers:
+                    return
+                seen_containers.add(marker)
                 for k, item in obj.items():
                     yield from _collect(item, f"{pfx}[{k}]")
 
