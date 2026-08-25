@@ -323,9 +323,12 @@ def _validate_step_inputs(parameters):
 
 
 def _snapshot_buffers(destination, source, label):
-    """Validate and detach saved buffers before any optimizer state mutation."""
-    _validate_buffers(destination, source, label)
-    return [np.array(saved, copy=True) for saved in source]
+    """Materialize, validate, and detach saved buffers before state mutation."""
+    if not isinstance(source, (list, tuple)):
+        raise TypeError(f"{label} buffers must be a list or tuple")
+    materialized = tuple(source)
+    _validate_buffers(destination, materialized, label)
+    return [np.array(saved, copy=True) for saved in materialized]
 
 
 def _validate_buffers(destination, source, label):
