@@ -24,6 +24,7 @@ _THREAD_ENV_VARS = (
     "VECLIB_MAXIMUM_THREADS",
     "NUMEXPR_NUM_THREADS",
 )
+_MAX_RANDOM_SEED = 2**32 - 1
 
 
 def parse_args():
@@ -45,9 +46,17 @@ def parse_args():
 
 
 def run_benchmark(args):
-    warmup, repeats = _validate_args(args)
-    np.random.seed(args.seed)
+    """Run a deterministic benchmark without perturbing caller NumPy RNG state."""
+    warmup, repeats, seed = _validate_args(args)
+    rng_state = np.random.get_state()
+    try:
+        np.random.seed(seed)
+        return _run_benchmark(args, warmup, repeats, seed)
+    finally:
+        np.random.set_state(rng_state)
 
+
+def _run_benchmark(args, warmup, repeats, seed):
     model = GPT(
         vocab_size=args.vocab,
         context_len=args.ctx,
@@ -135,20 +144,20 @@ def run_benchmark(args):
     return {
         "benchmark_schema": 1,
         "arch": args.arch,
-        "vocab": args.vocab,
-        "context_len": args.ctx,
-        "d_model": args.d,
-        "heads": args.heads,
-        "layers": args.layers,
-        "batch": args.batch,
-        "d_ff": 4 * args.d,
+        "vocab": int(args.vocab),
+        "context_len": int(args.ctx),
+        "d_model": int(args.d),
+        "heads": int(args.heads),
+        "layers": int(args.layers),
+        "batch": int(args.batch),
+        "d_ff": int(4 * args.d),
         "parameters": model.param_count(),
         "dtype": str(model.token_emb.weight.data.dtype),
         "prompt_length": int(prompt.shape[1]),
-        "steps": args.steps,
-        "generate_tokens": args.generate,
+        "steps": int(args.steps),
+        "generate_tokens": int(args.generate),
         "generation_strategy": "greedy",
-        "seed": args.seed,
+        "seed": seed,
         "warmup": warmup,
         "repeats": repeats,
         "environment": environment_metadata(),
@@ -246,14 +255,25 @@ def _summarize(samples):
     }
 
 
+def _strict_int(value, name, *, minimum=1, maximum=None):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{name} must be an integer")
+    result = int(value)
+    if result < minimum:
+        qualifier = "non-negative" if minimum == 0 else "positive"
+        raise ValueError(f"{name} must be {qualifier}")
+    if maximum is not None and result > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return result
+
+
 def _validate_args(args):
     # Before the benchmark protocol was configurable, programmatic callers
     # only supplied the model/workload fields. Preserve that API with the old
-    # one-warm-up/one-measurement behavior while the CLI uses its explicit
-    # defaults from parse_args().
-    warmup = getattr(args, "warmup", 1)
-    repeats = getattr(args, "repeats", 1)
-    positive = [
+    # one-warm-up/one-measurement behavior while the CLI uses explicit defaults.
+    warmup = _strict_int(getattr(args, "warmup", 1), "--warmup", minimum=0)
+    repeats = _strict_int(getattr(args, "repeats", 1), "--repeats")
+    for name, value in (
         ("--vocab", args.vocab),
         ("--ctx", args.ctx),
         ("--d", args.d),
@@ -262,18 +282,18 @@ def _validate_args(args):
         ("--batch", args.batch),
         ("--steps", args.steps),
         ("--generate", args.generate),
-        ("--repeats", repeats),
-    ]
-    for name, value in positive:
-        if value <= 0:
-            raise ValueError(f"{name} must be positive")
+    ):
+        _strict_int(value, name)
+    seed = _strict_int(args.seed, "--seed", minimum=0, maximum=_MAX_RANDOM_SEED)
+    if not isinstance(args.arch, str):
+        raise TypeError("--arch must be a string")
+    if args.arch not in _ARCH_PRESETS:
+        raise ValueError(f"unsupported --arch: {args.arch!r}")
     if args.d % args.heads != 0:
         raise ValueError("--d must be divisible by --heads")
     if args.arch == "llama" and (args.d // args.heads) % 2 != 0:
         raise ValueError("--arch llama needs an even head dimension (d/heads) for RoPE")
-    if warmup < 0:
-        raise ValueError("--warmup must be non-negative")
-    return warmup, repeats
+    return warmup, repeats, seed
 
 
 def main():
