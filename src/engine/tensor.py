@@ -26,6 +26,17 @@ def _no_backward():
     return None
 
 
+def _snapshot_index(index):
+    """Copy mutable NumPy indexing state captured by a backward closure."""
+    if isinstance(index, np.ndarray):
+        return index.copy()
+    if isinstance(index, tuple):
+        return tuple(_snapshot_index(item) for item in index)
+    if isinstance(index, list):
+        return [_snapshot_index(item) for item in index]
+    return index
+
+
 class Tensor:
     """
     A multi-dimensional array that participates in automatic differentiation.
@@ -310,8 +321,11 @@ class Tensor:
 
     def __getitem__(self, idx):
         """Slice / index; gradient flows back via scatter-add."""
+        # Advanced NumPy indices are mutable caller-owned arrays/lists. The VJP
+        # must use the exact indexing state that produced this forward value.
+        saved_idx = _snapshot_index(idx)
         out = Tensor(
-            self.data[idx],
+            self.data[saved_idx],
             requires_grad=self.requires_grad,
             _children=(self,),
             _op="getitem",
@@ -320,8 +334,8 @@ class Tensor:
         def _backward():
             if self.requires_grad:
                 self._ensure_grad()
-                # Scatter gradient back to the original indices
-                np.add.at(self.grad, idx, out.grad)
+                # Scatter gradient back to the original forward indices.
+                np.add.at(self.grad, saved_idx, out.grad)
 
         out._backward = _backward
         return out
