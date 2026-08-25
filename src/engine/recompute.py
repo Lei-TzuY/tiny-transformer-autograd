@@ -39,6 +39,14 @@ so both see identical masks. The state in effect when the backward pass started
 is put back afterwards, leaving the surrounding training loop's random stream
 untouched — a run with checkpointing enabled follows the same trajectory as one
 without it.
+
+Replay consistency
+------------------
+Shape-compatible output is not enough: a closure may read parameters or other
+state that changed between the original forward and backward. The replay is
+therefore compared against a private snapshot of every forward output before
+any replay gradient is propagated. Observable value or dtype drift fails
+closed instead of differentiating a different forward pass silently.
 """
 
 import numpy as np
@@ -61,8 +69,13 @@ def _normalize_outputs(output):
     raise TypeError("recompute expects function to return a Tensor or tuple of Tensors")
 
 
-def _validate_replay(output, expected_is_tuple, expected_shapes):
-    """Require a replay to reproduce the forward output structure and shapes."""
+def _snapshot_outputs(outputs):
+    """Copy forward values so later closure/output mutation cannot rewrite history."""
+    return tuple(np.array(value.data, copy=True) for value in outputs)
+
+
+def _validate_replay(output, expected_is_tuple, expected_shapes, expected_values):
+    """Require replay to reproduce the forward output structure, shape and values."""
     try:
         outputs, is_tuple = _normalize_outputs(output)
     except (TypeError, ValueError) as exc:
@@ -73,11 +86,22 @@ def _validate_replay(output, expected_is_tuple, expected_shapes):
         raise RuntimeError(
             "recompute function returned a different output structure during replay"
         )
-    for index, (value, shape) in enumerate(zip(outputs, expected_shapes)):
+    for index, (value, shape, expected) in enumerate(
+        zip(outputs, expected_shapes, expected_values)
+    ):
         if value.shape != shape:
             raise RuntimeError(
                 f"recompute output {index} changed shape during replay: "
                 f"expected {shape}, got {value.shape}"
+            )
+        if value.data.dtype != expected.dtype:
+            raise RuntimeError(
+                f"recompute output {index} changed dtype during replay: "
+                f"expected {expected.dtype}, got {value.data.dtype}"
+            )
+        if not np.array_equal(value.data, expected, equal_nan=True):
+            raise RuntimeError(
+                f"recompute output {index} changed values during replay"
             )
     return outputs
 
@@ -113,9 +137,9 @@ def recompute(function, *inputs):
     function : callable
         Takes the given tensors and returns a Tensor or a non-empty tuple of
         Tensors. It must be replayable: the same inputs and parameters must
-        reproduce the same output structure and shapes. Parameter gradients are
-        accumulated by the replay itself, so any module the function closes over
-        is trained normally.
+        reproduce the same output structure, shapes, dtypes, and values.
+        Parameter gradients are accumulated by the replay itself, so any module
+        the function closes over is trained normally.
     *inputs : Tensor
         Tensors whose gradients must flow back through the section.
 
@@ -143,6 +167,7 @@ def recompute(function, *inputs):
         output = function(*inputs)
     outputs, is_tuple = _normalize_outputs(output)
     expected_shapes = tuple(value.shape for value in outputs)
+    expected_values = _snapshot_outputs(outputs)
 
     if not is_tuple:
         out = Tensor(
@@ -160,7 +185,7 @@ def recompute(function, *inputs):
                 with enable_grad():
                     replayed = function(*replay_inputs)
                     replayed_outputs = _validate_replay(
-                        replayed, False, expected_shapes
+                        replayed, False, expected_shapes, expected_values
                     )
                     replayed_outputs[0].backward(out.grad)
             finally:
@@ -197,7 +222,7 @@ def recompute(function, *inputs):
             with enable_grad():
                 replayed = function(*replay_inputs)
                 replayed_outputs = _validate_replay(
-                    replayed, True, expected_shapes
+                    replayed, True, expected_shapes, expected_values
                 )
                 _flatten_outputs(replayed_outputs).backward(packed.grad)
         finally:
