@@ -499,7 +499,9 @@ class GPT(Module):
                 )
                 kv_cache = cache if use_cache else None
 
-            logits_last = logits[:, -1, :]
+            logits_last = _validate_selection_logits(
+                logits[:, -1, :], "generation logits"
+            )
             if strategy == "greedy":
                 next_token = np.argmax(logits_last, axis=-1)
             else:
@@ -556,7 +558,8 @@ class GPT(Module):
             candidates = []
             for sequence, score in beams:
                 logits, _ = self.infer(sequence[:, -self.context_len:])
-                log_probs = _log_softmax(logits[0, -1] / temperature)
+                scaled = _temperature_scale_logits(logits[0, -1], temperature)
+                log_probs = _log_softmax(scaled)
                 best = np.argsort(log_probs)[-beam_width:]
                 for token in best:
                     extended = np.concatenate([sequence, [[token]]], axis=1)
@@ -669,8 +672,58 @@ def _sigmoid(x):
     return np.where(x >= 0, 1.0 / (1.0 + e), e / (1.0 + e))
 
 
+def _validate_selection_logits(logits, name="generation logits"):
+    """Validate class scores while allowing -inf for impossible tokens."""
+    values = np.asarray(logits)
+    if values.ndim == 0 or values.shape[-1] == 0:
+        raise ValueError(f"{name} must have a non-empty class dimension")
+    if (
+        values.dtype == np.bool_
+        or not np.issubdtype(values.dtype, np.number)
+        or np.issubdtype(values.dtype, np.complexfloating)
+    ):
+        raise TypeError(f"{name} must have a real numeric dtype")
+    if np.isnan(values).any() or np.isposinf(values).any():
+        raise ValueError(f"{name} must not contain NaN or +inf")
+    if not np.isfinite(values).any(axis=-1).all():
+        raise ValueError(f"{name} require at least one finite logit per row")
+    return values
+
+
+def _temperature_scale_logits(logits, temperature):
+    """Scale one selection row, stabilizing only if direct division overflows."""
+    values = _validate_selection_logits(logits, "generation logits")
+    if values.ndim != 1:
+        raise ValueError("generation logits for token selection must be one-dimensional")
+    values = np.array(values, dtype=np.float64, copy=True)
+    with np.errstate(over="ignore", invalid="ignore"):
+        scaled = values / temperature
+
+    # Keep the historical arithmetic for ordinary logits. If a tiny positive
+    # temperature overflows otherwise-finite values, exploit softmax translation
+    # invariance and retry after subtracting the finite row maximum. Very small
+    # classes may still underflow to -inf, which correctly means zero probability.
+    if (
+        np.isnan(scaled).any()
+        or np.isposinf(scaled).any()
+        or not np.isfinite(scaled).any()
+    ):
+        row_max = np.max(values)
+        with np.errstate(over="ignore", invalid="ignore"):
+            scaled = (values - row_max) / temperature
+    if np.isnan(scaled).any() or np.isposinf(scaled).any():
+        raise ValueError("temperature scaling produced invalid generation logits")
+    if not np.isfinite(scaled).any():
+        raise ValueError("generation logits require at least one finite candidate")
+    return scaled
+
+
 def _log_softmax(logits):
-    shifted = logits - logits.max()
+    values = _validate_selection_logits(logits, "beam logits")
+    if values.ndim != 1:
+        raise ValueError("beam logits must be one-dimensional")
+    with np.errstate(over="ignore", invalid="ignore"):
+        shifted = values - values.max()
     return shifted - np.log(np.exp(shifted).sum())
 
 
@@ -754,7 +807,7 @@ def _sample(logits, temperature=1.0, top_k=None, top_p=None):
         temperature, top_k, top_p
     )
 
-    filtered = np.array(logits, dtype=np.float64, copy=True) / temperature
+    filtered = _temperature_scale_logits(logits, temperature)
     if top_k is not None and top_k < len(filtered):
         threshold = np.partition(filtered, -top_k)[-top_k]
         filtered[filtered < threshold] = -np.inf

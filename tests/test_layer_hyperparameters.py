@@ -103,7 +103,7 @@ def test_lora_rank_is_validated_before_freezing_base_parameters(bad_rank):
 
 @pytest.mark.parametrize(
     "bad_alpha",
-    [np.nan, np.inf, -np.inf, True, np.bool_(False), "1.0"],
+    [0.0, -1.0, np.nan, np.inf, -np.inf, True, np.bool_(False), "1.0"],
 )
 def test_lora_alpha_is_validated_before_freezing_base_parameters(bad_alpha):
     layer = Linear(3, 4)
