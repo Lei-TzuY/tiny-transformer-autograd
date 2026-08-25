@@ -27,6 +27,42 @@ import numpy as np
 from .tensor import Tensor
 
 
+def _stable_sum_data(data, axis=None, keepdims=False):
+    """Preserve ordinary NumPy sums while recovering finite overflow cases."""
+    data = np.asarray(data)
+
+    # Non-finite inputs retain NumPy's historical arithmetic and warning
+    # behaviour. The fallback below is only for wholly finite source values.
+    if not np.isfinite(data).all():
+        return data.sum(axis=axis, keepdims=keepdims)
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        historical = data.sum(axis=axis, keepdims=keepdims)
+    if np.isfinite(historical).all():
+        return historical
+
+    # Scale each reduction slice by its largest magnitude before summing. This
+    # keeps every addend in [-1, 1], so cancellation can recover a finite true
+    # sum even when the historical reduction overflowed along the way.
+    scale_keepdims = np.max(np.abs(data), axis=axis, keepdims=True)
+    scale_output = np.max(np.abs(data), axis=axis, keepdims=keepdims)
+    safe_scale = np.where(scale_keepdims == 0.0, 1.0, scale_keepdims)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        fallback = (
+            (data / safe_scale).sum(axis=axis, keepdims=keepdims) * scale_output
+        )
+
+    recover = ~np.isfinite(historical) & np.isfinite(fallback)
+    if np.all(recover | np.isfinite(historical)):
+        return np.where(recover, fallback, historical)
+
+    # At least one output is genuinely still non-finite. Re-evaluate the
+    # historical reduction outside the local errstate so existing overflow
+    # warning semantics are retained for that unrecoverable result.
+    warned = data.sum(axis=axis, keepdims=keepdims)
+    return np.where(recover, fallback, warned)
+
+
 # ---------------------------------------------------------------------------
 # Helper: un-broadcast a gradient to match a target shape
 # ---------------------------------------------------------------------------
@@ -38,7 +74,7 @@ def _unbroadcast(grad, target_shape):
 
     # Sum over axes where target_shape had size 1 (or was added)
     axes = tuple(i for i, (g, t) in enumerate(zip(grad.shape, padded)) if t == 1)
-    result = grad.sum(axis=axes, keepdims=True) if axes else grad
+    result = _stable_sum_data(grad, axis=axes, keepdims=True) if axes else grad
     return result.reshape(target_shape)
 
 
@@ -485,7 +521,7 @@ def cross_entropy(logits: Tensor, targets, ignore_index=None) -> Tensor:
 # ---------------------------------------------------------------------------
 def sum(x: Tensor, axis=None, keepdims=False) -> Tensor:
     out = Tensor(
-        x.data.sum(axis=axis, keepdims=keepdims),
+        _stable_sum_data(x.data, axis=axis, keepdims=keepdims),
         requires_grad=x.requires_grad,
         _children=(x,),
         _op="sum",
