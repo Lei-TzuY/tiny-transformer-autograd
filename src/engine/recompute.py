@@ -3,11 +3,11 @@ recompute.py — Gradient checkpointing (activation recomputation).
 
 The idea
 --------
-A backward pass needs the forward intermediates of every op.  Keeping them is
-what makes training memory scale with depth.  Gradient checkpointing trades that
+A backward pass needs the forward intermediates of every op. Keeping them is
+what makes training memory scale with depth. Gradient checkpointing trades that
 memory for time: run a section of the model *without* recording, keep only its
-input and output, and when the backward pass reaches it, run the section a
-second time — this time recording — and differentiate the replay.
+input and output values, and when the backward pass reaches it, run the section
+a second time — this time recording — and differentiate the replay.
 
 Cost: one extra forward pass over the wrapped section.
 Saving: none of that section's intermediates are retained between the forward
@@ -17,21 +17,25 @@ and backward passes.
 
     x = recompute(lambda inp: block(inp, mask), x)   # instead of block(x, mask)
 
+A section may return one Tensor or a tuple of Tensors. Tuple outputs are packed
+behind one tiny synthetic graph node, so all output cotangents reach one replay;
+using two outputs does not replay the section twice.
+
 Why the replay uses detached copies
 -----------------------------------
-The replay's leaves must be private to this closure.  If it differentiated into
+The replay's leaves must be private to this closure. If it differentiated into
 the *original* input tensor, ``Tensor.backward`` would see a node that has
 parents in the outer graph and reset its gradient — discarding contributions
 that other consumers of the same tensor (a residual connection, for instance)
-had already accumulated.  So the replay runs on copies and its input gradients
+had already accumulated. So the replay runs on copies and its input gradients
 are added into the originals afterwards.
 
 Dropout and the RNG
 -------------------
 A replay that draws different dropout masks would differentiate a different
-function than the one the forward pass computed.  The NumPy RNG state is
+function than the one the forward pass computed. The NumPy RNG state is
 therefore captured before the recorded-free forward and restored for the replay,
-so both see identical masks.  The state in effect when the backward pass started
+so both see identical masks. The state in effect when the backward pass started
 is put back afterwards, leaving the surrounding training loop's random stream
 untouched — a run with checkpointing enabled follows the same trajectory as one
 without it.
@@ -39,31 +43,90 @@ without it.
 
 import numpy as np
 
+import engine.ops as ops
 from .grad_mode import enable_grad, is_grad_enabled, no_grad
 from .tensor import Tensor
 
 
-def recompute(function, *inputs) -> Tensor:
+def _normalize_outputs(output):
+    """Return ``(outputs, is_tuple)`` and validate the public output contract."""
+    if isinstance(output, Tensor):
+        return (output,), False
+    if isinstance(output, tuple):
+        if not output:
+            raise ValueError("recompute output tuple must not be empty")
+        if not all(isinstance(value, Tensor) for value in output):
+            raise TypeError("recompute output tuple must contain only Tensors")
+        return output, True
+    raise TypeError("recompute expects function to return a Tensor or tuple of Tensors")
+
+
+def _validate_replay(output, expected_is_tuple, expected_shapes):
+    """Require a replay to reproduce the forward output structure and shapes."""
+    try:
+        outputs, is_tuple = _normalize_outputs(output)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "recompute function returned a different output structure during replay"
+        ) from exc
+    if is_tuple != expected_is_tuple or len(outputs) != len(expected_shapes):
+        raise RuntimeError(
+            "recompute function returned a different output structure during replay"
+        )
+    for index, (value, shape) in enumerate(zip(outputs, expected_shapes)):
+        if value.shape != shape:
+            raise RuntimeError(
+                f"recompute output {index} changed shape during replay: "
+                f"expected {shape}, got {value.shape}"
+            )
+    return outputs
+
+
+def _replay_inputs(inputs):
+    return [
+        Tensor(value.data, requires_grad=value.requires_grad)
+        for value in inputs
+    ]
+
+
+def _accumulate_input_grads(inputs, replay_inputs):
+    for original, replayed_input in zip(inputs, replay_inputs):
+        if original.requires_grad:
+            original._ensure_grad()
+            original.grad += replayed_input.grad
+
+
+def _flatten_outputs(outputs):
+    """Join replay outputs into one graph Tensor without changing their values."""
+    flattened = [value.reshape((-1,)) for value in outputs]
+    if len(flattened) == 1:
+        return flattened[0]
+    return ops.concat(flattened, axis=0)
+
+
+def recompute(function, *inputs):
     """
     Run ``function(*inputs)`` without recording, replaying it in the backward pass.
 
     Parameters
     ----------
     function : callable
-        Takes the given tensors and returns a single Tensor. It must be
-        replayable: same inputs and parameters must give the same output.
-        Parameter gradients are accumulated by the replay itself, so any module
-        the function closes over is trained normally.
+        Takes the given tensors and returns a Tensor or a non-empty tuple of
+        Tensors. It must be replayable: the same inputs and parameters must
+        reproduce the same output structure and shapes. Parameter gradients are
+        accumulated by the replay itself, so any module the function closes over
+        is trained normally.
     *inputs : Tensor
         Tensors whose gradients must flow back through the section.
 
     Returns
     -------
-    Tensor
-        The section's output. While recording is enabled this is always a graph
-        node — the function's internals may need gradients even when none of
-        ``inputs`` do. Use ``no_grad()`` if you want no graph at all; inside it
-        ``recompute`` is a plain call.
+    Tensor or tuple[Tensor, ...]
+        The section output with the same outer structure as ``function``. While
+        recording is enabled each returned Tensor participates in a tiny wrapper
+        graph; the function's internal graph is discarded until backward. Use
+        ``no_grad()`` if you want no graph at all — inside it ``recompute`` is a
+        plain call.
     """
     if not inputs:
         raise ValueError("recompute requires at least one Tensor input")
@@ -78,35 +141,71 @@ def recompute(function, *inputs) -> Tensor:
     forward_rng_state = np.random.get_state()
     with no_grad():
         output = function(*inputs)
-    if not isinstance(output, Tensor):
-        raise TypeError("recompute expects function to return a single Tensor")
+    outputs, is_tuple = _normalize_outputs(output)
+    expected_shapes = tuple(value.shape for value in outputs)
 
-    out = Tensor(
-        output.data,
+    if not is_tuple:
+        out = Tensor(
+            outputs[0].data,
+            requires_grad=True,
+            _children=inputs,
+            _op="recompute",
+        )
+
+        def _backward():
+            replay_inputs = _replay_inputs(inputs)
+            backward_rng_state = np.random.get_state()
+            np.random.set_state(forward_rng_state)
+            try:
+                with enable_grad():
+                    replayed = function(*replay_inputs)
+                    replayed_outputs = _validate_replay(
+                        replayed, False, expected_shapes
+                    )
+                    replayed_outputs[0].backward(out.grad)
+            finally:
+                # Leave the caller's random stream exactly where it was.
+                np.random.set_state(backward_rng_state)
+
+            _accumulate_input_grads(inputs, replay_inputs)
+
+        out._backward = _backward
+        return out
+
+    packed_data = np.concatenate(
+        [value.data.reshape(-1) for value in outputs], axis=0
+    )
+    packed = Tensor(
+        packed_data,
         requires_grad=True,
         _children=inputs,
         _op="recompute",
     )
 
-    def _backward():
-        replay_inputs = [
-            Tensor(value.data, requires_grad=value.requires_grad)
-            for value in inputs
-        ]
+    result = []
+    start = 0
+    for value in outputs:
+        stop = start + value.data.size
+        result.append(packed[start:stop].reshape(value.shape))
+        start = stop
+
+    def _backward_multi():
+        replay_inputs = _replay_inputs(inputs)
         backward_rng_state = np.random.get_state()
         np.random.set_state(forward_rng_state)
         try:
             with enable_grad():
                 replayed = function(*replay_inputs)
-                replayed.backward(out.grad)
+                replayed_outputs = _validate_replay(
+                    replayed, True, expected_shapes
+                )
+                _flatten_outputs(replayed_outputs).backward(packed.grad)
         finally:
-            # Leave the caller's random stream exactly where it was.
+            # One replay consumes exactly the same random draws as the forward,
+            # while the caller's stream remains untouched by backward.
             np.random.set_state(backward_rng_state)
 
-        for original, replayed_input in zip(inputs, replay_inputs):
-            if original.requires_grad:
-                original._ensure_grad()
-                original.grad += replayed_input.grad
+        _accumulate_input_grads(inputs, replay_inputs)
 
-    out._backward = _backward
-    return out
+    packed._backward = _backward_multi
+    return tuple(result)
