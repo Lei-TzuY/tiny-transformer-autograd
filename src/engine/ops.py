@@ -42,6 +42,62 @@ def _unbroadcast(grad, target_shape):
     return result.reshape(target_shape)
 
 
+def _stable_div_denominator_vjp(grad, numerator, denominator):
+    """Compute ``-grad * numerator / denominator**2`` without unsafe products."""
+    grad, numerator, denominator = np.broadcast_arrays(
+        np.asarray(grad), np.asarray(numerator), np.asarray(denominator)
+    )
+
+    # Preserve the historical arithmetic exactly for ordinary values. Detect
+    # only cases where a multiply/square has already overflowed, underflowed,
+    # or entered the subnormal range before the final quotient is formed.
+    with np.errstate(over="ignore", under="ignore", divide="ignore", invalid="ignore"):
+        product = -grad * numerator
+        square = denominator * denominator
+        result = product / square
+
+    finite_inputs = (
+        np.isfinite(grad)
+        & np.isfinite(numerator)
+        & np.isfinite(denominator)
+        & (denominator != 0.0)
+    )
+    tiny = np.finfo(np.float64).tiny
+    unsafe = finite_inputs & (
+        ~np.isfinite(product)
+        | ~np.isfinite(square)
+        | (square == 0.0)
+        | ((product == 0.0) & (grad != 0.0) & (numerator != 0.0))
+        | ((np.abs(product) < tiny) & (product != 0.0))
+        | ((np.abs(square) < tiny) & (square != 0.0))
+    )
+    if not np.any(unsafe):
+        return result
+
+    # frexp keeps every finite non-zero float as a bounded mantissa times a
+    # power of two. The mantissa ratio below is bounded, so only ldexp performs
+    # the final representability decision instead of losing information in an
+    # intermediate numerator product or denominator square.
+    safe_grad = np.where(unsafe, grad, 1.0)
+    safe_numerator = np.where(unsafe, numerator, 1.0)
+    safe_denominator = np.where(unsafe, denominator, 1.0)
+    grad_m, grad_e = np.frexp(safe_grad)
+    numerator_m, numerator_e = np.frexp(safe_numerator)
+    denominator_m, denominator_e = np.frexp(safe_denominator)
+
+    mantissa = -(grad_m * numerator_m) / (denominator_m * denominator_m)
+    mantissa, mantissa_e = np.frexp(mantissa)
+    exponent = (
+        grad_e.astype(np.int64)
+        + numerator_e.astype(np.int64)
+        - 2 * denominator_e.astype(np.int64)
+        + mantissa_e.astype(np.int64)
+    )
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        scaled = np.ldexp(mantissa, exponent)
+    return np.where(unsafe, scaled, result)
+
+
 # ---------------------------------------------------------------------------
 # add
 # ---------------------------------------------------------------------------
@@ -110,7 +166,7 @@ def div(a: Tensor, b: Tensor) -> Tensor:
         if b.requires_grad:
             b._ensure_grad()
             b.grad += _unbroadcast(
-                -out.grad * a.data / (b.data * b.data), b.shape
+                _stable_div_denominator_vjp(out.grad, a.data, b.data), b.shape
             )
 
     out._backward = _backward
