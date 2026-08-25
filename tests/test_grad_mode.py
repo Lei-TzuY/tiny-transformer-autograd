@@ -44,7 +44,7 @@ class TestGraphSuppression:
         x = Tensor([1.0, 2.0], requires_grad=True)
         out = x * x
         assert out.requires_grad
-        assert out._children == {x}
+        assert out._children == (x,)
         assert out._backward is not _no_backward
 
     def test_no_grad_detaches_op_results(self):
@@ -54,7 +54,7 @@ class TestGraphSuppression:
 
         assert not out.requires_grad
         assert out.grad is None
-        assert out._children == set()
+        assert out._children == ()
         assert out._backward is _no_backward
         np.testing.assert_allclose(out.data, 5.0)
 
@@ -307,7 +307,7 @@ class TestBackwardGuard:
             constant.backward()
 
         assert constant.grad is None
-        assert constant._children == set()
+        assert constant._children == ()
 
 
 class TestGraphPruning:
@@ -319,7 +319,7 @@ class TestGraphPruning:
         gc.collect()
 
         assert not result.requires_grad
-        assert result._children == set()
+        assert result._children == ()
         assert result._backward is _no_backward
         assert reference() is None
 
@@ -331,7 +331,7 @@ class TestGraphPruning:
         loss = trainable * frozen_branch
         loss.backward()
 
-        assert frozen_branch._children == set()
+        assert frozen_branch._children == ()
         assert frozen.grad is None
         np.testing.assert_allclose(trainable.grad, [4.0])
 
