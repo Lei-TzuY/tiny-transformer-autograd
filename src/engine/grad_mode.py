@@ -57,6 +57,29 @@ def is_grad_enabled() -> bool:
     return _state.enabled
 
 
+def _is_deferred_callable(function):
+    """Return True when invoking ``function`` defers its body until later."""
+    target = function
+    seen = set()
+    while isinstance(target, functools.partial):
+        identity = id(target)
+        if identity in seen:
+            break
+        seen.add(identity)
+        target = target.func
+
+    candidates = (target, getattr(target, "__call__", None))
+    return any(
+        candidate is not None
+        and (
+            inspect.iscoroutinefunction(candidate)
+            or inspect.isgeneratorfunction(candidate)
+            or inspect.isasyncgenfunction(candidate)
+        )
+        for candidate in candidates
+    )
+
+
 class set_grad_enabled:
     """
     Context manager and decorator that sets graph recording for a scope.
@@ -92,11 +115,9 @@ class set_grad_enabled:
         return False
 
     def __call__(self, function):
-        if (
-            inspect.iscoroutinefunction(function)
-            or inspect.isgeneratorfunction(function)
-            or inspect.isasyncgenfunction(function)
-        ):
+        if not callable(function):
+            raise TypeError("grad mode decorators require a callable")
+        if _is_deferred_callable(function):
             raise TypeError(
                 "grad mode decorators only support synchronous, "
                 "non-generator functions"
