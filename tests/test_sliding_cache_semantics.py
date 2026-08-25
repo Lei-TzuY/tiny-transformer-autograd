@@ -185,6 +185,32 @@ def test_streaming_rejects_invalid_selection_logits_without_consuming_rng(
 
 
 @pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"max_new_tokens": True}, TypeError, "max_new_tokens"),
+        (
+            {"max_new_tokens": 0, "temperature": np.nan},
+            ValueError,
+            "temperature.*finite",
+        ),
+        ({"max_new_tokens": 0, "top_k": 0}, ValueError, "top_k.*positive"),
+        ({"max_new_tokens": 0, "top_p": 0.0}, ValueError, "top_p"),
+        ({"max_new_tokens": 1, "strategy": 1}, TypeError, "strategy.*string"),
+    ],
+)
+def test_streaming_options_fail_before_inference(kwargs, error, message):
+    prompt = np.array([[1, 3]], dtype=np.int64)
+    model = _model(1)
+
+    def fail_infer(*_args, **_kwargs):
+        raise AssertionError("invalid options must fail before inference")
+
+    model.infer = fail_infer
+    with pytest.raises(error, match=message):
+        stream_generate(model, prompt, **kwargs)
+
+
+@pytest.mark.parametrize(
     ("call", "error", "message"),
     [
         (
