@@ -2,10 +2,49 @@
 layers.py — Linear, Embedding, LayerNorm, RMSNorm, Dropout.
 """
 
+from numbers import Integral, Real
+
 import numpy as np
 from engine.tensor import Tensor
 import engine.ops as ops
 from .module import Module
+
+
+def _positive_int(name, value):
+    """Validate a positive integral layer dimension and normalize it to int."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a positive integer")
+    value = int(value)
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _real_scalar(
+    name,
+    value,
+    *,
+    positive=False,
+    lower=None,
+    upper=None,
+    upper_inclusive=True,
+):
+    """Validate one finite real layer hyperparameter and return float."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real number")
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    if positive and value <= 0.0:
+        raise ValueError(f"{name} must be positive")
+    if lower is not None and value < lower:
+        raise ValueError(f"{name} must be at least {lower}")
+    if upper is not None:
+        invalid = value > upper if upper_inclusive else value >= upper
+        if invalid:
+            relation = "at most" if upper_inclusive else "less than"
+            raise ValueError(f"{name} must be {relation} {upper}")
+    return value
 
 
 class Linear(Module):
@@ -17,8 +56,8 @@ class Linear(Module):
     """
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True):
-        if in_features <= 0 or out_features <= 0:
-            raise ValueError("in_features and out_features must be positive")
+        in_features = _positive_int("in_features", in_features)
+        out_features = _positive_int("out_features", out_features)
         self.in_features = in_features
         self.out_features = out_features
 
@@ -57,8 +96,8 @@ class Linear(Module):
 
     def enable_lora(self, rank, alpha=1.0):
         """Freeze this linear layer and add trainable low-rank adapters."""
-        if rank <= 0:
-            raise ValueError("LoRA rank must be positive")
+        rank = _positive_int("LoRA rank", rank)
+        alpha = _real_scalar("LoRA alpha", alpha)
         if self.lora_A is not None:
             return
         self.weight.requires_grad = False
@@ -91,8 +130,8 @@ class Embedding(Module):
     """
 
     def __init__(self, num_embeddings: int, embedding_dim: int):
-        if num_embeddings <= 0 or embedding_dim <= 0:
-            raise ValueError("num_embeddings and embedding_dim must be positive")
+        num_embeddings = _positive_int("num_embeddings", num_embeddings)
+        embedding_dim = _positive_int("embedding_dim", embedding_dim)
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.weight = Tensor(
@@ -134,8 +173,8 @@ class LayerNorm(Module):
     """
 
     def __init__(self, normalized_shape: int, eps: float = 1e-5):
-        if normalized_shape <= 0 or eps <= 0:
-            raise ValueError("normalized_shape and eps must be positive")
+        normalized_shape = _positive_int("normalized_shape", normalized_shape)
+        eps = _real_scalar("eps", eps, positive=True)
         self.normalized_shape = normalized_shape
         self.eps = eps
         self.gamma = Tensor(np.ones(normalized_shape), requires_grad=True)
@@ -179,8 +218,8 @@ class RMSNorm(Module):
     """
 
     def __init__(self, normalized_shape: int, eps: float = 1e-5):
-        if normalized_shape <= 0 or eps <= 0:
-            raise ValueError("normalized_shape and eps must be positive")
+        normalized_shape = _positive_int("normalized_shape", normalized_shape)
+        eps = _real_scalar("eps", eps, positive=True)
         self.normalized_shape = normalized_shape
         self.eps = eps
         self.gamma = Tensor(np.ones(normalized_shape), requires_grad=True)
@@ -216,8 +255,9 @@ class Dropout(Module):
     """
 
     def __init__(self, p: float = 0.0):
-        if not 0.0 <= p < 1.0:
-            raise ValueError("dropout probability must be in [0, 1)")
+        p = _real_scalar(
+            "dropout probability", p, lower=0.0, upper=1.0, upper_inclusive=False
+        )
         self.p = p
         self.training = True
 
