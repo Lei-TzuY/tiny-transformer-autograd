@@ -12,6 +12,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+from engine.grad_mode import no_grad
 from nn.transformer import GPT
 from train import _ARCH_PRESETS
 
@@ -61,7 +62,15 @@ def run_benchmark(args):
     idx = np.random.randint(0, args.vocab, size=(args.batch, args.ctx))
     prompt = idx[:1, : min(args.ctx, max(1, args.ctx // 2))]
 
+    def forward_no_grad_once():
+        # This is the old validation model path: no backward graph is retained,
+        # but every operator still travels through Tensor/autograd machinery.
+        with no_grad():
+            for _ in range(args.steps):
+                model(idx)
+
     def infer_once():
+        # Pure NumPy path used by inference and by the optimized validation path.
         for _ in range(args.steps):
             model.infer(idx)
 
@@ -72,11 +81,23 @@ def run_benchmark(args):
         model.generate(prompt, args.generate, strategy="greedy", use_cache=False)
 
     for _ in range(warmup):
+        forward_no_grad_once()
         infer_once()
         generate_cached_once()
         generate_uncached_once()
 
-    infer_durations = [_time_call(infer_once) for _ in range(repeats)]
+    forward_durations = []
+    infer_durations = []
+    for repeat in range(repeats):
+        # Keep graph/NumPy samples adjacent and alternate their order so a
+        # consistent first-run or second-run effect cannot masquerade as speedup.
+        if repeat % 2 == 0:
+            forward_durations.append(_time_call(forward_no_grad_once))
+            infer_durations.append(_time_call(infer_once))
+        else:
+            infer_durations.append(_time_call(infer_once))
+            forward_durations.append(_time_call(forward_no_grad_once))
+
     cached_durations = []
     uncached_durations = []
     for _ in range(repeats):
@@ -86,21 +107,29 @@ def run_benchmark(args):
         uncached_durations.append(_time_call(generate_uncached_once))
 
     infer_tokens = args.steps * args.batch * args.ctx
+    forward_rates = [infer_tokens / seconds for seconds in forward_durations]
     infer_rates = [infer_tokens / seconds for seconds in infer_durations]
+    numpy_infer_speedups = [
+        forward / infer
+        for forward, infer in zip(forward_durations, infer_durations)
+    ]
     cached_rates = [args.generate / seconds for seconds in cached_durations]
     uncached_rates = [args.generate / seconds for seconds in uncached_durations]
-    speedups = [
+    cache_speedups = [
         uncached / cached
         for cached, uncached in zip(cached_durations, uncached_durations)
     ]
     samples = {
+        "forward_no_grad_seconds": forward_durations,
         "infer_seconds": infer_durations,
+        "forward_no_grad_tokens_per_sec": forward_rates,
+        "infer_tokens_per_sec": infer_rates,
+        "numpy_infer_speedup": numpy_infer_speedups,
         "generate_cached_seconds": cached_durations,
         "generate_uncached_seconds": uncached_durations,
-        "infer_tokens_per_sec": infer_rates,
         "generate_cached_tokens_per_sec": cached_rates,
         "generate_uncached_tokens_per_sec": uncached_rates,
-        "cache_speedup": speedups,
+        "cache_speedup": cache_speedups,
     }
     summaries = {name: _summarize(values) for name, values in samples.items()}
     return {
@@ -123,7 +152,11 @@ def run_benchmark(args):
         "warmup": warmup,
         "repeats": repeats,
         "environment": environment_metadata(),
+        "forward_no_grad_tokens_per_sec": summaries[
+            "forward_no_grad_tokens_per_sec"
+        ]["median"],
         "infer_tokens_per_sec": summaries["infer_tokens_per_sec"]["median"],
+        "numpy_infer_speedup": summaries["numpy_infer_speedup"]["median"],
         "generate_cached_tokens_per_sec": summaries[
             "generate_cached_tokens_per_sec"
         ]["median"],
@@ -252,15 +285,34 @@ def main():
 
     print("Tiny GPT benchmark")
     print(f"  arch: {metrics['arch']}")
-    print(f"  shape: vocab={metrics['vocab']} ctx={metrics['context_len']} "
-          f"d={metrics['d_model']} heads={metrics['heads']} layers={metrics['layers']} "
-          f"batch={metrics['batch']}")
-    print(f"  protocol: warmup={metrics['warmup']} repeats={metrics['repeats']} seed={metrics['seed']}")
-    print(f"  environment: Python {metrics['environment']['python']} / "
-          f"NumPy {metrics['environment']['numpy']} / {metrics['environment']['machine']}")
-    _print_metric("infer", metrics, "infer_tokens_per_sec", " tokens/s")
-    _print_metric("generate cached", metrics, "generate_cached_tokens_per_sec", " tokens/s")
-    _print_metric("generate uncached", metrics, "generate_uncached_tokens_per_sec", " tokens/s")
+    print(
+        f"  shape: vocab={metrics['vocab']} ctx={metrics['context_len']} "
+        f"d={metrics['d_model']} heads={metrics['heads']} "
+        f"layers={metrics['layers']} batch={metrics['batch']}"
+    )
+    print(
+        f"  protocol: warmup={metrics['warmup']} repeats={metrics['repeats']} "
+        f"seed={metrics['seed']}"
+    )
+    print(
+        f"  environment: Python {metrics['environment']['python']} / "
+        f"NumPy {metrics['environment']['numpy']} / "
+        f"{metrics['environment']['machine']}"
+    )
+    _print_metric(
+        "forward no_grad",
+        metrics,
+        "forward_no_grad_tokens_per_sec",
+        " tokens/s",
+    )
+    _print_metric("NumPy infer", metrics, "infer_tokens_per_sec", " tokens/s")
+    _print_metric("NumPy infer speedup", metrics, "numpy_infer_speedup", "x")
+    _print_metric(
+        "generate cached", metrics, "generate_cached_tokens_per_sec", " tokens/s"
+    )
+    _print_metric(
+        "generate uncached", metrics, "generate_uncached_tokens_per_sec", " tokens/s"
+    )
     _print_metric("cache speedup", metrics, "cache_speedup", "x")
 
 
