@@ -12,6 +12,10 @@ attributes.  parameters() traverses all attributes that are Module instances
 or Tensor instances with requires_grad=True.
 """
 
+from collections.abc import Mapping
+
+import numpy as np
+
 from engine.tensor import Tensor
 
 
@@ -140,7 +144,15 @@ class Module:
         return {name: tensor.data.copy() for name, tensor in self.named_tensors()}
 
     def load_state_dict(self, state, strict=True):
-        """Load tensor values from a state dictionary."""
+        """Validate then atomically copy persistent tensor values from ``state``."""
+        if not isinstance(state, Mapping):
+            raise TypeError("state_dict must be a mapping")
+        if not isinstance(strict, (bool, np.bool_)):
+            raise TypeError("state_dict strict flag must be boolean")
+        for key in state:
+            if not isinstance(key, str):
+                raise TypeError("state_dict keys must be strings")
+
         tensors = dict(self.named_tensors())
         missing = sorted(set(tensors) - set(state))
         unexpected = sorted(set(state) - set(tensors))
@@ -154,18 +166,12 @@ class Module:
         for name, value in state.items():
             if name not in tensors:
                 continue
-            tensor = tensors[name]
-            if tensor.data.shape != value.shape:
-                raise ValueError(
-                    f"shape mismatch for {name}: expected {tensor.data.shape}, "
-                    f"got {value.shape}"
-                )
+            _validate_state_tensor(name, tensors[name], value)
 
         for name, value in state.items():
             if name not in tensors:
                 continue
-            tensor = tensors[name]
-            tensor.data[:] = value
+            tensors[name].data[:] = value
 
     def param_count(self):
         """Total number of trainable scalar parameters."""
@@ -178,3 +184,29 @@ class Module:
                 lines.append(f"  ({name}): {val}")
         lines.append(")")
         return "\n".join(lines)
+
+
+def _validate_state_tensor(name, tensor, value):
+    if not isinstance(value, np.ndarray):
+        raise TypeError(f"state_dict value for {name} must be a NumPy array")
+    if tensor.data.shape != value.shape:
+        raise ValueError(
+            f"shape mismatch for {name}: expected {tensor.data.shape}, "
+            f"got {value.shape}"
+        )
+    if (
+        not np.issubdtype(value.dtype, np.number)
+        or np.issubdtype(value.dtype, np.complexfloating)
+    ):
+        raise TypeError(
+            f"state_dict value for {name} must have a real numeric dtype"
+        )
+
+    # Normal model tensors start finite and must stay finite. Some persistent
+    # deterministic buffers intentionally contain -inf (GPT's causal mask) and
+    # may have legacy migration rules in their owning module, so those buffers
+    # are allowed to carry non-finite sentinels through this generic boundary.
+    if np.isfinite(tensor.data).all() and not np.isfinite(value).all():
+        raise ValueError(
+            f"state_dict value for {name} must contain only finite values"
+        )
