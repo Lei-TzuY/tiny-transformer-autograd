@@ -29,12 +29,12 @@ def beam_generate(
 
     The prompt prefill is batched across every row, then each row receives its
     own logits and cache slice and runs an independent beam tree. Scores are
-    never compared across prompts. With ``use_cache=True`` each selected beam
-    in a tree owns the KV cache for its current strict window. Branches may
-    safely share a parent cache because inference concatenates new arrays
-    instead of mutating it. Once a cache fills ``context_len``, the next
-    selected child is re-prefilled from its cropped window so positions are
-    renumbered from zero and out-of-window tokens are genuinely forgotten.
+    never compared across prompts. With ``use_cache=True`` every cache retained
+    by the beam tree is an immutable snapshot. Branches may therefore share a
+    parent cache without copying it, while inference concatenates fresh child
+    arrays instead of mutating the parent. Once a cache fills ``context_len``,
+    the next selected child is re-prefilled from its cropped window so positions
+    are renumbered from zero and out-of-window tokens are genuinely forgotten.
     """
     if not isinstance(max_new_tokens, (int, np.integer)) or max_new_tokens < 0:
         raise ValueError("max_new_tokens must be a non-negative integer")
@@ -132,30 +132,43 @@ def _beam_generate_one(
     return beams[0][0]
 
 
+def _freeze_cache(cache):
+    """Make a beam-owned cache immutable in place and return it."""
+    if cache is None:
+        return None
+    for entry in cache:
+        entry["k"].flags.writeable = False
+        entry["v"].flags.writeable = False
+    return cache
+
+
 def _prefill(model, sequence, mask):
-    """Infer one strict window and return logits plus its complete KV cache."""
+    """Infer one strict window and return logits plus its immutable KV cache."""
     window = sequence[:, -model.context_len:]
     window_mask = positions = None
     if mask is not None:
         width = window.shape[1]
         window_mask = mask[:, -width:]
         positions = _left_padded_positions(window_mask)
-    return model.infer(
+    logits, cache = model.infer(
         window,
         attention_mask=window_mask,
         position_ids=positions,
     )
+    return logits, _freeze_cache(cache)
 
 
 def _slice_cache(cache, row):
-    """Return one prompt row's read-only view of a batched prefill cache."""
-    return [
-        {
-            "k": entry["k"][row : row + 1],
-            "v": entry["v"][row : row + 1],
-        }
-        for entry in cache
-    ]
+    """Return one prompt row's zero-copy immutable batched-cache view."""
+    return _freeze_cache(
+        [
+            {
+                "k": entry["k"][row : row + 1],
+                "v": entry["v"][row : row + 1],
+            }
+            for entry in cache
+        ]
+    )
 
 
 def _can_extend_cache(cache, context_len):
@@ -163,15 +176,16 @@ def _can_extend_cache(cache, context_len):
 
 
 def _extend_cache(model, sequence, cache, mask):
-    """Score the newest token by extending one selected beam's parent cache."""
+    """Score the newest token from an immutable selected-beam parent cache."""
     cached = cache[0]["k"].shape[2]
     step_mask = step_positions = None
     if mask is not None:
         step_mask = mask[:, -(cached + 1):]
         step_positions = _left_padded_positions(step_mask)[:, -1:]
-    return model.infer(
+    logits, child_cache = model.infer(
         sequence[:, -1:],
         cache,
         attention_mask=step_mask,
         position_ids=step_positions,
     )
+    return logits, _freeze_cache(child_cache)
