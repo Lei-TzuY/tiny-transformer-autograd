@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from numbers import Integral
 import os
 import pickle
+import tempfile
 
 import numpy as np
 
@@ -47,12 +48,35 @@ def save_checkpoint(path, model, optimizer=None, scheduler=None, step=0, metadat
         "step": step,
         "metadata": metadata,
     }
+    _atomic_pickle_dump(path, state)
+
+
+def _atomic_pickle_dump(path, state):
+    """Durably write ``state`` to a unique temp file, then replace ``path``."""
+    path = os.fspath(path)
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
-    temporary = f"{path}.tmp"
-    with open(temporary, "wb") as handle:
-        pickle.dump(state, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    os.replace(temporary, path)
+    prefix = f".{os.path.basename(path)}."
+    descriptor, temporary = tempfile.mkstemp(
+        dir=directory,
+        prefix=prefix,
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            pickle.dump(state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def restore_checkpoint(state, model, optimizer=None, scheduler=None, strict=True):
