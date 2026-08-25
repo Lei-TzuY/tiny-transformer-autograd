@@ -176,21 +176,35 @@ def batch_loss(model, tokens, targets, mask=None):
     )
 
 
-def evaluate_batches(model, sample_batch, eval_iters):
-    """Mean loss and perplexity over ``eval_iters`` batches from a sampler."""
+def evaluate_batches(
+    model, sample_batch, eval_iters, weight_by_scored_tokens=False
+):
+    """Mean loss and perplexity over batches sampled for validation."""
     previous_mode = getattr(model, "training", True)
     model.eval()
     losses = []
+    weights = []
     try:
         # eval() only disables dropout; no_grad() additionally stops every op
         # from recording a node, so validation never allocates a backward graph.
         with no_grad():
             for _ in range(eval_iters):
-                losses.append(float(batch_loss(model, *sample_batch()).data))
+                batch = sample_batch()
+                losses.append(float(batch_loss(model, *batch).data))
+                if weight_by_scored_tokens:
+                    targets = np.asarray(batch[1])
+                    scored = int(np.count_nonzero(targets != IGNORE_INDEX))
+                    if scored == 0:
+                        raise ValueError("evaluation batch contains no scored tokens")
+                    weights.append(scored)
     finally:
         # A sampler/model failure must not leak eval mode into later training.
         model.train(previous_mode)
-    mean_loss = float(np.mean(losses))
+    mean_loss = float(
+        np.average(losses, weights=weights)
+        if weight_by_scored_tokens
+        else np.mean(losses)
+    )
     return mean_loss, float(np.exp(min(mean_loss, 700.0)))
 
 
@@ -206,11 +220,14 @@ def evaluate(model, data, context_len, batch_size, eval_iters):
 
 
 def evaluate_documents(model, documents, batch_size, eval_iters):
-    """Validation over a document corpus, or None when the split is empty."""
+    """Token-weighted validation over documents, or None for an empty split."""
     if not documents:
         return None
     return evaluate_batches(
-        model, lambda: get_document_batch(documents, batch_size), eval_iters
+        model,
+        lambda: get_document_batch(documents, batch_size),
+        eval_iters,
+        weight_by_scored_tokens=True,
     )
 
 
