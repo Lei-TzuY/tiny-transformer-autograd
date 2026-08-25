@@ -12,3 +12,4 @@ from .recompute import recompute
 from .optim import SGD, Adam, AdamW
 from .scheduler import WarmupCosineScheduler
 from .checkpoint import read_checkpoint, restore_checkpoint, save_checkpoint
+from .safe_checkpoint import read_safe_checkpoint, save_safe_checkpoint
