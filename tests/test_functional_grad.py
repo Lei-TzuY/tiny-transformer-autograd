@@ -8,13 +8,14 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+import engine.ops as ops
 from engine import grad
 from engine.tensor import Tensor
 
 
 def test_grad_returns_scalar_loss_gradient_without_persisting_buffers():
     x = Tensor([2.0, 3.0], requires_grad=True)
-    output = (x * x).sum()
+    output = ops.sum(x * x)
 
     (dx,) = grad(output, x)
 
@@ -38,7 +39,7 @@ def test_grad_supports_explicit_vjp_seed_and_multiple_inputs():
 def test_grad_restores_preexisting_leaf_and_intermediate_gradients():
     x = Tensor([2.0, 3.0], requires_grad=True)
     hidden = x * x
-    output = hidden.sum()
+    output = ops.sum(hidden)
     x.grad[:] = np.array([17.0, 19.0])
     hidden.grad[:] = np.array([23.0, 29.0])
     output.grad[...] = 31.0
@@ -57,7 +58,7 @@ def test_grad_restores_preexisting_leaf_and_intermediate_gradients():
 
 def test_grad_returns_independent_arrays():
     x = Tensor([2.0, 3.0], requires_grad=True)
-    output = (x * x).sum()
+    output = ops.sum(x * x)
 
     (dx,) = grad(output, x)
     dx[:] = -1.0
@@ -68,7 +69,7 @@ def test_grad_returns_independent_arrays():
 def test_grad_rejects_unreachable_input_without_mutating_gradients():
     x = Tensor([2.0], requires_grad=True)
     unused = Tensor([3.0], requires_grad=True)
-    output = (x * x).sum()
+    output = ops.sum(x * x)
     x.grad[:] = 5.0
     unused.grad[:] = 7.0
 
@@ -81,7 +82,7 @@ def test_grad_rejects_unreachable_input_without_mutating_gradients():
 
 def test_grad_restores_buffers_when_backward_rejects_stale_graph():
     x = Tensor([2.0, 3.0], requires_grad=True)
-    output = (x * x).sum()
+    output = ops.sum(x * x)
     x.grad[:] = np.array([5.0, 7.0])
     output.grad[...] = 11.0
     x_before = x.grad.copy()
@@ -105,7 +106,7 @@ def test_grad_restores_buffers_when_backward_rejects_stale_graph():
 )
 def test_grad_validates_inputs(inputs, error):
     x = Tensor([2.0], requires_grad=True)
-    output = (x * x).sum()
+    output = ops.sum(x * x)
 
     with pytest.raises((TypeError, ValueError), match=error):
         grad(output, inputs)
