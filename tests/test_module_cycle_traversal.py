@@ -128,3 +128,39 @@ def test_zero_grad_touches_each_shared_parameter_once_semantically():
 
     np.testing.assert_array_equal(root.weight.grad, np.zeros_like(root.weight.grad))
     np.testing.assert_array_equal(child.weight.grad, np.zeros_like(child.weight.grad))
+
+
+def test_repr_terminates_on_direct_self_reference():
+    root = _Root()
+    root.self_ref = root
+
+    rendered = repr(root)
+
+    assert rendered.startswith("_Root(\n")
+    assert "  (self_ref): ..." in rendered
+    assert rendered.endswith("\n)")
+
+
+def test_repr_terminates_on_mutual_module_cycle():
+    root = _Root()
+    child = _Leaf(50.0)
+    root.child = child
+    child.parent = root
+
+    rendered = repr(root)
+
+    assert "  (child): _Leaf(" in rendered
+    assert "  (parent): ..." in rendered
+
+
+def test_repr_for_acyclic_modules_keeps_existing_format():
+    root = _Root()
+    child = _Leaf(60.0)
+    root.child = child
+
+    rendered = repr(root)
+
+    assert rendered.startswith("_Root(\n")
+    assert "  (child): _Leaf(" in rendered
+    assert "..." not in rendered
+    assert rendered.endswith("\n)")
