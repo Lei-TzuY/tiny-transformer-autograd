@@ -5,6 +5,7 @@ import argparse
 import numpy as np
 
 from engine.checkpoint import read_checkpoint, restore_checkpoint
+from engine.safe_checkpoint import read_safe_checkpoint
 from nn.streaming import stream_generate
 from nn.transformer import GPT
 from tokenizer import tokenizer_from_state_dict
@@ -15,7 +16,18 @@ def parse_args():
         description="Generate from a RoPE checkpoint with bounded streaming KV cache"
     )
     parser.add_argument(
-        "--checkpoint", required=True, help="Trusted tiny-transformer checkpoint"
+        "--checkpoint",
+        required=True,
+        help="tiny-transformer checkpoint",
+    )
+    parser.add_argument(
+        "--checkpoint-format",
+        choices=["pickle", "safe"],
+        default="pickle",
+        help=(
+            "checkpoint encoding: pickle requires a trusted local file; "
+            "safe uses the non-executable NPZ/JSON format"
+        ),
     )
     prompt = parser.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt", help="Prompt text")
@@ -31,9 +43,20 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_streaming_checkpoint(path):
-    """Restore a RoPE model and tokenizer from a training checkpoint."""
-    state = read_checkpoint(path)
+def load_streaming_checkpoint(path, checkpoint_format="pickle"):
+    """Restore a RoPE model and tokenizer from one supported checkpoint format."""
+    if not isinstance(checkpoint_format, str):
+        raise TypeError("checkpoint_format must be a string")
+    readers = {
+        "pickle": read_checkpoint,
+        "safe": read_safe_checkpoint,
+    }
+    try:
+        reader = readers[checkpoint_format]
+    except KeyError as exc:
+        raise ValueError("checkpoint_format must be 'pickle' or 'safe'") from exc
+
+    state = reader(path)
     metadata = state.get("metadata") or {}
     model_config = metadata.get("model_config")
     tokenizer_state = metadata.get("tokenizer")
@@ -78,7 +101,10 @@ def _validate_args(args):
 def main():
     args = parse_args()
     _validate_args(args)
-    model, tokenizer = load_streaming_checkpoint(args.checkpoint)
+    model, tokenizer = load_streaming_checkpoint(
+        args.checkpoint,
+        checkpoint_format=args.checkpoint_format,
+    )
     prompt = _read_prompt(args)
     if not prompt:
         raise ValueError("generation prompt must not be empty")
