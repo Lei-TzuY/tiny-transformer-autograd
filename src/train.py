@@ -176,6 +176,42 @@ def batch_loss(model, tokens, targets, mask=None):
     )
 
 
+def accumulate_document_gradients(model, sample_batch, params, grad_accum):
+    """Accumulate ragged document gradients as one token-weighted mean loss.
+
+    ``cross_entropy`` returns a mean over the scored targets in each individual
+    micro-batch. Averaging those means would give a short document batch the
+    same influence as a long one. Instead, seed each scalar backward pass with
+    its scored-token count to recover a loss sum, accumulate those sums, and
+    divide the resulting leaf gradients by the total number of scored tokens.
+
+    This helper is used only for document training with ``grad_accum > 1``;
+    the historical single-micro-batch and plain token-stream paths stay
+    byte-for-byte equivalent in their numerical operations.
+    """
+    if grad_accum <= 1:
+        raise ValueError("document gradient accumulation requires grad_accum > 1")
+
+    weighted_loss_sum = 0.0
+    total_scored = 0
+    for _ in range(grad_accum):
+        batch = sample_batch()
+        targets = np.asarray(batch[1])
+        scored = int(np.count_nonzero(targets != IGNORE_INDEX))
+        if scored == 0:
+            raise ValueError("training batch contains no scored tokens")
+
+        loss = batch_loss(model, *batch)
+        loss.backward(float(scored))
+        weighted_loss_sum += float(loss.data) * scored
+        total_scored += scored
+
+    for parameter in params:
+        if parameter.grad is not None:
+            parameter.grad /= total_scored
+    return float(weighted_loss_sum / total_scored)
+
+
 def evaluate_batches(
     model, sample_batch, eval_iters, weight_by_scored_tokens=False
 ):
@@ -465,22 +501,31 @@ def main():
         lr = scheduler.step(step - 1)
 
         # Gradient accumulation: backward() adds into .grad, so running
-        # several micro-batches before step() simulates a batch that is
-        # grad_accum× larger without the memory cost.
+        # several micro-batches before step() simulates a larger batch without
+        # retaining every micro-batch graph at once. Ragged document batches
+        # need token weighting because each individual CE is already a mean.
         optimizer.zero_grad()
-        micro_losses = []
-        for _ in range(args.grad_accum):
-            loss = batch_loss(model, *sample_batch())
-            loss.backward()
-            micro_losses.append(float(loss.data))
-        if args.grad_accum > 1:
-            for parameter in params:
-                if parameter.grad is not None:
-                    parameter.grad /= args.grad_accum
+        if train_docs is not None and args.grad_accum > 1:
+            step_loss = accumulate_document_gradients(
+                model, sample_batch, params, args.grad_accum
+            )
+        else:
+            # Keep the historical stream path (and document grad_accum=1) in
+            # exactly the same arithmetic order for seeded trajectory stability.
+            micro_losses = []
+            for _ in range(args.grad_accum):
+                loss = batch_loss(model, *sample_batch())
+                loss.backward()
+                micro_losses.append(float(loss.data))
+            if args.grad_accum > 1:
+                for parameter in params:
+                    if parameter.grad is not None:
+                        parameter.grad /= args.grad_accum
+            step_loss = float(np.mean(micro_losses))
 
         grad_norm = clip_grad_norm_(params, max_norm=args.grad_clip)
         optimizer.step()
-        loss_history.append(float(np.mean(micro_losses)))
+        loss_history.append(step_loss)
 
         report = step == 1 or step % args.eval_interval == 0 or step == args.iters
         if report:
