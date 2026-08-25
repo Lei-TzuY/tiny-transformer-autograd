@@ -15,6 +15,7 @@ closures in reverse topological order (like reverse-mode AD).
 """
 
 from numbers import Real
+import weakref
 
 import numpy as np
 
@@ -35,6 +36,104 @@ def _snapshot_index(index):
     if isinstance(index, list):
         return [_snapshot_index(item) for item in index]
     return index
+
+
+class _VersionedArray(np.ndarray):
+    """ndarray view that increments its owning Tensor version on normal writes."""
+
+    def __new__(cls, data, owner=None):
+        array = np.array(data, dtype=np.float64, copy=True).view(cls)
+        array._owner_ref = None if owner is None else weakref.ref(owner)
+        return array
+
+    def __array_finalize__(self, source):
+        owner_ref = getattr(source, "_owner_ref", None)
+        if owner_ref is None:
+            self._owner_ref = None
+            return
+        # Preserve ownership only for views that still alias the Tensor's storage.
+        try:
+            aliases_owner = np.shares_memory(self, source)
+        except ValueError:
+            aliases_owner = False
+        self._owner_ref = owner_ref if aliases_owner else None
+
+    def _mark_modified(self):
+        owner_ref = getattr(self, "_owner_ref", None)
+        owner = None if owner_ref is None else owner_ref()
+        if owner is not None:
+            owner._version += 1
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self._mark_modified()
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        # Compute on ordinary ndarray views so read-only ufuncs return normal
+        # NumPy arrays and do not accidentally propagate Tensor ownership.
+        raw_inputs = tuple(
+            np.asarray(value) if isinstance(value, _VersionedArray) else value
+            for value in inputs
+        )
+        outputs = kwargs.get("out")
+        if outputs is not None:
+            kwargs["out"] = tuple(
+                np.asarray(value) if isinstance(value, _VersionedArray) else value
+                for value in outputs
+            )
+
+        result = getattr(ufunc, method)(*raw_inputs, **kwargs)
+
+        # ufunc.at mutates its first input but does not use an ``out`` argument.
+        if method == "at" and inputs and isinstance(inputs[0], _VersionedArray):
+            inputs[0]._mark_modified()
+
+        if outputs is not None:
+            seen_owners = set()
+            for output in outputs:
+                if not isinstance(output, _VersionedArray):
+                    continue
+                owner_ref = getattr(output, "_owner_ref", None)
+                owner = None if owner_ref is None else owner_ref()
+                if owner is not None and id(owner) not in seen_owners:
+                    owner._version += 1
+                    seen_owners.add(id(owner))
+            return outputs[0] if len(outputs) == 1 else outputs
+        return result
+
+    def copy(self, order="C"):
+        """Return an independent ordinary ndarray with no Tensor ownership."""
+        return np.array(self, dtype=self.dtype, copy=True, order=order, subok=False)
+
+    def fill(self, value):
+        super().fill(value)
+        self._mark_modified()
+
+    def put(self, indices, values, mode="raise"):
+        super().put(indices, values, mode=mode)
+        self._mark_modified()
+
+    def sort(self, axis=-1, kind=None, order=None):
+        super().sort(axis=axis, kind=kind, order=order)
+        self._mark_modified()
+
+    def partition(self, kth, axis=-1, kind="introselect", order=None):
+        super().partition(kth, axis=axis, kind=kind, order=order)
+        self._mark_modified()
+
+    def resize(self, new_shape, refcheck=True):
+        super().resize(new_shape, refcheck=refcheck)
+        self._mark_modified()
+
+    def setfield(self, val, dtype, offset=0):
+        super().setfield(val, dtype, offset=offset)
+        self._mark_modified()
+
+    def byteswap(self, inplace=False):
+        result = super().byteswap(inplace=inplace)
+        if inplace:
+            self._mark_modified()
+        return result
 
 
 class Tensor:
@@ -87,15 +186,38 @@ class Tensor:
             # allowing their values to feed a later trainable operation.
             children = ()
 
-        self.data = np.array(data, dtype=np.float64)
+        self._version = 0
+        self._data = _VersionedArray(data, owner=self)
         self.requires_grad = requires_grad
-        self.grad = np.zeros_like(self.data) if requires_grad else None
+        self.grad = np.zeros(self._data.shape, dtype=np.float64) if requires_grad else None
         self._detached_by_no_grad = detached_by_no_grad and not requires_grad
 
-        # Computational graph bookkeeping
+        # Computational graph bookkeeping. Every graph edge stores the parent
+        # data version observed by the forward pass. A later in-place write then
+        # invalidates this graph instead of silently differentiating new values.
         self._children = set(children)
+        self._parent_versions = {
+            child: child._version for child in self._children
+        }
+        self._forward_version = self._version
         self._op = _op
         self._backward = lambda: None  # filled by each op
+
+    @property
+    def data(self):
+        """Tracked NumPy storage; normal in-place writes invalidate old graphs."""
+        return self._data
+
+    @data.setter
+    def data(self, value):
+        # Augmented attribute assignment writes the same in-place-mutated array
+        # back to the property. The ufunc already bumped the version, so do not
+        # replace storage or bump twice in that common optimizer-style path.
+        if hasattr(self, "_data") and value is self._data:
+            return
+        self._data = _VersionedArray(value, owner=self)
+        if hasattr(self, "_version"):
+            self._version += 1
 
     # ------------------------------------------------------------------
     # Backward closure
@@ -114,6 +236,21 @@ class Tensor:
         # gradient it does not have.
         graph_node = self.requires_grad and bool(self._children)
         self._backward_fn = function if graph_node else _no_backward
+
+    def _validate_graph_versions(self):
+        """Reject graph reuse after any tracked Tensor data mutation."""
+        if self._children and self._version != self._forward_version:
+            raise RuntimeError(
+                "tensor data was modified after forward; rebuild the forward "
+                "graph before calling backward()"
+            )
+        for child in self._children:
+            expected = self._parent_versions[child]
+            if child._version != expected:
+                raise RuntimeError(
+                    "tensor data was modified after forward; rebuild the forward "
+                    "graph before calling backward()"
+                )
 
     # ------------------------------------------------------------------
     # Shape helpers
@@ -156,12 +293,12 @@ class Tensor:
     def zero_grad(self):
         """Reset gradient to zero (in-place)."""
         if self.grad is not None:
-            self.grad = np.zeros_like(self.data)
+            self.grad = np.zeros(self.data.shape, dtype=np.float64)
 
     def _ensure_grad(self):
         """Lazily initialise grad if it is None (e.g. after a detach)."""
         if self.grad is None and self.requires_grad:
-            self.grad = np.zeros_like(self.data)
+            self.grad = np.zeros(self.data.shape, dtype=np.float64)
 
     # ------------------------------------------------------------------
     # Backward pass
@@ -186,8 +323,8 @@ class Tensor:
         ------
         RuntimeError
             If this tensor was produced by an operation while recording was
-            disabled. The creation provenance is retained after leaving the
-            block, while explicit constants remain intentional no-ops.
+            disabled, or if tracked tensor data used by this graph was mutated
+            after the forward pass.
         """
         if not self.requires_grad:
             if self._detached_by_no_grad:
@@ -227,12 +364,18 @@ class Tensor:
                 if id(child) not in visited:
                     stack.append((child, False))
 
+        # Validate the whole tape before mutating any caller-owned gradient.
+        # This keeps mutation failures transactional even when the bad tensor is
+        # buried deep in a large graph.
+        for node in topo:
+            node._validate_graph_versions()
+
         # Intermediates are implementation details of this VJP and must start
         # clean on each call. Leaves intentionally retain their gradients so
         # independent graphs and repeated backward calls accumulate normally.
         for node in topo:
             if node._children and node.requires_grad:
-                node.grad = np.zeros_like(node.data)
+                node.grad = np.zeros(node.data.shape, dtype=np.float64)
 
         self._ensure_grad()
         self.grad += incoming
@@ -354,5 +497,5 @@ class Tensor:
         return Tensor(self.data, requires_grad=False)
 
     def numpy(self):
-        """Return the underlying NumPy array."""
+        """Return the tracked underlying NumPy array."""
         return self.data
