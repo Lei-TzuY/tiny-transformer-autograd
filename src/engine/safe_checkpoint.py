@@ -61,6 +61,9 @@ def read_safe_checkpoint(path):
     except (OSError, ValueError) as exc:
         raise ValueError(f"invalid safe checkpoint container: {exc}") from exc
 
+    if not isinstance(archive, np.lib.npyio.NpzFile):
+        raise ValueError("safe checkpoint container must be an NPZ archive")
+
     with archive:
         files = list(archive.files)
         if len(files) != len(set(files)):
