@@ -17,7 +17,7 @@ instead of silently changing ``GPT.generate`` in the name of performance.
 
 import numpy as np
 
-from .transformer import _left_padded_positions, _sample
+from .transformer import _left_padded_positions, _sample, _validate_selection_logits
 
 
 def stream_generate(
@@ -71,7 +71,9 @@ def stream_generate(
     )
 
     for step in range(max_new_tokens):
-        logits_last = logits[:, -1, :]
+        logits_last = _validate_selection_logits(
+            logits[:, -1, :], "generation logits"
+        )
         if strategy == "greedy":
             next_token = np.argmax(logits_last, axis=-1)
         else:
