@@ -45,6 +45,16 @@ def _left_pad(prompt, width, pad_token=0):
     return tokens, mask
 
 
+def _left_padded_batch(prompts, width=None, pad_token=0):
+    width = width or max(len(prompt) for prompt in prompts)
+    tokens = np.full((len(prompts), width), pad_token, dtype=np.int64)
+    mask = np.zeros((len(prompts), width), dtype=np.int64)
+    for row, prompt in enumerate(prompts):
+        tokens[row, -len(prompt):] = prompt
+        mask[row, -len(prompt):] = 1
+    return tokens, mask
+
+
 @pytest.mark.parametrize("architecture", ARCHITECTURES)
 def test_unmasked_helper_matches_existing_beam_search(architecture):
     model = _model(architecture)
@@ -79,6 +89,37 @@ def test_left_padded_beam_matches_unpadded_prompt(architecture):
 
     np.testing.assert_array_equal(padded[0, -new_tokens:], plain[0, -new_tokens:])
     np.testing.assert_array_equal(padded[0, : tokens.shape[1]], tokens[0])
+
+
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
+def test_ragged_batched_beam_matches_each_prompt_alone(architecture):
+    model = _model(architecture)
+    prompts = [[1, 4, 2], [3, 6], [7]]
+    tokens, mask = _left_padded_batch(prompts, width=4)
+    new_tokens = 4
+
+    batched = beam_generate(
+        model,
+        tokens,
+        new_tokens,
+        beam_width=3,
+        attention_mask=mask,
+    )
+
+    assert batched.shape == (len(prompts), tokens.shape[1] + new_tokens)
+    np.testing.assert_array_equal(batched[:, : tokens.shape[1]], tokens)
+    for row, prompt in enumerate(prompts):
+        alone = beam_generate(
+            model,
+            np.array([prompt], dtype=np.int64),
+            new_tokens,
+            beam_width=3,
+        )
+        np.testing.assert_array_equal(
+            batched[row, -new_tokens:],
+            alone[0, -new_tokens:],
+            err_msg=f"row {row} beam result differs from solo decoding",
+        )
 
 
 @pytest.mark.parametrize("architecture", ARCHITECTURES)
@@ -154,6 +195,34 @@ def test_cached_and_uncached_match_after_window_crop(architecture):
         use_cache=False,
     )
 
+    np.testing.assert_array_equal(cached, uncached)
+
+
+@pytest.mark.parametrize("architecture", ARCHITECTURES)
+def test_ragged_batch_cache_parity_after_window_crop(architecture):
+    model = _model(architecture, context_len=5)
+    prompts = [[1, 4, 2], [3, 6], [7]]
+    tokens, mask = _left_padded_batch(prompts, width=5)
+    new_tokens = 7
+
+    cached = beam_generate(
+        model,
+        tokens,
+        new_tokens,
+        beam_width=2,
+        attention_mask=mask,
+        use_cache=True,
+    )
+    uncached = beam_generate(
+        model,
+        tokens,
+        new_tokens,
+        beam_width=2,
+        attention_mask=mask,
+        use_cache=False,
+    )
+
+    assert cached.shape[1] > model.context_len
     np.testing.assert_array_equal(cached, uncached)
 
 
@@ -241,15 +310,6 @@ def test_rejects_invalid_generation_masks(tokens, mask, message):
     model = _model(ARCHITECTURES[0].values[0])
 
     with pytest.raises(ValueError, match=message):
-        beam_generate(model, tokens, 2, attention_mask=mask)
-
-
-def test_rejects_batched_beam_search_even_with_a_valid_mask():
-    model = _model(ARCHITECTURES[0].values[0])
-    tokens = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.int64)
-    mask = np.array([[0, 1, 1], [1, 1, 1]], dtype=np.int64)
-
-    with pytest.raises(ValueError, match="batch size 1"):
         beam_generate(model, tokens, 2, attention_mask=mask)
 
 
