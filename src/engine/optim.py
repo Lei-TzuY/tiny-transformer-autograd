@@ -67,8 +67,7 @@ class SGD:
         weight_decay = _real_scalar(
             "SGD weight_decay", state["weight_decay"], lower=0.0
         )
-        saved_v = state["v"]
-        _validate_buffers(self._v, saved_v, "SGD velocity")
+        saved_v = _snapshot_buffers(self._v, state["v"], "SGD velocity")
 
         self.lr = lr
         self.momentum = momentum
@@ -154,10 +153,12 @@ class Adam:
         parameter_steps = _parameter_steps_from_state(
             state.get("steps"), step, len(self.parameters)
         )
-        saved_m = state["m"]
-        saved_v = state["v"]
-        _validate_buffers(self._m, saved_m, "Adam first moment")
-        _validate_buffers(self._v, saved_v, "Adam second moment")
+        saved_m = _snapshot_buffers(
+            self._m, state["m"], "Adam first moment"
+        )
+        saved_v = _snapshot_buffers(
+            self._v, state["v"], "Adam second moment"
+        )
 
         self.lr = lr
         self.beta1, self.beta2 = beta1, beta2
@@ -319,6 +320,12 @@ def _validate_step_inputs(parameters):
             raise ValueError(
                 f"parameter {index} must contain only finite values before step()"
             )
+
+
+def _snapshot_buffers(destination, source, label):
+    """Validate and detach saved buffers before any optimizer state mutation."""
+    _validate_buffers(destination, source, label)
+    return [np.array(saved, copy=True) for saved in source]
 
 
 def _validate_buffers(destination, source, label):
