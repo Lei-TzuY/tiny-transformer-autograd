@@ -119,10 +119,9 @@ def test_validation_rejects_boolean_and_fractional_integer_fields():
         "repeats",
         "seed",
     ):
-        with pytest.raises(TypeError), pytest.subtests.test(field=field, value=True):
-            _validate_args(benchmark_args(**{field: True}))
-        with pytest.raises(TypeError), pytest.subtests.test(field=field, value=1.5):
-            _validate_args(benchmark_args(**{field: 1.5}))
+        for value in (True, 1.5):
+            with pytest.raises(TypeError):
+                _validate_args(benchmark_args(**{field: value}))
 
 
 def test_validation_rejects_seed_outside_numpy_range():
