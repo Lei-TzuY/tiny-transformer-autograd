@@ -139,11 +139,16 @@ def _validate_checkpoint_envelope(state):
 
     step = _nonnegative_checkpoint_step(state.get("step", 0))
 
+    optimizer_state = state.get("optimizer")
     optimizer_type = state.get("optimizer_type")
     if optimizer_type is not None and (
         not isinstance(optimizer_type, str) or not optimizer_type
     ):
         raise TypeError("checkpoint optimizer_type must be a non-empty string or None")
+    if version >= 2 and optimizer_state is not None and optimizer_type is None:
+        raise ValueError(
+            "checkpoint format_version 2 requires optimizer_type when optimizer state is present"
+        )
 
     if "metadata" in state and not isinstance(state["metadata"], Mapping):
         raise TypeError("checkpoint metadata must be a mapping")
