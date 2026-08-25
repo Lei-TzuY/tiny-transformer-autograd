@@ -42,6 +42,56 @@ def test_leaf_ufunc_out_mutation_is_tracked():
     _assert_clean_failure(y, x)
 
 
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda data: np.copyto(data, np.array([5.0, 6.0, 7.0, 8.0])),
+        lambda data: np.putmask(data, np.array([True, False, False, False]), 9.0),
+        lambda data: np.place(data, np.array([False, True, False, False]), [10.0]),
+        lambda data: np.fill_diagonal(data.reshape(2, 2), -3.0),
+    ],
+)
+def test_numpy_array_function_mutations_are_tracked(mutate):
+    x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+    y = x * x
+
+    mutate(x.data)
+
+    _assert_clean_failure(y, x)
+
+
+def test_numpy_copyto_mutation_through_view_is_tracked():
+    x = Tensor([1.0, 2.0, 3.0, 4.0], requires_grad=True)
+    y = x * x
+
+    np.copyto(x.data[1:3], np.array([20.0, 30.0]))
+
+    _assert_clean_failure(y, x)
+
+
+def test_numpy_nan_to_num_inplace_mutation_is_tracked():
+    x = Tensor([np.nan, 2.0], requires_grad=True)
+    y = x * x
+
+    result = np.nan_to_num(x.data, copy=False, nan=0.0)
+
+    assert result is x.data
+    np.testing.assert_array_equal(x.data, np.array([0.0, 2.0]))
+    _assert_clean_failure(y, x)
+
+
+def test_numpy_nan_to_num_copy_does_not_invalidate_graph():
+    x = Tensor([np.nan, 2.0], requires_grad=True)
+    y = x * 2.0
+
+    result = np.nan_to_num(x.data, copy=True, nan=0.0)
+
+    assert np.isnan(x.data[0])
+    np.testing.assert_array_equal(result, np.array([0.0, 2.0]))
+    y.backward()
+    np.testing.assert_allclose(x.grad, np.array([2.0, 2.0]))
+
+
 def test_replacing_data_after_forward_is_tracked():
     x = Tensor([1.0, 2.0], requires_grad=True)
     y = x * x
