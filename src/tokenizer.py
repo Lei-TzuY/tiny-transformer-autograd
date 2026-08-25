@@ -206,6 +206,8 @@ def _validate_decode_ids(ids, vocab_size):
     values = np.asarray(ids)
     if values.ndim != 1:
         raise ValueError("token ids to decode must be one-dimensional")
+    if values.size == 0:
+        return np.empty(0, dtype=np.int64)
     if not np.issubdtype(values.dtype, np.integer) or values.dtype == np.bool_:
         raise TypeError("token ids to decode must be integers")
     if np.any(values < 0) or np.any(values >= vocab_size):
