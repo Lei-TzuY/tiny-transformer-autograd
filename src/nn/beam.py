@@ -27,13 +27,14 @@ def beam_generate(
     real. The returned array preserves the original shared padded width and
     appends exactly ``max_new_tokens`` columns.
 
-    Each batch row owns an independent beam tree; scores are never compared
-    across prompts. With ``use_cache=True`` each selected beam in that tree owns
-    the KV cache for its current strict window. Branches may safely share a
-    parent cache because inference concatenates new arrays instead of mutating
-    it. Once a cache fills ``context_len``, the next selected child is
-    re-prefilled from its cropped window so positions are renumbered from zero
-    and out-of-window tokens are genuinely forgotten.
+    The prompt prefill is batched across every row, then each row receives its
+    own logits and cache slice and runs an independent beam tree. Scores are
+    never compared across prompts. With ``use_cache=True`` each selected beam
+    in a tree owns the KV cache for its current strict window. Branches may
+    safely share a parent cache because inference concatenates new arrays
+    instead of mutating it. Once a cache fills ``context_len``, the next
+    selected child is re-prefilled from its cropped window so positions are
+    renumbered from zero and out-of-window tokens are genuinely forgotten.
     """
     if not isinstance(max_new_tokens, (int, np.integer)) or max_new_tokens < 0:
         raise ValueError("max_new_tokens must be a non-negative integer")
@@ -51,9 +52,15 @@ def beam_generate(
     if max_new_tokens == 0:
         return idx
 
+    # Every row shares the same padded slot width, so the expensive prompt
+    # prefill can be one batched inference even when real prompt lengths differ.
+    # Per-row position_ids preserve ragged left-padding semantics.
+    logits, cache = _prefill(model, idx, mask)
+
     rows = []
     for row in range(idx.shape[0]):
         row_mask = None if mask is None else mask[row : row + 1]
+        row_cache = _slice_cache(cache, row) if use_cache else None
         rows.append(
             _beam_generate_one(
                 model,
@@ -63,6 +70,8 @@ def beam_generate(
                 temperature,
                 row_mask,
                 use_cache,
+                logits[row : row + 1],
+                row_cache,
             )
         )
     return np.concatenate(rows, axis=0)
@@ -76,10 +85,11 @@ def _beam_generate_one(
     temperature,
     mask,
     use_cache,
+    initial_logits,
+    initial_cache,
 ):
-    """Decode one already-validated prompt row."""
-    logits, initial_cache = _prefill(model, idx, mask)
-    beams = [(idx, 0.0, logits, initial_cache if use_cache else None)]
+    """Decode one validated prompt row from its batched-prefill state."""
+    beams = [(idx, 0.0, initial_logits, initial_cache)]
 
     for step in range(max_new_tokens):
         candidates = []
@@ -135,6 +145,17 @@ def _prefill(model, sequence, mask):
         attention_mask=window_mask,
         position_ids=positions,
     )
+
+
+def _slice_cache(cache, row):
+    """Return one prompt row's read-only view of a batched prefill cache."""
+    return [
+        {
+            "k": entry["k"][row : row + 1],
+            "v": entry["v"][row : row + 1],
+        }
+        for entry in cache
+    ]
 
 
 def _can_extend_cache(cache, context_len):
