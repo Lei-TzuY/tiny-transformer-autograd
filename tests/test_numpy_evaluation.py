@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import engine.ops as ops
-from engine.grad_mode import no_grad
+from engine.grad_mode import is_grad_enabled, no_grad, set_grad_enabled
 from engine.tensor import Tensor
 from nn.transformer import GPT
 from train import (
@@ -108,6 +108,7 @@ class _InferOnlyModel:
         self.training = True
         self.fail = fail
         self.infer_calls = 0
+        self.infer_grad_modes = []
 
     def eval(self):
         self.training = False
@@ -122,6 +123,7 @@ class _InferOnlyModel:
 
     def infer(self, tokens, attention_mask=None):
         self.infer_calls += 1
+        self.infer_grad_modes.append(is_grad_enabled())
         if self.fail:
             raise RuntimeError("inference failed")
         logits = np.zeros((*np.asarray(tokens).shape, 3), dtype=np.float64)
@@ -142,6 +144,21 @@ def test_evaluate_batches_prefers_infer_over_graph_forward():
     assert perplexity == pytest.approx(3.0)
     assert model.infer_calls == 3
     assert model.training is True
+
+
+def test_evaluate_batches_disables_grad_inside_infer_and_restores_it():
+    model = _InferOnlyModel()
+    batch = (
+        np.array([[0, 1]], dtype=np.int64),
+        np.array([[1, 2]], dtype=np.int64),
+        None,
+    )
+
+    with set_grad_enabled(True):
+        evaluate_batches(model, lambda: batch, eval_iters=2)
+        assert is_grad_enabled() is True
+
+    assert model.infer_grad_modes == [False, False]
 
 
 def test_fast_evaluation_restores_mode_after_infer_failure():
