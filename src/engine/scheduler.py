@@ -17,6 +17,7 @@ class WarmupCosineScheduler:
         if warmup_steps > total_steps:
             raise ValueError("warmup_steps must be between 0 and total_steps")
         min_lr = _non_negative_finite_real("min_lr", min_lr)
+        _validate_min_lr(base_lr, min_lr, name="min_lr")
 
         self.optimizer = optimizer
         self.base_lr = base_lr
@@ -90,6 +91,7 @@ class WarmupCosineScheduler:
                 "scheduler warmup_steps must be between 0 and total_steps"
             )
         min_lr = _non_negative_finite_real("scheduler min_lr", state["min_lr"])
+        _validate_min_lr(base_lr, min_lr, name="scheduler min_lr")
         last_step = _integer("scheduler last_step", state["last_step"], minimum=-1)
 
         # Compute the restored optimizer LR from validated local values before
@@ -162,3 +164,8 @@ def _non_negative_finite_real(name, value):
     if value < 0:
         raise ValueError(f"{name} must be non-negative")
     return value
+
+
+def _validate_min_lr(base_lr, min_lr, *, name):
+    if min_lr > base_lr:
+        raise ValueError(f"{name} must not exceed base learning rate")
