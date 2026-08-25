@@ -114,6 +114,42 @@ class _VersionedArray(np.ndarray):
             return outputs[0] if len(outputs) == 1 else outputs
         return result
 
+    def __array_function__(self, func, types, args, kwargs):
+        """Track NumPy top-level APIs that mutate an array argument in-place."""
+        target = None
+        target_name = None
+        if func is np.copyto:
+            target_name = "dst"
+        elif func is np.putmask:
+            target_name = "a"
+        elif func is np.place:
+            target_name = "arr"
+        elif func is np.fill_diagonal:
+            target_name = "a"
+        elif func is np.nan_to_num:
+            copy = args[1] if len(args) > 1 else kwargs.get("copy", True)
+            if not bool(copy):
+                target_name = "x"
+
+        if target_name is not None:
+            target = args[0] if args else kwargs.get(target_name)
+
+        owner = None
+        version_before = None
+        if isinstance(target, _VersionedArray):
+            owner_ref = getattr(target, "_owner_ref", None)
+            owner = None if owner_ref is None else owner_ref()
+            if owner is not None:
+                version_before = owner._version
+
+        result = super().__array_function__(func, types, args, kwargs)
+
+        # Some implementations route through an already-tracked setitem/ufunc
+        # internally. Only add a version here when no nested hook saw the write.
+        if owner is not None and owner._version == version_before:
+            owner._version += 1
+        return result
+
     def copy(self, order="C"):
         """Return an independent ordinary ndarray with no Tensor ownership."""
         return np.array(self, dtype=self.dtype, copy=True, order=order, subok=False)
