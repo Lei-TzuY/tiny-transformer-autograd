@@ -27,6 +27,13 @@ class _ChangingBuffers(list):
         return iter(values)
 
 
+class _ShortIterSteps(list):
+    """Report list length normally while yielding fewer values when consumed."""
+
+    def __iter__(self):
+        return iter(())
+
+
 def _parameter():
     return Tensor([1.0, -2.0], requires_grad=True)
 
@@ -79,6 +86,20 @@ def test_buffer_container_is_materialized_once_before_validation_and_copy():
 
     assert changing.iterations == 1
     np.testing.assert_array_equal(optimizer._v[0], good)
+
+
+def test_adam_parameter_steps_validate_the_materialized_sequence_length():
+    optimizer = Adam([_parameter()])
+    before = optimizer.state_dict()
+    state = optimizer.state_dict()
+    state["steps"] = _ShortIterSteps([0])
+
+    with pytest.raises(ValueError, match="parameter step count mismatch"):
+        optimizer.load_state_dict(state)
+
+    after = optimizer.state_dict()
+    assert after["steps"] == before["steps"]
+    assert after["t"] == before["t"]
 
 
 def test_adam_late_invalid_group_still_cannot_partially_commit_snapshots():
