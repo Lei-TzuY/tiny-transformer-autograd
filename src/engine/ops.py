@@ -234,8 +234,12 @@ def exp(x: Tensor) -> Tensor:
 # log  (natural log)
 # ---------------------------------------------------------------------------
 def log(x: Tensor) -> Tensor:
+    """Natural logarithm on the positive real domain."""
+    if np.isnan(x.data).any() or np.any(x.data <= 0.0):
+        raise ValueError("log requires positive inputs")
+
     out = Tensor(
-        np.log(x.data + 1e-12),  # numerical stability
+        np.log(x.data),
         requires_grad=x.requires_grad,
         _children=(x,),
         _op="log",
@@ -244,7 +248,7 @@ def log(x: Tensor) -> Tensor:
     def _backward():
         if x.requires_grad:
             x._ensure_grad()
-            x.grad += out.grad / (x.data + 1e-12)
+            x.grad += out.grad / x.data
 
     out._backward = _backward
     return out
