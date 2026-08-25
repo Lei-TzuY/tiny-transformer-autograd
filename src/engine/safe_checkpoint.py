@@ -29,6 +29,18 @@ _MANIFEST_KEY = "__manifest__"
 _MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 
 
+def _reject_duplicate_json_keys(pairs):
+    """Build one JSON object while rejecting ambiguous duplicate keys."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(
+                f"safe checkpoint manifest contains duplicate JSON object key {key!r}"
+            )
+        result[key] = value
+    return result
+
+
 def save_safe_checkpoint(
     path,
     model,
@@ -91,7 +103,10 @@ def read_safe_checkpoint(path):
         except UnicodeDecodeError as exc:
             raise ValueError("safe checkpoint manifest must be UTF-8") from exc
         try:
-            manifest = json.loads(manifest_text)
+            manifest = json.loads(
+                manifest_text,
+                object_pairs_hook=_reject_duplicate_json_keys,
+            )
         except json.JSONDecodeError as exc:
             raise ValueError("safe checkpoint manifest is not valid JSON") from exc
 
