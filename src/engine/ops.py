@@ -451,15 +451,55 @@ def sum(x: Tensor, axis=None, keepdims=False) -> Tensor:
 # mean
 # ---------------------------------------------------------------------------
 def mean(x: Tensor, axis=None, keepdims=False) -> Tensor:
-    if axis is None:
-        n = x.data.size
-    elif isinstance(axis, int):
-        n = x.data.shape[axis]
-    else:
-        n = np.prod([x.data.shape[a] for a in axis])
+    """Mean reduction with explicit axis and empty-domain validation."""
+    if not isinstance(keepdims, (bool, np.bool_)):
+        raise TypeError("mean keepdims must be a boolean")
+    keepdims = bool(keepdims)
 
-    out_sum = sum(x, axis=axis, keepdims=keepdims)
-    # Reuse mul with scalar  (1/n is a constant, no graph node needed)
+    if axis is None:
+        normalised_axis = None
+        n = x.data.size
+    else:
+        if isinstance(axis, (bool, np.bool_)):
+            raise TypeError("mean axis must contain integers, not booleans")
+        if isinstance(axis, (int, np.integer)):
+            axes = (int(axis),)
+            scalar_axis = True
+        else:
+            if not isinstance(axis, tuple):
+                raise TypeError("mean axis must be an integer, tuple of integers, or None")
+            axes = axis
+            scalar_axis = False
+
+        normalised_axes = []
+        seen = set()
+        for item in axes:
+            if isinstance(item, (bool, np.bool_)) or not isinstance(
+                item, (int, np.integer)
+            ):
+                raise TypeError("mean axis must contain integers")
+            item = int(item)
+            if item < -x.ndim or item >= x.ndim:
+                raise ValueError(
+                    f"mean axis {item} is out of bounds for tensor with {x.ndim} dimensions"
+                )
+            normalised = item % x.ndim
+            if normalised in seen:
+                raise ValueError("mean axis contains a duplicate dimension")
+            seen.add(normalised)
+            normalised_axes.append(normalised)
+
+        if scalar_axis:
+            normalised_axis = normalised_axes[0]
+        else:
+            normalised_axis = tuple(normalised_axes)
+        n = int(np.prod([x.shape[a] for a in normalised_axes], dtype=np.int64))
+
+    if n == 0:
+        raise ValueError("mean reduction has no elements")
+
+    out_sum = sum(x, axis=normalised_axis, keepdims=keepdims)
+    # Reuse mul with scalar (1/n is a constant, no graph node needed).
     scalar = Tensor(np.array(1.0 / n))
     result = mul(out_sum, scalar)
     result._op = "mean"
