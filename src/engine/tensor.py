@@ -14,6 +14,8 @@ accumulates into its parents' .grad fields.  backward() executes
 closures in reverse topological order (like reverse-mode AD).
 """
 
+from numbers import Real
+
 import numpy as np
 
 from .grad_mode import is_grad_enabled
@@ -279,18 +281,28 @@ class Tensor:
         return div(other, self)
 
     def __pow__(self, exponent):
-        """Scalar-exponent power: x ** n."""
-        assert isinstance(exponent, (int, float)), "only scalar exponents"
+        """Raise this tensor elementwise to one finite real scalar exponent."""
+        if isinstance(exponent, (bool, np.bool_)) or not isinstance(exponent, Real):
+            raise TypeError("power exponent must be a real scalar")
+        exponent = float(exponent)
+        if not np.isfinite(exponent):
+            raise ValueError("power exponent must be finite")
+
         out = Tensor(
             self.data ** exponent,
             requires_grad=self.requires_grad,
             _children=(self,),
-            _op=f"**{exponent}",
+            _op=f"**{exponent:g}",
         )
 
         def _backward():
             if self.requires_grad:
                 self._ensure_grad()
+                if exponent == 0.0:
+                    # d(x**0)/dx = 0 everywhere under NumPy's x**0 == 1
+                    # convention, including x=0. Avoid evaluating 0**-1,
+                    # which would otherwise turn the exact zero into NaN.
+                    return
                 self.grad += exponent * (self.data ** (exponent - 1)) * out.grad
 
         out._backward = _backward
