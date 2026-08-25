@@ -702,7 +702,52 @@ def _append_jsonl(path, record):
         handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
+def _validate_int_arg(args, name):
+    value = getattr(args, name)
+    option = "--" + name.replace("_", "-")
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{option} must be an integer")
+    return int(value)
+
+
+def _validate_real_arg(args, name):
+    value = getattr(args, name)
+    option = "--" + name.replace("_", "-")
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError(f"{option} must be a real number")
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError(f"{option} must be finite")
+    return value
+
+
 def _validate_args(args):
+    # argparse already parses these types for normal CLI use, but this function
+    # is also the last fail-fast boundary before numeric values reach model,
+    # optimizer, scheduler, and generation code. Explicit checks prevent NaN,
+    # infinities, bool-as-int values, and malformed programmatic Namespaces from
+    # slipping through comparison-only range validation.
+    integer_names = (
+        "iters", "batch", "ctx", "d", "heads", "layers", "grad_accum",
+        "eval_interval", "eval_iters", "warmup_iters", "save_every",
+        "bpe_merges", "lora_rank", "sample", "beam_width", "seed",
+    )
+    for name in integer_names:
+        _validate_int_arg(args, name)
+    if args.top_k is not None:
+        _validate_int_arg(args, "top_k")
+
+    real_names = (
+        "val_frac", "lr", "min_lr", "dropout", "weight_decay", "grad_clip",
+        "lora_alpha", "temperature",
+    )
+    for name in real_names:
+        _validate_real_arg(args, name)
+    if args.top_p is not None:
+        _validate_real_arg(args, "top_p")
+
     if args.iters <= 0:
         raise ValueError("--iters must be positive")
     if args.batch <= 0 or args.ctx <= 0:
