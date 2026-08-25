@@ -31,10 +31,11 @@ def beam_generate(
     own logits and cache slice and runs an independent beam tree. Scores are
     never compared across prompts. With ``use_cache=True`` every cache retained
     by the beam tree is an immutable snapshot. Branches may therefore share a
-    parent cache without copying it, while inference concatenates fresh child
-    arrays instead of mutating the parent. Once a cache fills ``context_len``,
-    the next selected child is re-prefilled from its cropped window so positions
-    are renumbered from zero and out-of-window tokens are genuinely forgotten.
+    parent cache without copying it. Selected siblings are scored together in
+    one batched inference call, whose returned child cache is split back into
+    immutable per-beam views. Once a cache fills ``context_len``, selected
+    children are re-prefilled together from their cropped strict windows so
+    positions are renumbered and out-of-window tokens are genuinely forgotten.
     """
     if not isinstance(max_new_tokens, (int, np.integer)) or max_new_tokens < 0:
         raise ValueError("max_new_tokens must be a non-negative integer")
@@ -117,19 +118,35 @@ def _beam_generate_one(
         if mask is not None:
             mask = np.concatenate([mask, np.ones((1, 1), dtype=bool)], axis=1)
 
-        next_beams = []
-        for sequence, score, parent_cache in selected:
-            if use_cache and _can_extend_cache(parent_cache, model.context_len):
-                logits, cache = _extend_cache(model, sequence, parent_cache, mask)
-            else:
-                logits, cache = _prefill(model, sequence, mask)
-                if not use_cache:
-                    cache = None
-            next_beams.append((sequence, score, logits, cache))
-        beams = next_beams
+        beams = _advance_selected(model, selected, mask, use_cache)
 
     # The loop returns on its final iteration for every positive token count.
     return beams[0][0]
+
+
+def _advance_selected(model, selected, mask, use_cache):
+    """Score all selected children together, then split state back per beam."""
+    sequences = np.concatenate([sequence for sequence, _, _ in selected], axis=0)
+    count = len(selected)
+    batch_mask = None if mask is None else np.repeat(mask, count, axis=0)
+    parent_caches = [parent_cache for _, _, parent_cache in selected]
+
+    if use_cache and all(
+        _can_extend_cache(parent_cache, model.context_len)
+        for parent_cache in parent_caches
+    ):
+        batched_parent = _stack_cache(parent_caches)
+        logits, cache = _extend_cache(model, sequences, batched_parent, batch_mask)
+    else:
+        logits, cache = _prefill(model, sequences, batch_mask)
+        if not use_cache:
+            cache = None
+
+    next_beams = []
+    for row, (sequence, score, _) in enumerate(selected):
+        row_cache = None if cache is None else _slice_cache(cache, row)
+        next_beams.append((sequence, score, logits[row : row + 1], row_cache))
+    return next_beams
 
 
 def _freeze_cache(cache):
@@ -159,7 +176,7 @@ def _prefill(model, sequence, mask):
 
 
 def _slice_cache(cache, row):
-    """Return one prompt row's zero-copy immutable batched-cache view."""
+    """Return one row's zero-copy immutable view of a batched cache."""
     return _freeze_cache(
         [
             {
@@ -171,12 +188,30 @@ def _slice_cache(cache, row):
     )
 
 
+def _stack_cache(caches):
+    """Batch immutable per-beam caches for one shared inference call."""
+    if not caches:
+        raise ValueError("cannot batch an empty cache collection")
+    layers = len(caches[0])
+    if any(len(cache) != layers for cache in caches):
+        raise ValueError("all beam caches must contain the same number of layers")
+    return _freeze_cache(
+        [
+            {
+                "k": np.concatenate([cache[layer]["k"] for cache in caches], axis=0),
+                "v": np.concatenate([cache[layer]["v"] for cache in caches], axis=0),
+            }
+            for layer in range(layers)
+        ]
+    )
+
+
 def _can_extend_cache(cache, context_len):
     return cache is not None and cache[0]["k"].shape[2] < context_len
 
 
 def _extend_cache(model, sequence, cache, mask):
-    """Score the newest token from an immutable selected-beam parent cache."""
+    """Score newest tokens from one immutable batched parent cache."""
     cached = cache[0]["k"].shape[2]
     step_mask = step_positions = None
     if mask is not None:
