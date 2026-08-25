@@ -44,11 +44,32 @@ class BenchmarkTest(unittest.TestCase):
         self.assertEqual(report["dtype"], "float64")
         self.assertIn("python", report["environment"])
         self.assertIn("numpy", report["environment"])
+        for name in (
+            "forward_no_grad_tokens_per_sec",
+            "infer_tokens_per_sec",
+            "numpy_infer_speedup",
+            "generate_cached_tokens_per_sec",
+            "generate_uncached_tokens_per_sec",
+            "cache_speedup",
+        ):
+            self.assertGreater(report[name], 0)
         for name, samples in report["samples"].items():
             self.assertEqual(len(samples), 2)
             self.assertTrue(all(value > 0 for value in samples))
             self.assertEqual(report["summary"][name]["n"], 2)
             self.assertGreaterEqual(report["summary"][name]["sample_stdev"], 0)
+
+    def test_numpy_speedup_pairs_matching_forward_and_infer_samples(self):
+        report = run_benchmark(benchmark_args(repeats=3))
+        forward = report["samples"]["forward_no_grad_seconds"]
+        infer = report["samples"]["infer_seconds"]
+        expected = [old / new for old, new in zip(forward, infer)]
+
+        self.assertEqual(report["samples"]["numpy_infer_speedup"], expected)
+        self.assertEqual(
+            report["numpy_infer_speedup"],
+            report["summary"]["numpy_infer_speedup"]["median"],
+        )
 
     def test_validation_rejects_invalid_protocol(self):
         with self.assertRaisesRegex(ValueError, "--repeats must be positive"):
