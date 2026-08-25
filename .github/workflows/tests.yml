@@ -23,6 +23,9 @@ jobs:
         run: |
           python -c "import engine, nn, train, tokenizer, benchmark"
           tiny-train --help
+      - name: Smoke-test benchmark report
+        run: |
+          python -m benchmark --vocab 16 --ctx 4 --d 8 --heads 2 --layers 1 --batch 1 --steps 1 --generate 1 --warmup 0 --repeats 2 --json
       - name: Run tests
         run: python -m pytest tests -q -W error
       - name: Compile sources
