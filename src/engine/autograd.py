@@ -49,10 +49,10 @@ def grad(output, inputs, grad_output=None):
     Notes
     -----
     This helper deliberately reuses ``Tensor.backward`` as the single source of
-    truth for reverse-mode rules. All graph gradient buffers are snapshotted,
-    temporarily cleared to isolate this VJP, and restored even if backward
-    fails. Leaf accumulation semantics of ``Tensor.backward`` are therefore
-    unchanged for normal training code.
+    truth for reverse-mode rules. All graph gradient buffer references are
+    preserved, temporarily replaced to isolate this VJP, and restored even if
+    backward fails. Leaf accumulation semantics of ``Tensor.backward`` are
+    therefore unchanged for normal training code.
     """
     if not isinstance(output, Tensor):
         raise TypeError("output must be a Tensor")
@@ -81,10 +81,7 @@ def grad(output, inputs, grad_output=None):
     snapshots = {}
     for node in topo:
         if node.requires_grad:
-            snapshots[id(node)] = (
-                node,
-                None if node.grad is None else np.array(node.grad, copy=True),
-            )
+            snapshots[id(node)] = (node, node.grad)
 
     try:
         for node, _ in snapshots.values():
