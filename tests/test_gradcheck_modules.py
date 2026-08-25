@@ -11,7 +11,7 @@ from engine.gradcheck import gradcheck
 from engine.tensor import Tensor
 from nn.attention import MultiHeadAttention, RotaryEmbedding
 from nn.layers import LayerNorm, Linear, RMSNorm
-from nn.transformer import TransformerBlock
+from nn.transformer import GPT, TransformerBlock
 
 
 def test_gradcheck_linear_lora_parameters_only():
@@ -93,4 +93,30 @@ def test_gradcheck_rope_rmsnorm_swiglu_transformer_block():
         parameters=block.named_parameters(),
         atol=1e-5,
         rtol=1e-4,
+    )
+
+
+def test_gradcheck_tiny_gpt_tied_embedding_parameters():
+    """Verify embedding scatter-add and tied LM-head gradients together."""
+    np.random.seed(47)
+    model = GPT(
+        vocab_size=3,
+        context_len=2,
+        d_model=2,
+        num_heads=1,
+        d_ff=2,
+        num_layers=1,
+        dropout=0.0,
+    )
+    tokens = np.array([[1, 1]], dtype=np.int64)
+    parameters = list(model.named_parameters())
+
+    assert model.head.weight is model.token_emb.weight
+    assert sum(parameter is model.token_emb.weight for _, parameter in parameters) == 1
+    assert len({id(parameter) for _, parameter in parameters}) == len(parameters)
+    assert gradcheck(
+        lambda: model(tokens),
+        parameters=parameters,
+        atol=2e-5,
+        rtol=2e-4,
     )
