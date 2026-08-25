@@ -604,6 +604,9 @@ def _softmax(x):
     (every entry −∞) as all-zero weights, so ``forward()`` and ``infer()``
     cannot disagree about a masked position.
     """
+    if np.isnan(x).any() or np.isposinf(x).any():
+        raise ValueError("softmax inputs must not contain NaN or +inf")
+
     row_max = x.max(axis=-1, keepdims=True)
     shift = np.where(np.isneginf(row_max), 0.0, row_max)
     exp = np.exp(x - shift)
