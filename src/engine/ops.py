@@ -503,11 +503,33 @@ def sum(x: Tensor, axis=None, keepdims=False) -> Tensor:
     return out
 
 
+def _select_mean_paths(historical: Tensor, fallback: Tensor, recover) -> Tensor:
+    """Use the scaled mean graph only for reduction outputs it recovers."""
+    recover = np.array(recover, dtype=bool, copy=True)
+    out = Tensor(
+        np.where(recover, fallback.data, historical.data),
+        requires_grad=historical.requires_grad or fallback.requires_grad,
+        _children=(historical, fallback),
+        _op="mean",
+    )
+
+    def _backward():
+        if historical.requires_grad:
+            historical._ensure_grad()
+            historical.grad += np.where(recover, 0.0, out.grad)
+        if fallback.requires_grad:
+            fallback._ensure_grad()
+            fallback.grad += np.where(recover, out.grad, 0.0)
+
+    out._backward = _backward
+    return out
+
+
 # ---------------------------------------------------------------------------
 # mean
 # ---------------------------------------------------------------------------
 def mean(x: Tensor, axis=None, keepdims=False) -> Tensor:
-    """Mean reduction with explicit axis and empty-domain validation."""
+    """Mean reduction with explicit axis, empty-domain, and overflow handling."""
     if not isinstance(keepdims, (bool, np.bool_)):
         raise TypeError("mean keepdims must be a boolean")
     keepdims = bool(keepdims)
@@ -554,12 +576,37 @@ def mean(x: Tensor, axis=None, keepdims=False) -> Tensor:
     if n == 0:
         raise ValueError("mean reduction has no elements")
 
-    out_sum = sum(x, axis=normalised_axis, keepdims=keepdims)
-    # Reuse mul with scalar (1/n is a constant, no graph node needed).
+    # Preserve the historical sum-then-scale path for every ordinary output.
+    # The reduction itself may overflow for finite inputs even when dividing by
+    # n would make the true mean representable, so inspect a warning-suppressed
+    # historical result before deciding whether a fallback is necessary.
     scalar = Tensor(np.array(1.0 / n))
-    result = mul(out_sum, scalar)
-    result._op = "mean"
-    return result
+    with np.errstate(over="ignore", invalid="ignore"):
+        out_sum = sum(x, axis=normalised_axis, keepdims=keepdims)
+        historical = mul(out_sum, scalar)
+    historical._op = "mean"
+    if np.isfinite(historical.data).all():
+        return historical
+
+    source_finite = np.all(
+        np.isfinite(x.data), axis=normalised_axis, keepdims=keepdims
+    )
+    unsafe = ~np.isfinite(historical.data) & source_finite
+    if not np.any(unsafe):
+        return historical
+
+    # Scaling each finite element by 1/n before summation avoids a recoverable
+    # intermediate overflow. Only outputs that become finite use this graph;
+    # safe outputs in the same batch retain the exact historical arithmetic.
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        fallback = sum(mul(x, scalar), axis=normalised_axis, keepdims=keepdims)
+    fallback._op = "mean"
+    recover = unsafe & np.isfinite(fallback.data)
+    if not np.any(recover):
+        return historical
+    if np.all(recover):
+        return fallback
+    return _select_mean_paths(historical, fallback, recover)
 
 
 # ---------------------------------------------------------------------------
