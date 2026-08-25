@@ -43,11 +43,50 @@ Nothing becomes NaN, but that position's output is meaningless by
 construction: exclude it from the loss instead of trusting it.
 """
 
+from numbers import Integral, Real
+
 import numpy as np
 from engine.tensor import Tensor
 import engine.ops as ops
 from .module import Module
 from .layers import Linear, Dropout
+
+
+def _positive_int(name, value):
+    """Validate a positive integral attention dimension and normalize it."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise TypeError(f"{name} must be a positive integer")
+    value = int(value)
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
+def _finite_real(
+    name,
+    value,
+    *,
+    positive=False,
+    lower=None,
+    upper=None,
+    upper_inclusive=True,
+):
+    """Validate one finite real attention hyperparameter and return float."""
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real number")
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError(f"{name} must be finite")
+    if positive and value <= 0.0:
+        raise ValueError(f"{name} must be positive")
+    if lower is not None and value < lower:
+        raise ValueError(f"{name} must be at least {lower}")
+    if upper is not None:
+        invalid = value > upper if upper_inclusive else value >= upper
+        if invalid:
+            relation = "at most" if upper_inclusive else "less than"
+            raise ValueError(f"{name} must be {relation} {upper}")
+    return value
 
 
 class RotaryEmbedding:
@@ -66,12 +105,11 @@ class RotaryEmbedding:
     """
 
     def __init__(self, dim: int, max_pos: int, base: float = 10000.0):
-        if dim <= 0 or max_pos <= 0:
-            raise ValueError("RoPE dimension and max_pos must be positive")
+        dim = _positive_int("RoPE dimension", dim)
+        max_pos = _positive_int("RoPE max_pos", max_pos)
         if dim % 2 != 0:
             raise ValueError("RoPE head dimension must be even")
-        if base <= 0:
-            raise ValueError("RoPE base must be positive")
+        base = _finite_real("RoPE base", base, positive=True)
         inv_freq = base ** (-np.arange(0, dim, 2, dtype=np.float64) / dim)
         angles = np.outer(np.arange(max_pos, dtype=np.float64), inv_freq)
         emb = np.concatenate([angles, angles], axis=-1)  # (max_pos, dim)
@@ -112,7 +150,10 @@ class RotaryEmbedding:
     def _validate_input(self, shape, offset):
         if len(shape) < 2 or shape[-1] != self.dim:
             raise ValueError(f"RoPE input must end in dimension {self.dim}")
-        if not isinstance(offset, (int, np.integer)) or offset < 0:
+        if isinstance(offset, (bool, np.bool_)) or not isinstance(offset, Integral):
+            raise TypeError("RoPE offset must be a non-negative integer")
+        offset = int(offset)
+        if offset < 0:
             raise ValueError("RoPE offset must be a non-negative integer")
         if offset + shape[-2] > self.max_pos:
             raise ValueError("RoPE input positions exceed max_pos")
@@ -163,8 +204,10 @@ class SelfAttention(Module):
     """Single-head causal self-attention."""
 
     def __init__(self, d_model: int, dropout: float = 0.0):
-        if d_model <= 0:
-            raise ValueError("d_model must be positive")
+        d_model = _positive_int("d_model", d_model)
+        dropout = _finite_real(
+            "dropout", dropout, lower=0.0, upper=1.0, upper_inclusive=False
+        )
         self.d_model = d_model
         self.scale = d_model ** -0.5
 
@@ -250,10 +293,15 @@ class MultiHeadAttention(Module):
         dropout: float = 0.0,
         rope: RotaryEmbedding = None,
     ):
-        if d_model <= 0 or num_heads <= 0:
-            raise ValueError("d_model and num_heads must be positive")
+        d_model = _positive_int("d_model", d_model)
+        num_heads = _positive_int("num_heads", num_heads)
         if d_model % num_heads != 0:
             raise ValueError("d_model must be divisible by num_heads")
+        dropout = _finite_real(
+            "dropout", dropout, lower=0.0, upper=1.0, upper_inclusive=False
+        )
+        if rope is not None and not isinstance(rope, RotaryEmbedding):
+            raise TypeError("rope must be a RotaryEmbedding or None")
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
