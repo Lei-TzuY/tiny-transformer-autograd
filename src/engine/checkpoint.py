@@ -51,6 +51,20 @@ def save_checkpoint(path, model, optimizer=None, scheduler=None, step=0, metadat
     _atomic_pickle_dump(path, state)
 
 
+def _fsync_parent_directory(directory):
+    """Persist a completed directory-entry replacement on POSIX filesystems."""
+    if os.name == "nt":
+        # Windows does not expose a portable fsync-on-directory primitive.
+        return
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(directory, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _atomic_pickle_dump(path, state):
     """Durably write ``state`` to a unique temp file, then replace ``path``."""
     path = os.fspath(path)
@@ -69,13 +83,16 @@ def _atomic_pickle_dump(path, state):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        temporary = None
+        _fsync_parent_directory(directory)
     except Exception:
         if descriptor is not None:
             os.close(descriptor)
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
         raise
 
 
