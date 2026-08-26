@@ -3,6 +3,7 @@
 import os
 import sys
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -10,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from engine.checkpoint import save_checkpoint
 from engine.safe_checkpoint import save_safe_checkpoint
 from nn.transformer import GPT
+import streaming_cli
 from streaming_cli import load_streaming_checkpoint, main
 from tokenizer import CharTokenizer
 
@@ -186,3 +188,76 @@ def test_cli_reports_out_of_vocabulary_prompt(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="not present in the tokenizer vocabulary"):
         main()
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "message"),
+    [
+        ("--temperature", "nan", "temperature.*finite"),
+        ("--temperature", "inf", "temperature.*finite"),
+        ("--temperature", "-inf", "temperature.*finite"),
+        ("--top-p", "nan", "top_p.*finite"),
+        ("--top-p", "inf", "top_p.*finite"),
+        ("--seed", "-1", "seed.*non-negative"),
+        ("--seed", str(2**32), "seed.*at most"),
+    ],
+)
+def test_cli_invalid_numeric_options_fail_before_checkpoint_read(
+    monkeypatch,
+    flag,
+    value,
+    message,
+):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tiny-stream",
+            "--checkpoint",
+            "must-not-be-read.pkl",
+            "--prompt",
+            "abc",
+            flag,
+            value,
+        ],
+    )
+
+    def unexpected_checkpoint_read(*_args, **_kwargs):
+        raise AssertionError("invalid CLI options must fail before checkpoint I/O")
+
+    monkeypatch.setattr(
+        streaming_cli,
+        "load_streaming_checkpoint",
+        unexpected_checkpoint_read,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        streaming_cli.main()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tokens", True),
+        ("tokens", 1.5),
+        ("top_k", True),
+        ("top_k", 1.5),
+        ("seed", True),
+        ("seed", 1.5),
+    ],
+)
+def test_programmatic_cli_validation_rejects_non_integer_fields(field, value):
+    args = streaming_cli.parse_args
+    values = {
+        "tokens": 1,
+        "temperature": 1.0,
+        "top_k": None,
+        "top_p": None,
+        "seed": 7,
+        "strategy": "sample",
+    }
+    values[field] = value
+    namespace = type("Args", (), values)()
+
+    with pytest.raises(TypeError):
+        streaming_cli._validate_args(namespace)
