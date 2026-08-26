@@ -163,6 +163,59 @@ def _loss_row_multipliers(out, rows, total_positions, scored_count, reduction):
     return multipliers
 
 
+def _mask_ignored_logits(logits, targets, ignore_index):
+    """Replace ignored rows by zeros while preserving zero gradient to logits."""
+    if ignore_index is None:
+        return logits, targets
+    if not isinstance(logits, Tensor):
+        raise TypeError("label_smoothed_cross_entropy logits must be a Tensor")
+    if logits.ndim == 0:
+        return logits, targets
+
+    ignore_index = _validate_ignore_index(ignore_index)
+    targets_np = np.asarray(targets)
+    expected_shape = logits.shape[:-1]
+    if targets_np.shape != expected_shape:
+        raise ValueError(
+            "nll_loss target shape mismatch: "
+            f"expected {expected_shape}, got {targets_np.shape}"
+        )
+    if targets_np.size == 0:
+        return logits, targets
+    if not np.issubdtype(targets_np.dtype, np.integer):
+        raise TypeError("nll_loss targets must contain integers")
+
+    snapshot = np.array(targets_np, dtype=np.int64, copy=True)
+    targets_flat = snapshot.reshape(-1)
+    scored = targets_flat != ignore_index
+    if logits.shape[-1] > 0 and scored.any():
+        scored_targets = targets_flat[scored]
+        if np.any(scored_targets < 0) or np.any(scored_targets >= logits.shape[-1]):
+            raise ValueError(
+                f"nll_loss targets must be in [0, {logits.shape[-1]})"
+            )
+    if scored.all():
+        return logits, snapshot
+
+    safe = np.array(logits.data, dtype=np.float64, copy=True)
+    safe.reshape((-1, logits.shape[-1]))[~scored] = 0.0
+    out = Tensor(
+        safe,
+        requires_grad=logits.requires_grad,
+        _children=(logits,),
+        _op="mask_ignored_logits",
+    )
+    scored_mask = scored.reshape(expected_shape + (1,))
+
+    def _backward():
+        if logits.requires_grad:
+            logits._ensure_grad()
+            logits.grad += np.where(scored_mask, out.grad, 0.0)
+
+    out._backward = _backward
+    return out, snapshot
+
+
 def log_softmax(x: Tensor, axis=-1) -> Tensor:
     """Stable log-softmax with a closed-form reverse-mode VJP.
 
@@ -330,11 +383,15 @@ def label_smoothed_cross_entropy(
 
     The target distribution is ``(1-smoothing) * one_hot + smoothing / C``.
     ``smoothing=0`` is therefore ordinary NLL over :func:`log_softmax`, while
-    ``smoothing=1`` trains against the uniform distribution.
+    ``smoothing=1`` trains against the uniform distribution. Rows selected by
+    ``ignore_index`` are sanitized before normalization and receive exactly
+    zero gradient, matching the existing :func:`engine.ops.cross_entropy`
+    contract that ignored logits never affect the loss.
     """
     smoothing = _validate_smoothing(smoothing)
     reduction = _validate_reduction(reduction)
-    log_probs = log_softmax(logits, axis=-1)
+    safe_logits, targets = _mask_ignored_logits(logits, targets, ignore_index)
+    log_probs = log_softmax(safe_logits, axis=-1)
     if smoothing == 0.0:
         return nll_loss(
             log_probs,
