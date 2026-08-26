@@ -80,6 +80,21 @@ def _is_deferred_callable(function):
     )
 
 
+def _is_deferred_result(value):
+    """Return True for call results whose body continues after this call."""
+    return (
+        inspect.isgenerator(value)
+        or inspect.iscoroutine(value)
+        or inspect.isasyncgen(value)
+    )
+
+
+def _close_deferred_result(value):
+    """Close never-consumed generators/coroutines when a decorator rejects them."""
+    if inspect.isgenerator(value) or inspect.iscoroutine(value):
+        value.close()
+
+
 class set_grad_enabled:
     """
     Context manager and decorator that sets graph recording for a scope.
@@ -129,7 +144,19 @@ class set_grad_enabled:
             # A fresh guard per call keeps recursive calls independent of the
             # decorated instance (whose subclasses take no constructor args).
             with set_grad_enabled(mode):
-                return function(*args, **kwargs)
+                result = function(*args, **kwargs)
+                # A synchronous forwarding wrapper can hide a generator,
+                # coroutine, or async-generator function from decoration-time
+                # introspection. Reject the deferred object before leaving this
+                # mode scope so its body cannot later run under the caller's
+                # restored grad mode.
+                if _is_deferred_result(result):
+                    _close_deferred_result(result)
+                    raise TypeError(
+                        "grad mode decorators only support synchronous, "
+                        "non-generator functions"
+                    )
+                return result
 
         return wrapper
 
