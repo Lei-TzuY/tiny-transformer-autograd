@@ -266,6 +266,34 @@ def test_label_smoothed_cross_entropy_ignore_index_has_zero_gradient():
     assert np.isfinite(loss.data)
 
 
+def test_label_smoothed_cross_entropy_ignores_invalid_logits_in_ignored_rows():
+    logits = Tensor(
+        [[2.0, 0.0, -1.0], [np.nan, np.inf, -np.inf], [0.5, 1.0, -0.5]],
+        requires_grad=True,
+    )
+    targets = np.array([0, -100, 1])
+
+    loss = label_smoothed_cross_entropy(
+        logits,
+        targets,
+        smoothing=0.2,
+        ignore_index=-100,
+        reduction="none",
+    )
+    np.testing.assert_allclose(loss.data[[0, 2]], [
+        label_smoothed_cross_entropy(
+            Tensor([[2.0, 0.0, -1.0]]), np.array([0]), smoothing=0.2
+        ).data,
+        label_smoothed_cross_entropy(
+            Tensor([[0.5, 1.0, -0.5]]), np.array([1]), smoothing=0.2
+        ).data,
+    ])
+    assert loss.data[1] == 0.0
+
+    loss.backward(np.array([2.0, 999.0, 3.0]))
+    np.testing.assert_array_equal(logits.grad[1], np.zeros(3))
+
+
 def test_probability_losses_respect_no_grad_mode():
     x = Tensor([[1.0, 2.0, 3.0]], requires_grad=True)
 
