@@ -111,6 +111,26 @@ def test_unrecoverable_sibling_keeps_warning_without_rewarning_recovered_slice()
     assert np.isnan(out.data[1])
 
 
+def test_finite_unrepresentable_sibling_warns_without_rewarning_recovered_slice():
+    data = np.array(
+        [
+            [1e308, 1e308, -1e308],
+            [1e308, 1e308, 0.0],
+        ]
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = ops.sum(Tensor(data), axis=1)
+
+    overflow_warnings = [
+        item for item in caught if "overflow" in str(item.message)
+    ]
+    assert len(overflow_warnings) == 1
+    assert out.data[0] == np.float64(1e308)
+    assert np.isposinf(out.data[1])
+
+
 def test_multi_axis_keepdims_recovers_only_overflowed_slice():
     residual = np.float64(1e-100)
     data = np.array(
