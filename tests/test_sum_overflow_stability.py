@@ -2,6 +2,7 @@
 
 import os
 import sys
+import warnings
 
 import numpy as np
 import pytest
@@ -74,6 +75,40 @@ def test_mixed_sum_keeps_safe_slice_historical_bits():
         x.grad,
         np.array([[2.0, 2.0, 2.0], [-3.0, -3.0, -3.0]]),
     )
+
+
+def test_nonfinite_sibling_does_not_disable_finite_slice_recovery():
+    data = np.array(
+        [
+            [1e308, 1e308, -1e308],
+            [np.nan, 0.0, 0.0],
+        ]
+    )
+
+    with np.errstate(all="raise"):
+        out = ops.sum(Tensor(data), axis=1)
+
+    assert out.data[0] == np.float64(1e308)
+    assert np.isnan(out.data[1])
+
+
+def test_unrecoverable_sibling_keeps_warning_without_rewarning_recovered_slice():
+    data = np.array(
+        [
+            [1e308, 1e308, -1e308],
+            [np.inf, -np.inf, 0.0],
+        ]
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        out = ops.sum(Tensor(data), axis=1)
+
+    messages = [str(item.message) for item in caught]
+    assert any("invalid" in message for message in messages)
+    assert not any("overflow" in message for message in messages)
+    assert out.data[0] == np.float64(1e308)
+    assert np.isnan(out.data[1])
 
 
 def test_multi_axis_keepdims_recovers_only_overflowed_slice():
