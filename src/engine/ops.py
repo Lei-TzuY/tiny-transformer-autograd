@@ -23,8 +23,78 @@ softmax(x)     : ∂L/∂xᵢ = Sᵢ(δᵢⱼ - Sⱼ) · gradⱼ  →  S*(grad -
 cross_entropy  : combined softmax + NLL; ∂L/∂logits = (softmax - one_hot) / N
 """
 
+from fractions import Fraction
+
 import numpy as np
 from .tensor import Tensor
+
+
+def _exact_float64_sum(values):
+    """Correctly round the exact sum of finite float64 inputs."""
+    exact = Fraction()
+    for value in values:
+        exact += Fraction.from_float(float(value))
+    try:
+        return float(exact)
+    except OverflowError:
+        return -np.inf if exact < 0 else np.inf
+
+
+def _exact_sum_data(data, axis=None, keepdims=False):
+    """Exactly accumulate finite reduction slices, then round once to float64."""
+    if axis is None:
+        axes = tuple(range(data.ndim))
+    elif isinstance(axis, tuple):
+        axes = tuple(int(item) % data.ndim for item in axis)
+    else:
+        axes = (int(axis) % data.ndim,)
+
+    kept_axes = tuple(index for index in range(data.ndim) if index not in axes)
+    permutation = kept_axes + axes
+    transposed = np.transpose(data, permutation) if data.ndim else data
+    kept_shape = tuple(data.shape[index] for index in kept_axes)
+    reduced_size = int(
+        np.prod([data.shape[index] for index in axes], dtype=np.int64)
+    )
+    rows = transposed.reshape((-1, reduced_size))
+    exact = np.array([_exact_float64_sum(row) for row in rows], dtype=np.float64)
+    result = exact.reshape(kept_shape)
+    if keepdims:
+        output_shape = tuple(
+            1 if index in axes else data.shape[index] for index in range(data.ndim)
+        )
+        result = result.reshape(output_shape)
+    return result
+
+
+def _stable_sum_data(data, axis=None, keepdims=False):
+    """Preserve ordinary NumPy sums while recovering finite overflow cases."""
+    data = np.asarray(data)
+
+    # Non-finite inputs retain NumPy's historical arithmetic and warning
+    # behaviour. The fallback below is only for wholly finite source values.
+    if not np.isfinite(data).all():
+        return data.sum(axis=axis, keepdims=keepdims)
+
+    with np.errstate(over="ignore", invalid="ignore"):
+        historical = data.sum(axis=axis, keepdims=keepdims)
+    if np.isfinite(historical).all():
+        return historical
+
+    # Only a historically non-finite reduction reaches this rare path. Exact
+    # rational accumulation preserves every binary64 addend across arbitrary
+    # dynamic range, then Python performs the single correctly-rounded float
+    # conversion. Safe sibling slices still return their historical NumPy bits.
+    fallback = _exact_sum_data(data, axis=axis, keepdims=keepdims)
+    recover = ~np.isfinite(historical) & np.isfinite(fallback)
+    if np.all(recover | np.isfinite(historical)):
+        return np.where(recover, fallback, historical)
+
+    # At least one exact result is genuinely outside float64. Re-evaluate the
+    # historical reduction outside the local errstate so its warning semantics
+    # remain unchanged for every unrecoverable output.
+    warned = data.sum(axis=axis, keepdims=keepdims)
+    return np.where(recover, fallback, warned)
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +108,7 @@ def _unbroadcast(grad, target_shape):
 
     # Sum over axes where target_shape had size 1 (or was added)
     axes = tuple(i for i, (g, t) in enumerate(zip(grad.shape, padded)) if t == 1)
-    result = grad.sum(axis=axes, keepdims=True) if axes else grad
+    result = _stable_sum_data(grad, axis=axes, keepdims=True) if axes else grad
     return result.reshape(target_shape)
 
 
@@ -485,7 +555,7 @@ def cross_entropy(logits: Tensor, targets, ignore_index=None) -> Tensor:
 # ---------------------------------------------------------------------------
 def sum(x: Tensor, axis=None, keepdims=False) -> Tensor:
     out = Tensor(
-        x.data.sum(axis=axis, keepdims=keepdims),
+        _stable_sum_data(x.data, axis=axis, keepdims=keepdims),
         requires_grad=x.requires_grad,
         _children=(x,),
         _op="sum",
