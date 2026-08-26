@@ -7,8 +7,15 @@ import numpy as np
 from engine.checkpoint import read_checkpoint, restore_checkpoint
 from engine.safe_checkpoint import read_safe_checkpoint
 from nn.streaming import stream_generate
-from nn.transformer import GPT
+from nn.transformer import (
+    GPT,
+    _validate_non_negative_int,
+    _validate_sampling_options,
+)
 from tokenizer import tokenizer_from_state_dict
+
+
+_MAX_RANDOM_SEED = 2**32 - 1
 
 
 def parse_args():
@@ -88,14 +95,15 @@ def _read_prompt(args):
 
 
 def _validate_args(args):
-    if args.tokens < 0:
-        raise ValueError("--tokens must be non-negative")
-    if args.temperature <= 0:
-        raise ValueError("--temperature must be positive")
-    if args.top_k is not None and args.top_k <= 0:
-        raise ValueError("--top-k must be positive")
-    if args.top_p is not None and not 0 < args.top_p <= 1:
-        raise ValueError("--top-p must be in (0, 1]")
+    _validate_non_negative_int(args.tokens, "--tokens")
+    _validate_sampling_options(args.temperature, args.top_k, args.top_p)
+    seed = _validate_non_negative_int(args.seed, "--seed")
+    if seed > _MAX_RANDOM_SEED:
+        raise ValueError(f"--seed must be at most {_MAX_RANDOM_SEED}")
+    if not isinstance(args.strategy, str):
+        raise TypeError("--strategy must be a string")
+    if args.strategy not in {"sample", "greedy"}:
+        raise ValueError("--strategy must be 'sample' or 'greedy'")
 
 
 def main():
