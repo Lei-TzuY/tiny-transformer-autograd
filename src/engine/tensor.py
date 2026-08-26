@@ -245,6 +245,7 @@ class Tensor:
         self.grad = (
             np.zeros(self._data.shape, dtype=np.float64) if requires_grad else None
         )
+        self._grad_shape = self._data.shape
         self._detached_by_no_grad = detached_by_no_grad and not requires_grad
 
         # Keep parent traversal deterministic. A set would deduplicate identities
@@ -253,7 +254,9 @@ class Tensor:
         self._parent_versions = {
             child: child._version for child in self._children
         }
+        self._parent_shapes = {child: child.shape for child in self._children}
         self._forward_version = self._version
+        self._forward_shape = self.shape
         self._op = _op
         self._backward = lambda: None  # filled by each op
 
@@ -292,15 +295,18 @@ class Tensor:
         self._backward_fn = function if graph_node else _no_backward
 
     def _validate_graph_versions(self):
-        """Reject graph reuse after any tracked Tensor data mutation."""
-        if self._children and self._version != self._forward_version:
+        """Reject graph reuse after any Tensor data mutation or shape change."""
+        if self._children and (
+            self._version != self._forward_version or self.shape != self._forward_shape
+        ):
             raise RuntimeError(
                 "tensor data was modified after forward; rebuild the forward "
                 "graph before calling backward()"
             )
         for child in self._children:
-            expected = self._parent_versions[child]
-            if child._version != expected:
+            expected_version = self._parent_versions[child]
+            expected_shape = self._parent_shapes[child]
+            if child._version != expected_version or child.shape != expected_shape:
                 raise RuntimeError(
                     "tensor data was modified after forward; rebuild the forward "
                     "graph before calling backward()"
@@ -348,11 +354,20 @@ class Tensor:
         """Reset gradient to zero (in-place)."""
         if self.grad is not None:
             self.grad = np.zeros(self.data.shape, dtype=np.float64)
+            self._grad_shape = self.data.shape
 
     def _ensure_grad(self):
-        """Lazily initialise grad if it is None (e.g. after a detach)."""
-        if self.grad is None and self.requires_grad:
-            self.grad = np.zeros(self.data.shape, dtype=np.float64)
+        """Initialise or resize a library-owned gradient buffer when needed."""
+        if not self.requires_grad:
+            return
+        current_shape = self.data.shape
+        grad_shape = getattr(self.grad, "shape", None)
+        if self.grad is None or (
+            grad_shape != current_shape and self._grad_shape != current_shape
+        ):
+            self.grad = np.zeros(current_shape, dtype=np.float64)
+        if getattr(self.grad, "shape", None) == current_shape:
+            self._grad_shape = current_shape
 
     # ------------------------------------------------------------------
     # Backward pass
@@ -448,6 +463,7 @@ class Tensor:
         for node in topo:
             if node._children and node.requires_grad:
                 node.grad = np.zeros(node.data.shape, dtype=np.float64)
+                node._grad_shape = node.data.shape
 
         self._ensure_grad()
         self.grad += incoming
