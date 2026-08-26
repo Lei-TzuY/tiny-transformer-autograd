@@ -21,11 +21,14 @@ jobs:
           python -m pip install ".[dev]"
       - name: Smoke-test installed package and CLI
         run: |
-          python -c "import engine, nn, train, tokenizer, benchmark"
+          python -c "import engine, nn, train, tokenizer, benchmark, streaming_cli, streaming_benchmark"
           tiny-train --help
-      - name: Smoke-test benchmark report
+          tiny-stream --help
+          tiny-stream-benchmark --help
+      - name: Smoke-test benchmark reports
         run: |
           python -m benchmark --vocab 16 --ctx 4 --d 8 --heads 2 --layers 1 --batch 1 --steps 1 --generate 1 --warmup 0 --repeats 2 --json
+          python -m streaming_benchmark --vocab 16 --ctx 4 --d 8 --heads 2 --layers 1 --generate 2 --warmup 0 --repeats 1 --json
       - name: Run tests
         run: python -m pytest tests -q -W error
       - name: Compile sources

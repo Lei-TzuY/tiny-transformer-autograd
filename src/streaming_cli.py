@@ -1,0 +1,144 @@
+"""Command-line generation with explicit bounded RoPE streaming semantics."""
+
+import argparse
+
+import numpy as np
+
+from engine.checkpoint import read_checkpoint, restore_checkpoint
+from engine.safe_checkpoint import read_safe_checkpoint
+from nn.streaming import stream_generate
+from nn.transformer import (
+    GPT,
+    _validate_non_negative_int,
+    _validate_sampling_options,
+)
+from tokenizer import tokenizer_from_state_dict
+
+
+_MAX_RANDOM_SEED = 2**32 - 1
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate from a RoPE checkpoint with bounded streaming KV cache"
+    )
+    parser.add_argument(
+        "--checkpoint",
+        required=True,
+        help="tiny-transformer checkpoint",
+    )
+    parser.add_argument(
+        "--checkpoint-format",
+        choices=["pickle", "safe"],
+        default="pickle",
+        help=(
+            "checkpoint encoding: pickle requires a trusted local file; "
+            "safe uses the non-executable NPZ/JSON format"
+        ),
+    )
+    prompt = parser.add_mutually_exclusive_group(required=True)
+    prompt.add_argument("--prompt", help="Prompt text")
+    prompt.add_argument("--prompt-file", help="UTF-8 prompt file")
+    parser.add_argument("--tokens", type=int, default=128, help="Tokens to generate")
+    parser.add_argument(
+        "--strategy", choices=["sample", "greedy"], default="sample"
+    )
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--top-p", type=float, default=None)
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
+
+
+def load_streaming_checkpoint(path, checkpoint_format="pickle"):
+    """Restore a RoPE model and tokenizer from one supported checkpoint format."""
+    if not isinstance(checkpoint_format, str):
+        raise TypeError("checkpoint_format must be a string")
+    readers = {
+        "pickle": read_checkpoint,
+        "safe": read_safe_checkpoint,
+    }
+    try:
+        reader = readers[checkpoint_format]
+    except KeyError as exc:
+        raise ValueError("checkpoint_format must be 'pickle' or 'safe'") from exc
+
+    state = reader(path)
+    metadata = state.get("metadata") or {}
+    model_config = metadata.get("model_config")
+    tokenizer_state = metadata.get("tokenizer")
+    if model_config is None or tokenizer_state is None:
+        raise ValueError(
+            "streaming generation requires checkpoint metadata with model_config "
+            "and tokenizer"
+        )
+
+    tokenizer = tokenizer_from_state_dict(tokenizer_state)
+    model = GPT(**model_config)
+    restore_checkpoint(state, model)
+    model.eval()
+    if model.rope is None:
+        raise ValueError(
+            "streaming generation requires a RoPE checkpoint "
+            "(pos_encoding='rope')"
+        )
+    if model.vocab_size != tokenizer.vocab_size:
+        raise ValueError("checkpoint tokenizer and model vocabulary sizes differ")
+    return model, tokenizer
+
+
+def _read_prompt(args):
+    if args.prompt_file is not None:
+        with open(args.prompt_file, "r", encoding="utf-8") as handle:
+            return handle.read()
+    return args.prompt
+
+
+def _validate_args(args):
+    _validate_non_negative_int(args.tokens, "--tokens")
+    _validate_sampling_options(args.temperature, args.top_k, args.top_p)
+    seed = _validate_non_negative_int(args.seed, "--seed")
+    if seed > _MAX_RANDOM_SEED:
+        raise ValueError(f"--seed must be at most {_MAX_RANDOM_SEED}")
+    if not isinstance(args.strategy, str):
+        raise TypeError("--strategy must be a string")
+    if args.strategy not in {"sample", "greedy"}:
+        raise ValueError("--strategy must be 'sample' or 'greedy'")
+
+
+def main():
+    args = parse_args()
+    _validate_args(args)
+    model, tokenizer = load_streaming_checkpoint(
+        args.checkpoint,
+        checkpoint_format=args.checkpoint_format,
+    )
+    prompt = _read_prompt(args)
+    if not prompt:
+        raise ValueError("generation prompt must not be empty")
+
+    try:
+        encoded = tokenizer.encode(prompt)
+    except KeyError as exc:
+        raise ValueError(
+            f"prompt contains token not present in the tokenizer vocabulary: {exc}"
+        ) from exc
+    if len(encoded) == 0:
+        raise ValueError("generation prompt must not be empty")
+
+    np.random.seed(args.seed)
+    visible_prompt = np.asarray(encoded[-model.context_len:], dtype=np.int64)[None, :]
+    generated = stream_generate(
+        model,
+        visible_prompt,
+        max_new_tokens=args.tokens,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        top_p=args.top_p,
+        strategy=args.strategy,
+    )
+    print(tokenizer.decode(generated[0]))
+
+
+if __name__ == "__main__":
+    main()
