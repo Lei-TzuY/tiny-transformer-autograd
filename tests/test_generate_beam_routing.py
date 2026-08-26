@@ -124,3 +124,38 @@ def test_generate_beam_forwards_validated_public_options_exactly():
     assert kwargs["temperature"] == 0.75
     np.testing.assert_array_equal(kwargs["attention_mask"], mask)
     assert kwargs["use_cache"] is False
+
+
+def test_generate_beam_zero_tokens_validates_mask_without_inference():
+    model = _model()
+    idx = np.array([[0, 2, 4], [3, 5, 7]])
+    mask = np.array([[0, 1, 1], [1, 1, 1]], dtype=bool)
+
+    with mock.patch.object(
+        model,
+        "infer",
+        side_effect=AssertionError("zero-token beam generation must not infer"),
+    ):
+        result = model.generate(
+            idx,
+            0,
+            strategy="beam",
+            beam_width=2,
+            attention_mask=mask,
+        )
+
+    np.testing.assert_array_equal(result, idx)
+    assert result is not idx
+
+
+def test_generate_beam_zero_tokens_still_rejects_malformed_mask():
+    model = _model()
+    idx = np.array([[1, 2, 3]])
+
+    with pytest.raises(ValueError, match="left-padded"):
+        model.generate(
+            idx,
+            0,
+            strategy="beam",
+            attention_mask=np.array([[1, 1, 0]], dtype=np.int64),
+        )
