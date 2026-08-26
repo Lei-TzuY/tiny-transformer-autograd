@@ -217,8 +217,7 @@ def test_cli_invalid_numeric_options_fail_before_checkpoint_read(
             "must-not-be-read.pkl",
             "--prompt",
             "abc",
-            flag,
-            value,
+            f"{flag}={value}",
         ],
     )
 
