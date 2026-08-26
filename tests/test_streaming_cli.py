@@ -247,7 +247,6 @@ def test_cli_invalid_numeric_options_fail_before_checkpoint_read(
     ],
 )
 def test_programmatic_cli_validation_rejects_non_integer_fields(field, value):
-    args = streaming_cli.parse_args
     values = {
         "tokens": 1,
         "temperature": 1.0,
