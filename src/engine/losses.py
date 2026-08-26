@@ -194,7 +194,7 @@ def _mask_ignored_logits(logits, targets, ignore_index):
             raise ValueError(
                 f"nll_loss targets must be in [0, {logits.shape[-1]})"
             )
-    if scored.all():
+    if scored.all() or logits.shape[-1] == 0:
         return logits, snapshot
 
     safe = np.array(logits.data, dtype=np.float64, copy=True)
