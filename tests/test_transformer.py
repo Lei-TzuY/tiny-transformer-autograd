@@ -701,14 +701,25 @@ class TestPaddedGeneration:
                 attention_mask=np.array([[1, 1], [0, 0]]),
             )
 
-    def test_beam_search_rejects_an_attention_mask(self):
+    def test_beam_search_all_real_mask_matches_unmasked_prompt(self):
         model = self._model(ARCHITECTURES[0].values[0])
         tokens = np.array([[1, 2]], dtype=np.int64)
-        with pytest.raises(ValueError, match="beam search"):
-            model.generate(
-                tokens, 2, strategy="beam",
-                attention_mask=np.ones((1, 2), dtype=np.int64),
-            )
+
+        with_mask = model.generate(
+            tokens,
+            2,
+            strategy="beam",
+            beam_width=2,
+            attention_mask=np.ones((1, 2), dtype=np.int64),
+        )
+        without_mask = model.generate(
+            tokens,
+            2,
+            strategy="beam",
+            beam_width=2,
+        )
+
+        np.testing.assert_array_equal(with_mask, without_mask)
 
     def test_sampling_respects_the_mask_for_every_row(self):
         """Sampling shares the masked forward pass, so rows stay independent."""

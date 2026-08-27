@@ -450,12 +450,19 @@ class GPT(Module):
 
         idx = self._validate_token_batch(idx)
         if strategy == "beam":
-            if attention_mask is not None:
-                raise ValueError(
-                    "beam search runs one sequence at a time and takes no "
-                    "attention_mask"
-                )
-            return self.generate_beam(idx, max_new_tokens, beam_width, temperature)
+            # Keep the import local: beam.py reuses validation/scoring helpers
+            # from this module, so importing it at module load would be circular.
+            from .beam import beam_generate
+
+            return beam_generate(
+                self,
+                idx,
+                max_new_tokens,
+                beam_width=beam_width,
+                temperature=temperature,
+                attention_mask=attention_mask,
+                use_cache=use_cache,
+            )
 
         idx = np.array(idx, dtype=np.int64, copy=True)
         mask = positions = None
