@@ -110,15 +110,20 @@ def read_safe_checkpoint(path):
             )
         except json.JSONDecodeError as exc:
             raise ValueError("safe checkpoint manifest is not valid JSON") from exc
+        except RecursionError as exc:
+            raise ValueError("safe checkpoint manifest nesting is too deep") from exc
 
         _validate_manifest(manifest)
         used_arrays = set()
-        state = _decode_node(
-            manifest["state"],
-            archive,
-            used_arrays,
-            path="state",
-        )
+        try:
+            state = _decode_node(
+                manifest["state"],
+                archive,
+                used_arrays,
+                path="state",
+            )
+        except RecursionError as exc:
+            raise ValueError("safe checkpoint manifest nesting is too deep") from exc
 
         expected_files = used_arrays | {_MANIFEST_KEY}
         actual_files = set(files)
