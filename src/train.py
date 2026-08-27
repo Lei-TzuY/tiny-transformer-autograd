@@ -61,6 +61,7 @@ _ARCH_PRESETS = {
     "gpt": {"norm": "layernorm", "pos_encoding": "learned", "ffn": "gelu"},
     "llama": {"norm": "rmsnorm", "pos_encoding": "rope", "ffn": "swiglu"},
 }
+_NUMPY_SEED_MAX = 2**32 - 1
 
 
 def clip_grad_norm_(params, max_norm=1.0):
@@ -232,6 +233,15 @@ def _normalise_label_smoothing(value, *, source="label_smoothing"):
         raise ValueError(f"{source} must be finite")
     if value < 0.0 or value > 1.0:
         raise ValueError(f"{source} must be in [0, 1]")
+    return value
+
+
+def _normalise_eval_seed(value, *, source="eval_seed"):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)):
+        raise TypeError(f"{source} must be an integer")
+    value = int(value)
+    if value < 0 or value > _NUMPY_SEED_MAX:
+        raise ValueError(f"{source} must be in [0, {_NUMPY_SEED_MAX}]")
     return value
 
 
@@ -437,6 +447,19 @@ def evaluate_batches(
     return mean_loss, float(np.exp(min(mean_loss, 700.0)))
 
 
+def _run_eval_with_seed(run_eval, eval_seed=None):
+    """Run validation under an optional fixed seed without advancing training RNG."""
+    if eval_seed is None:
+        return run_eval()
+    eval_seed = _normalise_eval_seed(eval_seed)
+    previous_rng = np.random.get_state()
+    try:
+        np.random.seed(eval_seed)
+        return run_eval()
+    finally:
+        np.random.set_state(previous_rng)
+
+
 def evaluate(model, data, context_len, batch_size, eval_iters):
     """Return mean validation loss and perplexity, or None for short data."""
     if len(data) <= context_len:
@@ -534,6 +557,15 @@ def parse_args():
     parser.add_argument("--val-frac", type=float, default=0.1, help="Validation split fraction")
     parser.add_argument("--eval-interval", type=int, default=100, help="Validation interval")
     parser.add_argument("--eval-iters", type=int, default=10, help="Validation batches")
+    parser.add_argument(
+        "--eval-seed",
+        type=int,
+        default=None,
+        help=(
+            "Optional fixed validation seed. When set, validation repeats the same "
+            "sampled batches and restores the training RNG; resume inherits it."
+        ),
+    )
     parser.add_argument("--eval-only", action="store_true", help="Evaluate and exit")
     parser.add_argument("--log-jsonl", type=str, default=None, help="Append metrics as JSONL")
     parser.add_argument("--save", type=str, default=None, help="Checkpoint output path")
@@ -582,6 +614,7 @@ def main():
     checkpoint = read_checkpoint(args.resume) if args.resume else None
     metadata = checkpoint.get("metadata", {}) if checkpoint else {}
     args.label_smoothing = _resolve_label_smoothing(args.label_smoothing, metadata)
+    args.eval_seed = _resolve_eval_seed(getattr(args, "eval_seed", None), metadata)
     if "tokenizer" in metadata:
         tokenizer = tokenizer_from_state_dict(metadata["tokenizer"])
     else:
@@ -671,10 +704,13 @@ def main():
         if args.label_smoothing > 0.0
         else ""
     )
+    eval_seed_text = (
+        f"  eval_seed={args.eval_seed}" if args.eval_seed is not None else ""
+    )
     print(
         f"[info] optimizer={optimizer.__class__.__name__}  peak_lr={scheduler.base_lr:g}  "
         f"warmup={scheduler.warmup_steps}  steps={args.iters}  "
-        f"resume_step={start_step}{accum_text}{smoothing_text}"
+        f"resume_step={start_step}{accum_text}{smoothing_text}{eval_seed_text}"
     )
 
     if args.generate_only:
@@ -698,8 +734,11 @@ def main():
         def run_eval():
             return evaluate_documents(model, val_docs, args.batch, args.eval_iters)
 
+    def evaluate_now():
+        return _run_eval_with_seed(run_eval, args.eval_seed)
+
     if args.eval_only:
-        _print_eval(run_eval)
+        _print_eval(evaluate_now)
         if not args.no_sample:
             _print_sample(model, tokenizer, corpus, args)
         return
@@ -747,7 +786,7 @@ def main():
         report = step == 1 or step % args.eval_interval == 0 or step == args.iters
         if report:
             average = float(np.mean(loss_history[-args.eval_interval:]))
-            validation = run_eval()
+            validation = evaluate_now()
             val_loss = None if validation is None else validation[0]
             val_ppl = None if validation is None else validation[1]
             val_text = (
@@ -784,7 +823,12 @@ def main():
                 optimizer,
                 scheduler,
                 step,
-                _metadata(model, tokenizer, args.label_smoothing),
+                _metadata(
+                    model,
+                    tokenizer,
+                    args.label_smoothing,
+                    args.eval_seed,
+                ),
             )
 
     if args.save:
@@ -794,7 +838,12 @@ def main():
             optimizer,
             scheduler,
             args.iters,
-            _metadata(model, tokenizer, args.label_smoothing),
+            _metadata(
+                model,
+                tokenizer,
+                args.label_smoothing,
+                args.eval_seed,
+            ),
         )
         print(f"[info] saved checkpoint: {args.save}")
 
@@ -850,17 +899,25 @@ def _prompt_array(args, tokenizer, corpus, context_len):
     return np.array([encoded[-context_len:]], dtype=np.int64)
 
 
-def _metadata(model, tokenizer, label_smoothing=0.0):
-    """Checkpoint metadata, retaining legacy shape when smoothing is disabled."""
+def _metadata(model, tokenizer, label_smoothing=0.0, eval_seed=None):
+    """Checkpoint metadata, retaining legacy shape when optional settings are off."""
     label_smoothing = _normalise_label_smoothing(
         label_smoothing, source="label_smoothing metadata"
     )
+    if eval_seed is not None:
+        eval_seed = _normalise_eval_seed(eval_seed, source="eval_seed metadata")
+
     metadata = {
         "model_config": model.config(),
         "tokenizer": tokenizer.state_dict(),
     }
+    training_config = {}
     if label_smoothing != 0.0:
-        metadata["training_config"] = {"label_smoothing": label_smoothing}
+        training_config["label_smoothing"] = label_smoothing
+    if eval_seed is not None:
+        training_config["eval_seed"] = eval_seed
+    if training_config:
+        metadata["training_config"] = training_config
     return metadata
 
 
@@ -893,6 +950,29 @@ def _resolve_label_smoothing(requested, metadata):
     if saved is not None:
         return saved
     return 0.0
+
+
+def _resolve_eval_seed(requested, metadata):
+    """Resolve RNG-isolated validation semantics across checkpoint resume."""
+    saved = None
+    if metadata:
+        training_config = metadata.get("training_config", {})
+        if training_config is None:
+            training_config = {}
+        if not isinstance(training_config, dict):
+            raise ValueError("checkpoint training_config metadata must be a mapping")
+        if "eval_seed" in training_config:
+            saved = _normalise_eval_seed(
+                training_config["eval_seed"], source="checkpoint eval_seed"
+            )
+
+    if requested is not None:
+        requested = _normalise_eval_seed(requested, source="--eval-seed")
+    if requested is not None and saved is not None and requested != saved:
+        raise ValueError(
+            f"--eval-seed {requested} conflicts with checkpoint eval_seed {saved}"
+        )
+    return saved if requested is None else requested
 
 
 def _resolve_optimizer_name(requested, checkpoint):
@@ -954,6 +1034,8 @@ def _validate_args(args):
     # Real argparse output always includes it, so validate it whenever present.
     if hasattr(args, "seed"):
         _validate_int_arg(args, "seed")
+    if hasattr(args, "eval_seed") and args.eval_seed is not None:
+        _normalise_eval_seed(args.eval_seed, source="--eval-seed")
     if args.top_k is not None:
         _validate_int_arg(args, "top_k")
 
