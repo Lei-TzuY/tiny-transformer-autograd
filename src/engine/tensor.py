@@ -51,6 +51,44 @@ def _ordered_unique_children(children):
     return tuple(unique)
 
 
+class _VersionedFlat:
+    """Proxy for ``ndarray.flat`` that preserves Tensor mutation tracking."""
+
+    __slots__ = ("_array", "_flat")
+
+    def __init__(self, array):
+        self._array = array
+        self._flat = np.ndarray.flat.__get__(array, type(array))
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._flat)
+
+    def __len__(self):
+        return len(self._flat)
+
+    def __getitem__(self, key):
+        return self._flat[key]
+
+    def __setitem__(self, key, value):
+        self._flat[key] = value
+        self._array._mark_modified()
+
+    def __array__(self, dtype=None, copy=None):
+        array = np.asarray(self._flat, dtype=dtype)
+        if copy is True:
+            return array.copy()
+        return array
+
+    def __getattr__(self, name):
+        return getattr(self._flat, name)
+
+    def __repr__(self):
+        return repr(self._flat)
+
+
 class _VersionedArray(np.ndarray):
     """ndarray view that increments its owning Tensor version on normal writes."""
 
@@ -76,6 +114,16 @@ class _VersionedArray(np.ndarray):
         owner = None if owner_ref is None else owner_ref()
         if owner is not None:
             owner._version += 1
+
+    @property
+    def flat(self):
+        """Return a flat iterator whose writes invalidate graphs using this storage."""
+        return _VersionedFlat(self)
+
+    @flat.setter
+    def flat(self, value):
+        np.ndarray.flat.__set__(self, value)
+        self._mark_modified()
 
     def __setitem__(self, key, value):
         super().__setitem__(key, value)
