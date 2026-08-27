@@ -41,17 +41,43 @@ def _valid_state_node(metadata_value):
     }
 
 
-def test_json_parser_recursion_error_is_normalized(tmp_path):
-    depth = sys.getrecursionlimit() * 2
-    manifest = (
-        b'{"safe_checkpoint_version":1,"state":'
-        + b"[" * depth
-        + b'{"type":"none"}'
-        + b"]" * depth
-        + b"}"
+def _manifest_with_metadata_node(node_bytes):
+    return (
+        b'{"safe_checkpoint_version":1,"state":{"type":"dict","items":['
+        b'["format_version",{"type":"int","value":2}],'
+        b'["model",{"type":"dict","items":[]}],'
+        b'["optimizer",{"type":"none"}],'
+        b'["optimizer_type",{"type":"none"}],'
+        b'["scheduler",{"type":"none"}],'
+        b'["rng_state",{"type":"none"}],'
+        b'["step",{"type":"int","value":0}],'
+        b'["metadata",{"type":"dict","items":[["nested",'
+        + node_bytes
+        + b']]}]]}}'
     )
-    path = tmp_path / "too-deep-json.npz"
-    _write_manifest(path, manifest)
+
+
+def test_json_parser_recursion_error_is_normalized(tmp_path, monkeypatch):
+    def fail_with_recursion(*args, **kwargs):
+        raise RecursionError("test parser recursion")
+
+    monkeypatch.setattr(safe_checkpoint.json, "loads", fail_with_recursion)
+    path = tmp_path / "parser-recursion.npz"
+    _write_manifest(path, b"{}")
+
+    with pytest.raises(ValueError, match="manifest nesting is too deep"):
+        read_safe_checkpoint(path)
+
+
+def test_deep_encoded_manifest_recursion_is_normalized(tmp_path):
+    depth = sys.getrecursionlimit() * 2
+    nested = (
+        b'{"type":"list","items":[' * depth
+        + b'{"type":"none"}'
+        + b"]}" * depth
+    )
+    path = tmp_path / "too-deep-encoded.npz"
+    _write_manifest(path, _manifest_with_metadata_node(nested))
 
     with pytest.raises(ValueError, match="manifest nesting is too deep"):
         read_safe_checkpoint(path)
@@ -65,7 +91,11 @@ def test_decoder_recursion_error_is_normalized(tmp_path, monkeypatch):
         "safe_checkpoint_version": 1,
         "state": _valid_state_node(nested),
     }
-    monkeypatch.setattr(safe_checkpoint.json, "loads", lambda *args, **kwargs: manifest)
+    monkeypatch.setattr(
+        safe_checkpoint.json,
+        "loads",
+        lambda *args, **kwargs: manifest,
+    )
 
     path = tmp_path / "too-deep-node.npz"
     _write_manifest(path, b"{}")
@@ -82,7 +112,11 @@ def test_moderately_nested_valid_metadata_still_decodes(tmp_path, monkeypatch):
         "safe_checkpoint_version": 1,
         "state": _valid_state_node(nested),
     }
-    monkeypatch.setattr(safe_checkpoint.json, "loads", lambda *args, **kwargs: manifest)
+    monkeypatch.setattr(
+        safe_checkpoint.json,
+        "loads",
+        lambda *args, **kwargs: manifest,
+    )
 
     path = tmp_path / "nested-valid.npz"
     _write_manifest(path, b"{}")
