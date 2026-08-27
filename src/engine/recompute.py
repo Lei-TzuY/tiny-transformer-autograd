@@ -115,7 +115,7 @@ def _replay_inputs(inputs):
 
 def _accumulate_input_grads(inputs, replay_inputs):
     for original, replayed_input in zip(inputs, replay_inputs):
-        if original.requires_grad:
+        if original.requires_grad and replayed_input.grad is not None:
             original._ensure_grad()
             original.grad += replayed_input.grad
 
