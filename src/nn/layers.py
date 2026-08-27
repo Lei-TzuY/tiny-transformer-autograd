@@ -137,7 +137,9 @@ class Linear(Module):
         rank = _positive_int("LoRA rank", rank)
         alpha = _real_scalar("LoRA alpha", alpha, positive=True)
         if self.lora_A is not None:
-            return
+            if rank == self.lora_A.shape[0] and alpha / rank == self.lora_scaling:
+                return
+            raise ValueError("LoRA adapters are already enabled")
         self.weight.requires_grad = False
         self.weight.grad = None
         if self.bias is not None:
