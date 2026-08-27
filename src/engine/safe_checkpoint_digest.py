@@ -47,6 +47,18 @@ def verify_safe_checkpoint_digest(path, expected):
     return hmac.compare_digest(actual, expected.lower())
 
 
+def safe_checkpoints_equal(first, second):
+    """Return whether two validated safe checkpoints contain identical semantic state.
+
+    Both inputs are read through the non-executable safe-checkpoint reader. The first
+    checkpoint is validated before the second is opened, giving deterministic error
+    precedence when both inputs are invalid.
+    """
+    first_digest = safe_checkpoint_digest(first)
+    second_digest = safe_checkpoint_digest(second)
+    return hmac.compare_digest(first_digest, second_digest)
+
+
 def _write_bytes(digest, tag, payload=b""):
     digest.update(tag)
     digest.update(struct.pack(">Q", len(payload)))
