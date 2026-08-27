@@ -22,6 +22,12 @@ def gradcheck(
     for the duration of the check, then restore the caller's exact gradient
     representation, mutation version, and existing gradient-buffer identity.
     """
+    # Reject an invalid public target before inspecting ``parameters``. Besides
+    # keeping the documented function error deterministic, this avoids consuming
+    # a caller-owned parameter iterator when no check can be performed.
+    if not callable(function):
+        raise TypeError("gradcheck function must be callable")
+
     parameter_items = _gradcheck_impl._normalise_parameters(parameters)
     normalised_parameters = [
         parameter if name is None else (name, parameter)
