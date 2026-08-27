@@ -62,7 +62,7 @@ def parse_args():
 
 
 def load_streaming_checkpoint(path, checkpoint_format="pickle"):
-    """Restore a RoPE model and tokenizer from one supported checkpoint format."""
+    """Restore a RoPE model/tokenizer without leaking RNG on rejected checkpoints."""
     if not isinstance(checkpoint_format, str):
         raise TypeError("checkpoint_format must be a string")
     readers = {
@@ -84,17 +84,23 @@ def load_streaming_checkpoint(path, checkpoint_format="pickle"):
             "and tokenizer"
         )
 
-    tokenizer = tokenizer_from_state_dict(tokenizer_state)
-    model = GPT(**model_config)
-    restore_checkpoint(state, model)
-    model.eval()
-    if model.rope is None:
-        raise ValueError(
-            "streaming generation requires a RoPE checkpoint "
-            "(pos_encoding='rope')"
-        )
-    if model.vocab_size != tokenizer.vocab_size:
-        raise ValueError("checkpoint tokenizer and model vocabulary sizes differ")
+    rng_before = np.random.get_state()
+    try:
+        tokenizer = tokenizer_from_state_dict(tokenizer_state)
+        model = GPT(**model_config)
+        if model.rope is None:
+            raise ValueError(
+                "streaming generation requires a RoPE checkpoint "
+                "(pos_encoding='rope')"
+            )
+        if model.vocab_size != tokenizer.vocab_size:
+            raise ValueError("checkpoint tokenizer and model vocabulary sizes differ")
+
+        restore_checkpoint(state, model)
+        model.eval()
+    except Exception:
+        np.random.set_state(rng_before)
+        raise
     return model, tokenizer
 
 
