@@ -14,12 +14,20 @@ dev = ["pytest>=7.0"]
 
 [project.scripts]
 tiny-train = "train:main"
+tiny-train-safe = "safe_train_cli:main"
 tiny-stream = "streaming_cli:main"
 tiny-stream-benchmark = "streaming_benchmark:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["train", "tokenizer", "benchmark", "streaming_cli", "streaming_benchmark"]
+py-modules = [
+    "train",
+    "safe_train_cli",
+    "tokenizer",
+    "benchmark",
+    "streaming_cli",
+    "streaming_benchmark",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
