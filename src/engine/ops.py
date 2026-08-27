@@ -40,14 +40,30 @@ def _exact_float64_sum(values):
         return -np.inf if exact < 0 else np.inf
 
 
+def _sum_axes(data, axis):
+    """Return already-validated reduction axes in canonical positive form."""
+    if axis is None:
+        return tuple(range(data.ndim))
+    if isinstance(axis, tuple):
+        return tuple(int(item) % data.ndim for item in axis)
+    return (int(axis) % data.ndim,)
+
+
+def _keepdims_reduction_mask(mask, data, axis, keepdims):
+    """Reshape one boolean per reduction slice for broadcasting over inputs."""
+    mask = np.asarray(mask, dtype=bool)
+    if keepdims:
+        return mask
+    axes = _sum_axes(data, axis)
+    shape = tuple(
+        1 if index in axes else size for index, size in enumerate(data.shape)
+    )
+    return mask.reshape(shape)
+
+
 def _exact_sum_data(data, axis=None, keepdims=False):
     """Exactly accumulate finite reduction slices, then round once to float64."""
-    if axis is None:
-        axes = tuple(range(data.ndim))
-    elif isinstance(axis, tuple):
-        axes = tuple(int(item) % data.ndim for item in axis)
-    else:
-        axes = (int(axis) % data.ndim,)
+    axes = _sum_axes(data, axis)
 
     kept_axes = tuple(index for index in range(data.ndim) if index not in axes)
     permutation = kept_axes + axes
@@ -71,30 +87,48 @@ def _stable_sum_data(data, axis=None, keepdims=False):
     """Preserve ordinary NumPy sums while recovering finite overflow cases."""
     data = np.asarray(data)
 
-    # Non-finite inputs retain NumPy's historical arithmetic and warning
-    # behaviour. The fallback below is only for wholly finite source values.
-    if not np.isfinite(data).all():
-        return data.sum(axis=axis, keepdims=keepdims)
-
     with np.errstate(over="ignore", invalid="ignore"):
         historical = data.sum(axis=axis, keepdims=keepdims)
     if np.isfinite(historical).all():
         return historical
 
-    # Only a historically non-finite reduction reaches this rare path. Exact
-    # rational accumulation preserves every binary64 addend across arbitrary
-    # dynamic range, then Python performs the single correctly-rounded float
-    # conversion. Safe sibling slices still return their historical NumPy bits.
-    fallback = _exact_sum_data(data, axis=axis, keepdims=keepdims)
-    recover = ~np.isfinite(historical) & np.isfinite(fallback)
-    if np.all(recover | np.isfinite(historical)):
-        return np.where(recover, fallback, historical)
+    # Recovery is decided independently for every reduction slice. A NaN/Inf
+    # sibling must not disable exact recovery for a different, wholly finite
+    # slice whose NumPy reduction overflowed only because of addition order.
+    source_finite = np.all(np.isfinite(data), axis=axis, keepdims=keepdims)
+    candidate = ~np.isfinite(historical) & source_finite
+    fallback = np.zeros_like(np.asarray(historical), dtype=np.float64)
+    recover = np.zeros_like(np.asarray(historical), dtype=bool)
+    if np.any(candidate):
+        candidate_data = np.where(
+            _keepdims_reduction_mask(candidate, data, axis, keepdims),
+            data,
+            0.0,
+        )
+        fallback = _exact_sum_data(
+            candidate_data,
+            axis=axis,
+            keepdims=keepdims,
+        )
+        recover = candidate & np.isfinite(fallback)
 
-    # At least one exact result is genuinely outside float64. Re-evaluate the
-    # historical reduction outside the local errstate so its warning semantics
-    # remain unchanged for every unrecoverable output.
-    warned = data.sum(axis=axis, keepdims=keepdims)
-    return np.where(recover, fallback, warned)
+    # Reproduce NumPy's warnings only for slices that remain unresolved. Mask
+    # recovered slices before the replay so their historical intermediate
+    # overflow is not emitted after we have successfully replaced its result.
+    unresolved = ~np.isfinite(historical) & ~recover
+    if np.any(unresolved):
+        warning_data = data
+        if np.any(recover):
+            warning_data = np.where(
+                _keepdims_reduction_mask(recover, data, axis, keepdims),
+                0.0,
+                data,
+            )
+        warning_data.sum(axis=axis, keepdims=keepdims)
+
+    if np.any(recover):
+        return np.where(recover, fallback, historical)
+    return historical
 
 
 # ---------------------------------------------------------------------------
