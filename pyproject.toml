@@ -15,6 +15,7 @@ dev = ["pytest>=7.0"]
 [project.scripts]
 tiny-train = "train:main"
 tiny-train-safe = "safe_train_cli:main"
+tiny-safe-inspect = "safe_checkpoint_inspect:main"
 tiny-stream = "streaming_cli:main"
 tiny-stream-benchmark = "streaming_benchmark:main"
 
@@ -23,6 +24,7 @@ package-dir = {"" = "src"}
 py-modules = [
     "train",
     "safe_train_cli",
+    "safe_checkpoint_inspect",
     "tokenizer",
     "benchmark",
     "streaming_cli",
