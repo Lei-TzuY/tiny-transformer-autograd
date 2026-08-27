@@ -12,16 +12,57 @@ object with at least {"step": int, "train_loss": float}.  Optional fields
 
 import argparse
 import json
+import math
 import sys
+
+
+def _record_error(path, line_number, message):
+    return ValueError(f"{path}:{line_number}: {message}")
+
+
+def _validate_record(record, path, line_number):
+    if not isinstance(record, dict):
+        raise _record_error(path, line_number, "record must be a JSON object")
+
+    missing = [key for key in ("step", "train_loss") if key not in record]
+    if missing:
+        raise _record_error(
+            path,
+            line_number,
+            f"record missing required keys: {', '.join(missing)}",
+        )
+
+    step = record["step"]
+    if isinstance(step, bool) or not isinstance(step, int):
+        raise _record_error(path, line_number, "step must be an integer")
+
+    for key in ("train_loss", "val_loss", "lr"):
+        value = record.get(key)
+        if value is None and key != "train_loss":
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _record_error(path, line_number, f"{key} must be a real number")
+        try:
+            finite = math.isfinite(float(value))
+        except OverflowError:
+            finite = False
+        if not finite:
+            raise _record_error(path, line_number, f"{key} must be finite")
 
 
 def _load(path):
     records = []
     with open(path, encoding="utf-8") as f:
-        for line in f:
+        for line_number, line in enumerate(f, start=1):
             line = line.strip()
-            if line:
-                records.append(json.loads(line))
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise _record_error(path, line_number, "invalid JSON") from exc
+            _validate_record(record, path, line_number)
+            records.append(record)
     if not records:
         sys.exit(f"No records found in {path}")
     return records
@@ -51,11 +92,14 @@ def main():
     except ImportError:
         sys.exit("matplotlib is required: pip install matplotlib")
 
-    records = _load(args.log)
+    try:
+        records = _load(args.log)
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
 
-    has_val   = any(r.get("val_loss") is not None for r in records)
-    has_lr    = (not args.no_lr) and any(r.get("lr") is not None for r in records)
-    n_panels  = 1 + has_lr
+    has_val = any(r.get("val_loss") is not None for r in records)
+    has_lr = (not args.no_lr) and any(r.get("lr") is not None for r in records)
+    n_panels = 1 + has_lr
     fig, axes = plt.subplots(n_panels, 1, figsize=(9, 3.5 * n_panels), sharex=True)
     if n_panels == 1:
         axes = [axes]
@@ -66,8 +110,13 @@ def main():
     ax.plot(list(train_steps), list(train_loss), label="train loss", linewidth=1.5)
     if has_val:
         val_steps, val_loss = _pluck(records, "val_loss")
-        ax.plot(list(val_steps), list(val_loss), label="val loss",
-                linewidth=1.5, linestyle="--")
+        ax.plot(
+            list(val_steps),
+            list(val_loss),
+            label="val loss",
+            linewidth=1.5,
+            linestyle="--",
+        )
     ax.set_ylabel("cross-entropy loss")
     ax.legend(framealpha=0.7)
     ax.grid(True, alpha=0.3)
@@ -75,8 +124,13 @@ def main():
     # ── LR panel ────────────────────────────────────────────────────────────
     if has_lr:
         lr_steps, lr_vals = _pluck(records, "lr")
-        axes[1].plot(list(lr_steps), list(lr_vals), color="tab:orange",
-                     linewidth=1.5, label="learning rate")
+        axes[1].plot(
+            list(lr_steps),
+            list(lr_vals),
+            color="tab:orange",
+            linewidth=1.5,
+            label="learning rate",
+        )
         axes[1].set_ylabel("learning rate")
         axes[1].set_xlabel("step")
         axes[1].legend(framealpha=0.7)
