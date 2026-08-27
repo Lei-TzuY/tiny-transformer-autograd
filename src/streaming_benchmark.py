@@ -52,21 +52,31 @@ def run_streaming_benchmark(args):
 
 
 def _run_streaming_benchmark(args, warmup, repeats, seed):
+    # _validate_args explicitly accepts NumPy integer scalars. Normalize them
+    # before any workload arithmetic so narrow dtypes cannot overflow (for
+    # example np.int8(32) * 4 wrapping while computing d_ff).
+    vocab = int(args.vocab)
+    ctx = int(args.ctx)
+    d_model = int(args.d)
+    heads = int(args.heads)
+    layers = int(args.layers)
+    generate = int(args.generate)
+
     model = GPT(
-        vocab_size=args.vocab,
-        context_len=args.ctx,
-        d_model=args.d,
-        num_heads=args.heads,
-        d_ff=4 * args.d,
-        num_layers=args.layers,
+        vocab_size=vocab,
+        context_len=ctx,
+        d_model=d_model,
+        num_heads=heads,
+        d_ff=4 * d_model,
+        num_layers=layers,
         **_ARCHITECTURE,
     )
     model.eval()
 
-    full_prompt = np.random.randint(0, args.vocab, size=(1, args.ctx))
-    inside_prompt_len = max(1, args.ctx // 2)
+    full_prompt = np.random.randint(0, vocab, size=(1, ctx))
+    inside_prompt_len = max(1, ctx // 2)
     inside_prompt = full_prompt[:, :inside_prompt_len]
-    inside_generate = min(args.generate, args.ctx - inside_prompt_len)
+    inside_generate = min(generate, ctx - inside_prompt_len)
 
     def inside_strict_once():
         return model.generate(
@@ -87,7 +97,7 @@ def _run_streaming_benchmark(args, warmup, repeats, seed):
     def saturated_strict_once():
         return model.generate(
             full_prompt,
-            args.generate,
+            generate,
             strategy="greedy",
             use_cache=True,
         )
@@ -96,7 +106,7 @@ def _run_streaming_benchmark(args, warmup, repeats, seed):
         return stream_generate(
             model,
             full_prompt,
-            args.generate,
+            generate,
             strategy="greedy",
         )
 
@@ -110,7 +120,7 @@ def _run_streaming_benchmark(args, warmup, repeats, seed):
     )
     if not inside_outputs_match:
         raise RuntimeError("inside-window strict and streaming generation diverged")
-    if args.layers == 1 and not saturated_outputs_match:
+    if layers == 1 and not saturated_outputs_match:
         raise RuntimeError("one-layer saturated strict and streaming generation diverged")
 
     for _ in range(warmup):
@@ -143,20 +153,20 @@ def _run_streaming_benchmark(args, warmup, repeats, seed):
         "saturated",
         saturated_strict,
         saturated_streaming,
-        args.generate,
+        generate,
     )
     summaries = {name: _summarize(values) for name, values in samples.items()}
 
     return {
         "streaming_benchmark_schema": 1,
         "arch": "llama",
-        "vocab": int(args.vocab),
-        "context_len": int(args.ctx),
-        "d_model": int(args.d),
-        "heads": int(args.heads),
-        "layers": int(args.layers),
+        "vocab": vocab,
+        "context_len": ctx,
+        "d_model": d_model,
+        "heads": heads,
+        "layers": layers,
         "batch": 1,
-        "d_ff": int(4 * args.d),
+        "d_ff": 4 * d_model,
         "parameters": model.param_count(),
         "dtype": str(model.token_emb.weight.data.dtype),
         "seed": seed,
@@ -173,9 +183,9 @@ def _run_streaming_benchmark(args, warmup, repeats, seed):
                 "outputs_match": bool(inside_outputs_match),
             },
             "saturated_window": {
-                "prompt_length": int(args.ctx),
-                "generate_tokens": int(args.generate),
-                "semantics_match": bool(args.layers == 1),
+                "prompt_length": ctx,
+                "generate_tokens": generate,
+                "semantics_match": bool(layers == 1),
                 "outputs_match": bool(saturated_outputs_match),
             },
         },
