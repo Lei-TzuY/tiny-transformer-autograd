@@ -75,7 +75,10 @@ def _finite_real(
     """Validate one finite real attention hyperparameter and return float."""
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
         raise TypeError(f"{name} must be a real number")
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be finite") from exc
     if not np.isfinite(value):
         raise ValueError(f"{name} must be finite")
     if positive and value <= 0.0:
