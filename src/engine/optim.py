@@ -11,6 +11,62 @@ from numbers import Integral, Real
 import numpy as np
 
 
+def clip_grad_norm_(parameters, max_norm):
+    """Clip active gradients to one global L2 norm, in place.
+
+    The function returns the norm *before* clipping.  Gradients with ``None``
+    are ignored.  Validation is transactional: every active gradient is
+    checked before any gradient buffer is modified.
+
+    The norm computation is scaled by the largest absolute gradient entry so
+    finite float64 gradients do not spuriously overflow while squaring.  If
+    the true global norm itself exceeds the representable float64 range, the
+    returned norm is ``inf`` but the clipping scale is still computed from the
+    finite scaled norm and remains meaningful.
+    """
+    parameters = _unique_parameters(parameters)
+    max_norm = _real_scalar("max_norm", max_norm, lower=0.0)
+
+    active = []
+    max_abs = 0.0
+    for index, parameter in enumerate(parameters):
+        gradient = parameter.grad
+        if gradient is None:
+            continue
+        _validate_gradient(parameter, gradient, index)
+        if not np.issubdtype(gradient.dtype, np.floating):
+            raise TypeError(
+                f"gradient for parameter {index} must have a floating dtype for clipping"
+            )
+        active.append(gradient)
+        if gradient.size:
+            gradient_max = float(np.max(np.abs(gradient)))
+            if gradient_max > max_abs:
+                max_abs = gradient_max
+
+    if not active or max_abs == 0.0:
+        return 0.0
+
+    scaled_square_sum = 0.0
+    for gradient in active:
+        scaled = gradient / max_abs
+        scaled_square_sum += float(np.sum(scaled * scaled, dtype=np.float64))
+
+    scaled_norm = float(np.sqrt(scaled_square_sum))
+    float64_max = np.finfo(np.float64).max
+    if scaled_norm > float64_max / max_abs:
+        total_norm = float("inf")
+    else:
+        total_norm = max_abs * scaled_norm
+
+    if total_norm > max_norm:
+        scale = (max_norm / max_abs) / scaled_norm
+        for gradient in active:
+            gradient *= scale
+
+    return total_norm
+
+
 class SGD:
     """Stochastic Gradient Descent (with optional momentum)."""
 
@@ -293,30 +349,34 @@ def _parameter_steps_from_state(saved_steps, total_step, parameter_count):
     return steps
 
 
+def _validate_gradient(parameter, gradient, index):
+    if not isinstance(gradient, np.ndarray):
+        raise TypeError(f"gradient for parameter {index} must be a NumPy array")
+    if gradient.shape != parameter.data.shape:
+        raise ValueError(
+            f"gradient shape mismatch for parameter {index}: expected "
+            f"{parameter.data.shape}, got {gradient.shape}"
+        )
+    if (
+        not np.issubdtype(gradient.dtype, np.number)
+        or np.issubdtype(gradient.dtype, np.complexfloating)
+    ):
+        raise TypeError(
+            f"gradient for parameter {index} must have a real numeric dtype"
+        )
+    if not np.isfinite(gradient).all():
+        raise ValueError(
+            f"gradient for parameter {index} must contain only finite values"
+        )
+
+
 def _validate_step_inputs(parameters):
     """Validate every active gradient before an optimizer mutates any state."""
     for index, parameter in enumerate(parameters):
         gradient = parameter.grad
         if gradient is None:
             continue
-        if not isinstance(gradient, np.ndarray):
-            raise TypeError(f"gradient for parameter {index} must be a NumPy array")
-        if gradient.shape != parameter.data.shape:
-            raise ValueError(
-                f"gradient shape mismatch for parameter {index}: expected "
-                f"{parameter.data.shape}, got {gradient.shape}"
-            )
-        if (
-            not np.issubdtype(gradient.dtype, np.number)
-            or np.issubdtype(gradient.dtype, np.complexfloating)
-        ):
-            raise TypeError(
-                f"gradient for parameter {index} must have a real numeric dtype"
-            )
-        if not np.isfinite(gradient).all():
-            raise ValueError(
-                f"gradient for parameter {index} must contain only finite values"
-            )
+        _validate_gradient(parameter, gradient, index)
         if not np.isfinite(parameter.data).all():
             raise ValueError(
                 f"parameter {index} must contain only finite values before step()"
