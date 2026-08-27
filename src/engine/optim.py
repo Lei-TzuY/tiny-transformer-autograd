@@ -27,6 +27,10 @@ class SGD:
 
     def step(self):
         _validate_step_inputs(self.parameters)
+        if self.momentum != 0.0:
+            _validate_active_buffer_shapes(
+                self.parameters, self._v, "SGD velocity"
+            )
         for p, v in zip(self.parameters, self._v):
             if p.grad is None:
                 continue
@@ -102,6 +106,12 @@ class Adam:
 
     def step(self):
         _validate_step_inputs(self.parameters)
+        _validate_active_buffer_shapes(
+            self.parameters, self._m, "Adam first moment"
+        )
+        _validate_active_buffer_shapes(
+            self.parameters, self._v, "Adam second moment"
+        )
         self.t += 1
 
         for index, (p, m, v) in enumerate(zip(self.parameters, self._m, self._v)):
@@ -175,6 +185,12 @@ class AdamW(Adam):
 
     def step(self):
         _validate_step_inputs(self.parameters)
+        _validate_active_buffer_shapes(
+            self.parameters, self._m, "AdamW first moment"
+        )
+        _validate_active_buffer_shapes(
+            self.parameters, self._v, "AdamW second moment"
+        )
         self.t += 1
 
         for index, (p, m, v) in enumerate(zip(self.parameters, self._m, self._v)):
@@ -320,6 +336,18 @@ def _validate_step_inputs(parameters):
         if not np.isfinite(parameter.data).all():
             raise ValueError(
                 f"parameter {index} must contain only finite values before step()"
+            )
+
+
+def _validate_active_buffer_shapes(parameters, buffers, label):
+    """Reject stale state shapes before an active optimizer step mutates state."""
+    for index, (parameter, buffer) in enumerate(zip(parameters, buffers)):
+        if parameter.grad is None:
+            continue
+        if buffer.shape != parameter.data.shape:
+            raise ValueError(
+                f"{label} shape mismatch for parameter {index}: expected "
+                f"{parameter.data.shape}, got {buffer.shape}"
             )
 
 
