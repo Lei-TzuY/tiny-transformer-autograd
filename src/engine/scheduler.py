@@ -28,27 +28,23 @@ class WarmupCosineScheduler:
 
     def get_lr(self, step):
         step = _integer("step", step, minimum=-1)
-        if step < 0:
-            return self.base_lr
-        if self.warmup_steps and step < self.warmup_steps:
-            return self.base_lr * (step + 1) / self.warmup_steps
-
-        decay_steps = self.total_steps - self.warmup_steps
-        if decay_steps <= 1:
-            return self.base_lr if self.warmup_steps == 0 else self.min_lr
-        progress = (step - self.warmup_steps) / (decay_steps - 1)
-        progress = min(max(progress, 0.0), 1.0)
-        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-        return self.min_lr + (self.base_lr - self.min_lr) * cosine
+        return _schedule_lr(
+            self.base_lr,
+            self.total_steps,
+            self.warmup_steps,
+            self.min_lr,
+            step,
+        )
 
     def step(self, step=None):
         if step is None:
             step = self.last_step + 1
         else:
             step = _integer("step", step, minimum=0)
+        lr = self.get_lr(step)
+        self.optimizer.lr = lr
         self.last_step = step
-        self.optimizer.lr = self.get_lr(step)
-        return self.optimizer.lr
+        return lr
 
     def state_dict(self):
         return {
@@ -117,13 +113,23 @@ def _schedule_lr(base_lr, total_steps, warmup_steps, min_lr, step):
     if step < 0:
         return base_lr
     if warmup_steps and step < warmup_steps:
-        return base_lr * (step + 1) / warmup_steps
+        # Divide the integral step counters before multiplying by a float. Both
+        # integers may be arbitrarily large, while their ratio is guaranteed to
+        # be in (0, 1] and therefore representable without integer->float overflow.
+        return base_lr * ((step + 1) / warmup_steps)
 
     decay_steps = total_steps - warmup_steps
     if decay_steps <= 1:
         return base_lr if warmup_steps == 0 else min_lr
+
+    # The schedule is already clamped after its final decay step. Check that
+    # integral boundary before forming a floating-point quotient so enormous
+    # explicit/checkpoint step counters cannot overflow while computing a value
+    # that is known to be exactly min_lr.
+    if step >= total_steps - 1:
+        return min_lr
+
     progress = (step - warmup_steps) / (decay_steps - 1)
-    progress = min(max(progress, 0.0), 1.0)
     cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
     return min_lr + (base_lr - min_lr) * cosine
 
