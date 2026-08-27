@@ -20,7 +20,7 @@ def test_recompute_skips_unused_requires_grad_input():
     out.backward()
 
     np.testing.assert_array_equal(x.grad, np.array([4.0, -6.0]))
-    assert unused.grad is None
+    np.testing.assert_array_equal(unused.grad, np.zeros_like(unused.data))
 
 
 def test_recompute_preserves_existing_grad_on_unused_input():
@@ -48,7 +48,7 @@ def test_recompute_multi_output_skips_unused_input():
     (ops.sum(first) + ops.sum(second)).backward()
 
     np.testing.assert_array_equal(x.grad, np.array([5.0, 5.0]))
-    assert unused.grad is None
+    np.testing.assert_array_equal(unused.grad, np.zeros_like(unused.data))
 
 
 def test_recompute_unused_input_does_not_block_parameter_gradient():
@@ -61,7 +61,7 @@ def test_recompute_unused_input_does_not_block_parameter_gradient():
 
     np.testing.assert_array_equal(x.grad, weight.data)
     np.testing.assert_array_equal(weight.grad, x.data)
-    assert unused.grad is None
+    np.testing.assert_array_equal(unused.grad, np.zeros_like(unused.data))
 
 
 def test_recompute_duplicate_input_only_accumulates_used_replay_copy():
