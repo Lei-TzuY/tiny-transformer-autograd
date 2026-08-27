@@ -1,6 +1,7 @@
 """Regression tests for one-way trusted-pickle checkpoint migration."""
 
 import os
+import pickle
 import sys
 
 import numpy as np
@@ -116,7 +117,7 @@ def test_invalid_source_cannot_replace_existing_destination(tmp_path):
     original = b"existing destination bytes"
     destination.write_bytes(original)
 
-    with pytest.raises(Exception):
+    with pytest.raises(pickle.UnpicklingError):
         convert_checkpoint_to_safe(source, destination)
 
     assert destination.read_bytes() == original
