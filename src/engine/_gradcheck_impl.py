@@ -275,7 +275,9 @@ def _validate_tensor_value(value, label):
 
 
 def _validate_tolerance(name, value, *, strictly_positive):
-    if not isinstance(value, (int, float, np.integer, np.floating)):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
         raise TypeError(f"gradcheck {name} must be a real number")
     value = float(value)
     if not np.isfinite(value):
