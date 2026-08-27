@@ -323,9 +323,15 @@ def _decode_node(node, archive, used_arrays, *, path):
     if kind == "float":
         _require_keys(node, {"type", "value"}, path)
         value = node["value"]
-        if type(value) not in {int, float} or not np.isfinite(value):
+        if type(value) not in {int, float}:
             raise ValueError(f"invalid finite float at {path}")
-        return float(value)
+        try:
+            value = float(value)
+        except OverflowError as exc:
+            raise ValueError(f"invalid finite float at {path}") from exc
+        if not np.isfinite(value):
+            raise ValueError(f"invalid finite float at {path}")
+        return value
     if kind == "str":
         _require_keys(node, {"type", "value"}, path)
         if not isinstance(node["value"], str):
