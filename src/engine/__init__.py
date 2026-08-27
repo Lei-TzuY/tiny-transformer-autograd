@@ -7,6 +7,7 @@ from .ops import (
     reshape, transpose, concat,
 )
 from .ops import sum as tensor_sum, mean as tensor_mean
+from .losses import log_softmax, nll_loss, label_smoothed_cross_entropy
 from .autograd import grad
 from .gradcheck import gradcheck
 from .recompute import recompute
