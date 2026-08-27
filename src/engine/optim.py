@@ -53,8 +53,8 @@ def clip_grad_norm_(parameters, max_norm):
         scaled_square_sum += float(np.sum(scaled * scaled, dtype=np.float64))
 
     scaled_norm = float(np.sqrt(scaled_square_sum))
-    float64_max = np.finfo(np.float64).max
-    if scaled_norm > float64_max / max_abs:
+    float64_max = float(np.finfo(np.float64).max)
+    if max_abs > float64_max / scaled_norm:
         total_norm = float("inf")
     else:
         total_norm = max_abs * scaled_norm
