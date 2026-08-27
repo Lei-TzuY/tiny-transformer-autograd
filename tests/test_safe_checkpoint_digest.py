@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from engine.safe_checkpoint import save_safe_checkpoint
 from engine.safe_checkpoint_digest import (
     safe_checkpoint_digest,
+    safe_checkpoints_equal,
     verify_safe_checkpoint_digest,
 )
 
@@ -150,6 +151,44 @@ def test_verify_preserves_reader_error_for_valid_expected_digest(tmp_path):
 
     with pytest.raises(ValueError, match="invalid safe checkpoint container"):
         verify_safe_checkpoint_digest(path, "0" * 64)
+
+
+def test_safe_checkpoints_equal_uses_semantic_state_not_archive_bytes(tmp_path):
+    first = tmp_path / "first.safe.npz"
+    second = tmp_path / "second.safe.npz"
+    _save(first, metadata={"name": "run", "nested": [1, (True, None)]})
+    _save(second, metadata={"nested": [1, (True, None)], "name": "run"})
+
+    assert first.read_bytes() != second.read_bytes()
+    assert safe_checkpoints_equal(first, second) is True
+
+
+def test_safe_checkpoints_equal_detects_semantic_difference(tmp_path):
+    first = tmp_path / "first.safe.npz"
+    second = tmp_path / "second.safe.npz"
+    _save(first, step=7)
+    _save(second, step=8)
+
+    assert safe_checkpoints_equal(first, second) is False
+
+
+def test_safe_checkpoints_equal_validates_first_before_opening_second(tmp_path):
+    first = tmp_path / "first.safe.npz"
+    first.write_bytes(b"not an npz")
+    second = tmp_path / "missing.safe.npz"
+
+    with pytest.raises(ValueError, match="invalid safe checkpoint container"):
+        safe_checkpoints_equal(first, second)
+
+
+def test_safe_checkpoints_equal_preserves_second_reader_error(tmp_path):
+    first = tmp_path / "first.safe.npz"
+    second = tmp_path / "second.safe.npz"
+    _save(first)
+    second.write_bytes(b"not an npz")
+
+    with pytest.raises(ValueError, match="invalid safe checkpoint container"):
+        safe_checkpoints_equal(first, second)
 
 
 def test_invalid_safe_checkpoint_keeps_reader_error_contract(tmp_path):
