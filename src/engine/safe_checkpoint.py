@@ -19,6 +19,7 @@ import numpy as np
 
 from .checkpoint import (
     CHECKPOINT_VERSION,
+    _fsync_parent_directory,
     _nonnegative_checkpoint_step,
     _validate_checkpoint_envelope,
 )
@@ -176,13 +177,16 @@ def _write_safe_state(path, state):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        temporary = None
+        _fsync_parent_directory(directory)
     except Exception:
         if descriptor is not None:
             os.close(descriptor)
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
         raise
 
 
