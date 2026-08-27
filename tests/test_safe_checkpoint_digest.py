@@ -9,7 +9,10 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from engine.safe_checkpoint import save_safe_checkpoint
-from engine.safe_checkpoint_digest import safe_checkpoint_digest
+from engine.safe_checkpoint_digest import (
+    safe_checkpoint_digest,
+    verify_safe_checkpoint_digest,
+)
 
 
 class _Model:
@@ -99,6 +102,54 @@ def test_digest_preserves_array_dtype_as_part_of_identity(tmp_path):
     save_safe_checkpoint(second, DtypeModel(np.int64))
 
     assert safe_checkpoint_digest(first) != safe_checkpoint_digest(second)
+
+
+def test_verify_accepts_exact_and_uppercase_expected_digest(tmp_path):
+    path = tmp_path / "checkpoint.safe.npz"
+    _save(path)
+    expected = safe_checkpoint_digest(path)
+
+    assert verify_safe_checkpoint_digest(path, expected) is True
+    assert verify_safe_checkpoint_digest(path, expected.upper()) is True
+
+
+def test_verify_returns_false_for_well_formed_mismatch(tmp_path):
+    path = tmp_path / "checkpoint.safe.npz"
+    _save(path)
+    expected = safe_checkpoint_digest(path)
+    replacement = "0" if expected[-1] != "0" else "1"
+
+    assert verify_safe_checkpoint_digest(path, expected[:-1] + replacement) is False
+
+
+@pytest.mark.parametrize("expected", [None, b"0" * 64, 123])
+def test_verify_rejects_non_string_expected_digest_before_file_io(tmp_path, expected):
+    missing = tmp_path / "missing.safe.npz"
+
+    with pytest.raises(TypeError, match="expected safe checkpoint digest must be a string"):
+        verify_safe_checkpoint_digest(missing, expected)
+
+
+@pytest.mark.parametrize(
+    "expected",
+    ["", "0" * 63, "0" * 65, "g" * 64, ("0" * 63) + "!"],
+)
+def test_verify_rejects_malformed_expected_digest_before_file_io(tmp_path, expected):
+    missing = tmp_path / "missing.safe.npz"
+
+    with pytest.raises(
+        ValueError,
+        match="expected safe checkpoint digest must be 64 hexadecimal characters",
+    ):
+        verify_safe_checkpoint_digest(missing, expected)
+
+
+def test_verify_preserves_reader_error_for_valid_expected_digest(tmp_path):
+    path = tmp_path / "broken.safe.npz"
+    path.write_bytes(b"not an npz")
+
+    with pytest.raises(ValueError, match="invalid safe checkpoint container"):
+        verify_safe_checkpoint_digest(path, "0" * 64)
 
 
 def test_invalid_safe_checkpoint_keeps_reader_error_contract(tmp_path):
