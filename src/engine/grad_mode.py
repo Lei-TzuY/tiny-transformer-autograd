@@ -84,7 +84,7 @@ def _is_deferred_result(value):
     """Return True for call results whose body continues after this call."""
     return (
         inspect.isgenerator(value)
-        or inspect.iscoroutine(value)
+        or inspect.isawaitable(value)
         or inspect.isasyncgen(value)
     )
 
@@ -146,10 +146,10 @@ class set_grad_enabled:
             with set_grad_enabled(mode):
                 result = function(*args, **kwargs)
                 # A synchronous forwarding wrapper can hide a generator,
-                # coroutine, or async-generator function from decoration-time
-                # introspection. Reject the deferred object before leaving this
-                # mode scope so its body cannot later run under the caller's
-                # restored grad mode.
+                # coroutine, async-generator, or custom awaitable from
+                # decoration-time introspection. Reject the deferred object
+                # before leaving this mode scope so its body cannot later run
+                # under the caller's restored grad mode.
                 if _is_deferred_result(result):
                     _close_deferred_result(result)
                     raise TypeError(
