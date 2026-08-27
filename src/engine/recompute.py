@@ -152,6 +152,8 @@ def recompute(function, *inputs):
         ``no_grad()`` if you want no graph at all — inside it ``recompute`` is a
         plain call.
     """
+    if not callable(function):
+        raise TypeError("recompute function must be callable")
     if not inputs:
         raise ValueError("recompute requires at least one Tensor input")
     for value in inputs:
@@ -159,8 +161,12 @@ def recompute(function, *inputs):
             raise TypeError("recompute inputs must be Tensors")
 
     if not is_grad_enabled():
-        # Nothing will be differentiated, so there is nothing to trade.
-        return function(*inputs)
+        # Nothing will be differentiated, so there is nothing to trade. Keep
+        # the public output contract identical to the recording path while
+        # returning the function's original Tensor objects unchanged.
+        output = function(*inputs)
+        _normalize_outputs(output)
+        return output
 
     forward_rng_state = np.random.get_state()
     with no_grad():
