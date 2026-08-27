@@ -852,15 +852,19 @@ def concat(tensors, axis=0) -> Tensor:
         _op="concat",
     )
 
-    # Precompute split sizes
-    sizes = [t.data.shape[axis] for t in tensors]
+    # ``axis=None`` follows NumPy by flattening every input before concatenation.
+    # Split the 1-D upstream gradient by element count, then restore each
+    # original input shape before accumulation.
+    flatten = axis is None
+    sizes = [t.data.size if flatten else t.data.shape[axis] for t in tensors]
 
     def _backward():
-        parts = np.split(out.grad, np.cumsum(sizes[:-1]), axis=axis)
+        split_axis = 0 if flatten else axis
+        parts = np.split(out.grad, np.cumsum(sizes[:-1]), axis=split_axis)
         for t, p in zip(tensors, parts):
             if t.requires_grad:
                 t._ensure_grad()
-                t.grad += p
+                t.grad += p.reshape(t.shape) if flatten else p
 
     out._backward = _backward
     return out
