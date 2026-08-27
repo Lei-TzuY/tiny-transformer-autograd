@@ -9,6 +9,7 @@ from .ops import (
 from .ops import sum as tensor_sum, mean as tensor_mean
 from .autograd import grad, jacobian, jvp
 from .gradcheck import gradcheck
+from .jvpcheck import jvpcheck
 from .recompute import recompute
 from .optim import SGD, Adam, AdamW
 from .scheduler import WarmupCosineScheduler
