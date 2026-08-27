@@ -43,6 +43,7 @@ Nothing becomes NaN, but that position's output is meaningless by
 construction: exclude it from the loss instead of trusting it.
 """
 
+from fractions import Fraction
 from numbers import Integral, Real
 
 import numpy as np
@@ -224,6 +225,57 @@ def _select_score_paths(raw_scaled: Tensor, fallback: Tensor, unsafe) -> Tensor:
     return out
 
 
+def _replace_score_values(path: Tensor, values, recover) -> Tensor:
+    """Replace recovered score values while preserving the existing VJP path."""
+    recover = np.array(recover, dtype=bool, copy=True)
+    out = Tensor(
+        np.where(recover, values, path.data),
+        requires_grad=path.requires_grad,
+        _children=(path,),
+        _op="attention_score_exact_recover",
+    )
+
+    def _backward():
+        if path.requires_grad:
+            path._ensure_grad()
+            path.grad += out.grad
+
+    out._backward = _backward
+    return out
+
+
+def _exact_scaled_dot_product_data(query, key_t, scale, candidates):
+    """Exactly evaluate candidate finite-input dots and round once to float64."""
+    query = np.asarray(query)
+    key_t = np.asarray(key_t)
+    candidates = np.asarray(candidates, dtype=bool)
+    batch_shape = np.broadcast_shapes(query.shape[:-2], key_t.shape[:-2])
+    query = np.broadcast_to(query, batch_shape + query.shape[-2:])
+    key_t = np.broadcast_to(key_t, batch_shape + key_t.shape[-2:])
+    values = np.zeros(candidates.shape, dtype=np.float64)
+    recover = np.zeros(candidates.shape, dtype=bool)
+    exact_scale = Fraction.from_float(float(scale))
+
+    for position_array in np.argwhere(candidates):
+        position = tuple(int(index) for index in position_array)
+        batch = position[:-2]
+        row, column = position[-2:]
+        exact = Fraction()
+        for inner in range(query.shape[-1]):
+            exact += Fraction.from_float(
+                float(query[batch + (row, inner)])
+            ) * Fraction.from_float(float(key_t[batch + (inner, column)]))
+        exact *= exact_scale
+        try:
+            rounded = float(exact)
+        except OverflowError:
+            rounded = -np.inf if exact < 0 else np.inf
+        if np.isfinite(rounded):
+            values[position] = rounded
+            recover[position] = True
+    return values, recover
+
+
 def _scaled_dot_product_scores(query: Tensor, key_t: Tensor, scale: float) -> Tensor:
     """Apply attention scaling early only where a finite-input raw dot overflows."""
     if not np.isfinite(query.data).all() or not np.isfinite(key_t.data).all():
@@ -242,6 +294,17 @@ def _scaled_dot_product_scores(query: Tensor, key_t: Tensor, scale: float) -> Te
     # every safe score keeps the historical raw-dot-then-scale path exactly.
     with np.errstate(over="ignore", invalid="ignore"):
         fallback = ops.matmul(query * scale, key_t)
+
+    # Even early scaling can still overflow individual products before opposite
+    # signs cancel. Exact rational accumulation is reserved for those remaining
+    # non-finite scores; the identity wrapper keeps the established fallback VJP.
+    unresolved = unsafe & ~np.isfinite(fallback.data)
+    if np.any(unresolved):
+        exact, recover = _exact_scaled_dot_product_data(
+            query.data, key_t.data, scale, unresolved
+        )
+        if np.any(recover):
+            fallback = _replace_score_values(fallback, exact, recover)
     return _select_score_paths(raw_scaled, fallback, unsafe)
 
 
@@ -259,6 +322,12 @@ def _scaled_dot_product_scores_np(query, key_t, scale: float):
 
     with np.errstate(over="ignore", invalid="ignore"):
         fallback = (query * scale) @ key_t
+    unresolved = unsafe & ~np.isfinite(fallback)
+    if np.any(unresolved):
+        exact, recover = _exact_scaled_dot_product_data(
+            query, key_t, scale, unresolved
+        )
+        fallback = np.where(recover, exact, fallback)
     return np.where(unsafe, fallback, raw_scaled)
 
 
