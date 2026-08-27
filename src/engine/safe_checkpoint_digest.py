@@ -7,11 +7,15 @@ length framing so equivalent safe checkpoints receive the same SHA-256 digest.
 """
 
 import hashlib
+import hmac
 import struct
 
 import numpy as np
 
 from .safe_checkpoint import read_safe_checkpoint
+
+
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
 def safe_checkpoint_digest(path):
@@ -25,6 +29,22 @@ def safe_checkpoint_digest(path):
     digest = hashlib.sha256()
     _hash_value(digest, state)
     return digest.hexdigest()
+
+
+def verify_safe_checkpoint_digest(path, expected):
+    """Return whether a safe checkpoint matches an expected semantic SHA-256 digest.
+
+    ``expected`` must be a 64-character hexadecimal string. Validation happens
+    before the checkpoint is opened so a malformed expected digest cannot trigger
+    file I/O. Uppercase hexadecimal is accepted and normalized for comparison.
+    """
+    if not isinstance(expected, str):
+        raise TypeError("expected safe checkpoint digest must be a string")
+    if len(expected) != 64 or any(character not in _HEX_DIGITS for character in expected):
+        raise ValueError("expected safe checkpoint digest must be 64 hexadecimal characters")
+
+    actual = safe_checkpoint_digest(path)
+    return hmac.compare_digest(actual, expected.lower())
 
 
 def _write_bytes(digest, tag, payload=b""):
