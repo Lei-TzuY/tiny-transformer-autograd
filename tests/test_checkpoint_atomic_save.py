@@ -1,6 +1,7 @@
 """Crash-safety regression tests for trusted pickle checkpoint saves."""
 
 import os
+import stat
 import sys
 
 import numpy as np
@@ -33,17 +34,18 @@ def _temporary_files(path):
     return list(path.parent.glob(f".{path.name}.*.tmp"))
 
 
-def test_success_fsyncs_temp_before_atomic_replace(tmp_path, monkeypatch):
+def test_success_fsyncs_temp_before_replace_and_parent_after(tmp_path, monkeypatch):
     path = tmp_path / "model.ckpt"
     events = []
     real_replace = checkpoint.os.replace
 
     def fake_fsync(descriptor):
-        events.append(("fsync", descriptor))
+        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+        events.append(("fsync", kind))
 
     def checked_replace(source, destination):
         events.append(("replace", source))
-        assert any(kind == "fsync" for kind, _ in events)
+        assert ("fsync", "file") in events
         return real_replace(source, destination)
 
     monkeypatch.setattr(checkpoint.os, "fsync", fake_fsync)
@@ -51,7 +53,10 @@ def test_success_fsyncs_temp_before_atomic_replace(tmp_path, monkeypatch):
 
     checkpoint.save_checkpoint(path, _StateModel(3.5), step=4)
 
-    assert [kind for kind, _ in events] == ["fsync", "replace"]
+    expected = [("fsync", "file"), ("replace", events[1][1])]
+    if os.name != "nt":
+        expected.append(("fsync", "directory"))
+    assert events == expected
     assert not _temporary_files(path)
     state = checkpoint.read_checkpoint(path)
     assert state["step"] == 4
