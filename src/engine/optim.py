@@ -10,6 +10,8 @@ from numbers import Integral, Real
 
 import numpy as np
 
+from .tensor import Tensor
+
 
 class SGD:
     """Stochastic Gradient Descent (with optional momentum)."""
@@ -210,10 +212,16 @@ class AdamW(Adam):
 
 
 def _unique_parameters(parameters):
-    """Materialize parameters and reject duplicate Tensor references."""
-    materialized = list(parameters)
+    """Materialize and validate one optimizer parameter collection."""
+    try:
+        materialized = list(parameters)
+    except TypeError as exc:
+        raise TypeError("optimizer parameters must be an iterable of Tensors") from exc
+
     seen = set()
     for index, parameter in enumerate(materialized):
+        if not isinstance(parameter, Tensor):
+            raise TypeError(f"optimizer parameter {index} must be a Tensor")
         marker = id(parameter)
         if marker in seen:
             raise ValueError(
