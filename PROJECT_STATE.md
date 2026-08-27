@@ -1,254 +1,239 @@
 # Project State
 
-Handoff snapshot for `Tiny Transformer & Autograd`. Written so a session with no prior
-context can resume without re-deriving anything.
+Operational handoff for `tiny-transformer-autograd`. This file is intentionally concise:
+it records the current stable baseline, load-bearing invariants, and active review map so a
+new session can resume without re-deriving repository history.
 
-**Last updated:** 2026-08-03 · **Branch:** `checkpoint/rounds-1-7` · **Suite:** 380 passing (`-W error`)
+**Snapshot date:** 2026-08-28
+**Current `main`:** `a011903671efb97db0f73b50e081f4d45f5eab11`
+**Main tree:** `e97cda08c06fd0ce4ba288a6e03f6fa42dfb7286`
+**Latest main CI:** GitHub Actions run `33069878874`, green on Python 3.10–3.13.
+Python 3.10 (CPython 3.10.21): **1399 passed, 22 subtests passed**.
 
-Companions: `CLAUDE.md` (working rules and invariants), `task_plan.md` (phases,
-decisions, acceptance criteria), `findings.md` (per-round findings), `progress.md`
-(verification log, test results, error log).
+> **Live GitHub state is authoritative.** This document is a handoff snapshot, not a lock.
+> Before coding, always refresh `main`, open PRs, exact PR heads, compare ahead/behind, and
+> Actions status. Do not reimplement work merely because it is absent from `main` if an open
+> green PR already owns the same behavior or path.
 
----
-
-## 1. What exists
-
-Pure-NumPy reverse-mode autograd engine plus a decoder-only Transformer that trains and
-generates text. NumPy is the only runtime dependency. Python ≥ 3.10; CI runs 3.10/3.11/3.12
-on Linux, development is on Windows.
-
-| Path | Lines | Responsibility |
-|------|-------|----------------|
-| `src/engine/tensor.py` | 332 | `Tensor`: data + grad, `_children`, `_backward` closures, iterative topological `backward()`, operators, `detach`. Recording is gated here. |
-| `src/engine/ops.py` | 593 | 18 differentiable ops: add/mul/div/matmul, relu/sigmoid/exp/log/tanh/gelu/silu, softmax, cross_entropy, sum/mean, reshape/transpose/concat. |
-| `src/engine/grad_mode.py` | 127 | `no_grad` / `enable_grad` / `set_grad_enabled` / `is_grad_enabled`. Thread-local, reentrant, usable as synchronous decorators. |
-| `src/engine/recompute.py` | 112 | `recompute(function, *inputs)`: gradient checkpointing (activation recomputation). |
-| `src/engine/optim.py` | 238 | `SGD` (momentum, weight decay), `Adam`, `AdamW`, with `state_dict`/`load_state_dict`. |
-| `src/engine/scheduler.py` | 72 | `WarmupCosineScheduler`. |
-| `src/engine/checkpoint.py` | 78 | `save_checkpoint` / `read_checkpoint` / `restore_checkpoint`, format version 2, transactional restore. |
-| `src/nn/module.py` | 180 | `Module` base: `modules`, `parameters`, `named_parameters`, `state_dict`, `train`/`eval`, `param_count`. |
-| `src/nn/layers.py` | 235 | `Linear` (+LoRA), `Embedding`, `LayerNorm`, `RMSNorm`, `Dropout`, each with a NumPy `infer`. |
-| `src/nn/attention.py` | 497 | `SelfAttention`, `MultiHeadAttention`, `RotaryEmbedding`, shared graph/NumPy mask/cache validation, zero-row softmax. |
-| `src/nn/transformer.py` | 694 | `FeedForward`, `SwiGLU`, `TransformerBlock`, `GPT` (forward / infer / generate / generate_beam / LoRA / config). |
-| `src/train.py` | 633 | Training CLI: corpora, batching, loop, exception-safe evaluation, checkpointing, sampling, arg validation. |
-| `src/tokenizer.py` | 123 | `CharTokenizer`, `BPETokenizer`, build/restore helpers. |
-| `src/benchmark.py` | 122 | Throughput/timing harness. |
-| `plot_loss.py` | 99 | JSONL log plotting. Source-checkout only, not packaged. |
-
-**Model options.** `GPT(norm="layernorm"|"rmsnorm", pos_encoding="learned"|"rope",
-ffn="gelu"|"swiglu")` — defaults give GPT-2 style, the alternatives together give
-Llama style. Weight tying between the embedding table and the LM head is always on.
-`lora_rank`/`lora_alpha` freeze the backbone and train low-rank adapters.
-`grad_checkpoint` is a runtime toggle, deliberately not in `config()`.
+Companions:
+- `CLAUDE.md` — coding rules and semantic invariants.
+- `task_plan.md`, `findings.md`, `progress.md` — historical planning and investigation logs;
+  useful context, but not live branch/PR authority.
 
 ---
 
-## 2. Completed work
+## 1. Stable baseline on main
 
-Round 1 predates the current planning artifacts; rounds 2–6 are recorded phase by
-phase in `task_plan.md` and `progress.md`.
+The repository is a pure-NumPy educational deep-learning stack with reverse-mode autograd,
+a decoder-only Transformer, training/generation CLIs, streaming generation, checkpointing,
+and numerical regression coverage. NumPy is the runtime dependency; CI covers Python
+3.10, 3.11, 3.12, and 3.13.
 
-**Round 1 — correctness and delivery hardening.**
-Fixed `matmul` backward for same-rank broadcasting and all 1-D NumPy cases; generalized
-and stabilized `cross_entropy` (extreme logits returned ~27.63 instead of ~2000);
-made repeated `backward()` on a chained graph accumulate correctly (was 96 instead of
-64); replaced recursive topological sort with an iterative one (`RecursionError` at
-~1,100 ops); implemented real division (was `exp(-log(b))`, NaN for negative divisors);
-fixed stable sigmoid warnings, negative-axis transpose, generator-exhausting `concat`.
-Made `forward(mask=None)` causal to match `infer()` (measured leak: 0.51 max error).
-Made causal masks true `-inf`. Added optimizer-class and NumPy-RNG state to checkpoints
-with legacy compatibility, and made restore transactional. Repaired PEP 517 packaging
-(`setuptools.build_meta`) so the wheel builds and `tiny-train` runs. Added public-API
-validation across constructors, token inputs, RoPE bounds, and generation arguments.
+### Autograd / Tensor
 
-**Round 2 — inference mode and fully-masked rows.**
-`no_grad`/`enable_grad`/`set_grad_enabled`, gated once inside `Tensor.__init__` so all
-18 ops are covered without per-op edits. Op results under `no_grad` lose parents,
-gradient buffer, and backward closure; explicit leaves stay trainable. `backward()` on a
-suppressed result raises from creation provenance, even after the disabled scope exits.
-Defined an all-`-inf` softmax row as zero weights in both the autograd and NumPy paths.
-Added custom-mask validation (broadcast shape, NaN, `+inf`). `cross_entropy` rejects a
-scored row with no finite logit.
+- `Tensor` records graph parents and backward closures; graph traversal is iterative.
+- `no_grad()` suppresses operation-result recording while explicit leaves remain trainable.
+- Functional mutation/version checks reject stale graphs after supported in-place storage
+  mutations.
+- Core ops include arithmetic, matmul, activations, softmax, cross entropy, reductions,
+  reshape/transpose, and concat.
+- Numerically sensitive reductions and normalization paths contain explicit overflow and
+  non-finite handling rather than relying on warning-prone incidental NumPy behavior.
+- Functional `gradcheck()` exists on main; dense Jacobian/JVP/JVP-check APIs are still under
+  review in the #83–#85 stack.
 
-**Round 3 — variable-length batches.**
-`cross_entropy(ignore_index=…)` with scored-count divisor and exact zero gradient at
-ignored positions; `GPT.forward(idx, attention_mask=…)` combining a `(batch, time)`
-keep mask with the causal mask. Right padding required. Proved a padded batch is exactly
-equivalent to unpadded runs.
+### Model / attention / generation
 
-**Round 4 — batched generation from ragged prompts.**
-Per-element RoPE positions (`rotate_np(positions=…)`), additive key bias threaded
-through block/attention inference, `GPT.infer(attention_mask=…, position_ids=…)` with the
-mask covering cached *and* current keys, and `generate(attention_mask=…)` deriving
-per-row positions as `cumsum(mask) - 1`. Left padding required and enforced; a masked run
-had to fit inside `context_len` (lifted in round 8); beam search rejects a mask.
+- GPT-style and Llama-style configurations are supported: LayerNorm/RMSNorm,
+  learned positions/RoPE, GELU/SwiGLU, tied token embedding/LM-head weights, LoRA,
+  dropout, and gradient checkpointing.
+- Attention supports graph and NumPy inference paths, causal masks, custom masks,
+  batched masks, KV caches, and fully masked attention rows with zero weights.
+- `GPT.forward(mask=None)` is causal like inference.
+- Training masks are right-padded; generation masks are left-padded.
+- Masked generation derives per-row positions from the mask and safely renumbers positions
+  after sliding-window crops.
+- Generation supports sample, greedy, and beam strategies, with cached and uncached paths.
+- RoPE streaming generation with bounded shifted KV-cache semantics is present on main;
+  incremental iterator/stop-token/live-output extensions are the open #92–#94 stack.
 
-**Round 5 — gradient checkpointing.**
-`engine/recompute.py`: unrecorded forward under `no_grad()`, recorded replay under
-`enable_grad()` inside the backward closure, replaying from detached input copies and
-restoring the NumPy RNG state. Exposed as `GPT(grad_checkpoint=…)` per block and
-`--grad-checkpoint`.
+### Training / evaluation
 
-**Round 6 — document corpora in the training CLI.**
-`--data-format text|lines|jsonl` and `--jsonl-field`; `load_documents`,
-`encode_documents`, `get_document_batch`, `batch_loss`, `evaluate_batches`,
-`evaluate_documents`. Both corpus kinds flow through one `(tokens, targets, mask)`
-sampler, so the stream path is byte-identical. Tokenizer is built from document text,
-not the raw file.
+- `tiny-train` supports text, line-document, and JSONL corpora.
+- Padded document training uses attention masks plus ignored targets and scored-token
+  weighting; padding does not dilute the loss or gradients.
+- Evaluation restores model mode transactionally and uses NumPy inference where applicable.
+- Gradient accumulation, clipping, Adam/AdamW, warmup+cosine scheduling, LoRA, checkpoint
+  resume, JSONL metrics, and sampling are supported.
+- Default training arithmetic/RNG order is a compatibility surface: opt-in features must not
+  silently change the historical default trajectory.
 
-**Round 8 — sliding-window decoding for masked runs.**
-Removed the last hard refusal in the generation API: `generate(attention_mask=…)` no
-longer requires prompt + `max_new_tokens` to fit in `context_len`. A masked run now
-slides the same window an unmasked run does and renumbers the surviving real tokens
-from 0 inside each new window (`_left_padded_positions` applied to the *cropped* mask),
-so learned positions and RoPE both stay in range. The cached-step mask is sliced to the
-cache length so it still covers exactly the cached plus current keys once the window
-start moves. A prompt already longer than `context_len` is now accepted as well.
+### Checkpoints / operational tooling
 
----
+- Trusted historical pickle checkpoints remain supported by `engine.checkpoint`.
+- A non-executable NPZ/JSON safe checkpoint format is supported by `engine.safe_checkpoint`;
+  safe reads use `allow_pickle=False` internally.
+- `tiny-train-safe` routes training through the safe checkpoint format.
+- Checkpoint restore validates envelopes and is transactional with respect to caller-owned
+  model/optimizer/scheduler/RNG state.
+- Safe checkpoint inspection, trusted-pickle conversion, semantic digesting, and additional
+  hardening are currently under review (#106, #107, #110, #117, #124).
 
-**Round 9 — inference lifecycle and mask-contract hardening.**
-`Tensor` now remembers results detached by `no_grad`, so delayed `backward()` misuse
-raises after the scope exits; non-gradient results discard parents, and reusable guards
-keep restoration stacks per thread. Lazy async/generator decorators fail explicitly.
-Standalone attention inference now shares forward's mask validation, and 3-D multi-head
-masks are unambiguously batch-major. Training enforces right padding, evaluation restores
-mode in `finally`, and `GPT.infer` validates every caller-provided KV-cache layer before
-using its past length.
+### Benchmarks / CI
+
+Every normal Actions matrix job performs:
+1. install `.[dev]`,
+2. installed-package/import smoke,
+3. CLI help smokes,
+4. general benchmark JSON smoke,
+5. streaming benchmark JSON smoke,
+6. `python -m pytest tests -q -W error`,
+7. `python -m compileall -q src tests`.
+
+The exact current-main Python 3.10 baseline is **1399 passed + 22 subtests**. Open feature
+branches naturally report larger counts because they add focused regressions.
 
 ---
 
-## 3. Design decisions worth knowing
+## 2. Load-bearing invariants
 
-| Decision | Why |
-|----------|-----|
-| Remember no-grad creation provenance | The mode at backward time cannot say how a result was created; provenance makes delayed misuse loud without changing explicit constant no-ops. |
-| Normalize 3-D multi-head masks as batch-major | `(B,T,T)` is the documented shape; right-aligned NumPy broadcasting otherwise mistakes batch for heads when `B == H`. |
-| Validate caches before deriving mask shapes | Every layer must agree on one past length before cached-key masks and positions can be checked coherently. |
-| Gate recording in `Tensor.__init__` | Every op constructs its result there, so one thread-local check covers all 18 primitives with no duplicated logic. |
-| Suppress op results, never explicit leaves | Matches PyTorch; avoids silently producing an untrainable model built inside `no_grad()`. |
-| Drop the backward closure on a node that cannot hold a gradient | Releases captured intermediates (the real memory win) and removes a latent crash where a gradient-less node was asked to split a `None` gradient. |
-| Fully masked row → zero weights | Standard masked-attention convention; keeps forward and backward finite. Load-bearing in rounds 3 and 4. |
-| `cross_entropy` stays strict about all-`-inf` rows | Zero weights are meaningful for attention; a loss over an impossible distribution is not, and a silent NaN corrupts every weight. |
-| Mask and `ignore_index` ship together | Only masking leaves padded targets scored; only `ignore_index` leaves real tokens attending to padding. |
-| Divide by the scored count, not the total | Otherwise loss shrinks as padding grows and gradient magnitude tracks batch shape rather than content. |
-| Right-pad training, left-pad generation | Training numbers position *i* at slot *i*; decoding reads slot −1, so the newest token must sit there. One padding could not serve both. |
-| `infer`'s mask covers cached keys | Padded prompt slots stay in the KV cache for the whole run; a per-step mask would unhide them right after the prefill. |
-| Derive `position_ids` inside `generate` | `cumsum(mask) - 1` is the only correct answer for a left-padded row; deriving it removes a class of caller mistakes. |
-| Crop the shared array, not per row | Left padding puts every row's newest token at slot −1, so one crop of the last `context_len` columns is simultaneously right for all rows: a row still inside the window loses padding, a row past it loses its oldest tokens. |
-| Renumber from 0 after a crop | Absolute numbering carried across a crop runs past `context_len`. Renumbering is also what the unmasked path already does implicitly by re-prefilling with default positions, so the two paths agree. |
-| Recompute window positions instead of tracking an offset | An offset must be right at every crop *and* every cached step; `cumsum` over the cropped mask is derived from the state that actually decides the answer and cannot drift out of sync. |
-| Module named `recompute`, not `checkpoint` | `engine/checkpoint.py` already means on-disk training state. |
-| Replay from detached copies | `Tensor.backward` resets the gradient of any node with parents, so replaying into the outer graph discards a residual's accumulated gradient — this fires on the very first block. |
-| Capture and replay the RNG state | Otherwise the replay draws fresh dropout masks and differentiates a different function; restoring afterwards keeps the training trajectory bit-identical. |
-| `grad_checkpoint` out of `config()` | It changes memory and time, never weights or outputs; persisting it would pin a machine's memory budget to a model file. |
-| One sampler interface for both corpora | The stream path passes `mask=None` and consumes the RNG identically, so training and evaluation have one code path. |
-| Split documents before building the tokenizer | Training on raw JSONL put `{`, `"`, `:` in the vocabulary — an observed char vocab of 26 instead of 19. |
+These rules are compatibility constraints, not suggestions:
 
----
-
-## 4. Test baseline
-
-`python -m pytest -q -W error` → **380 passed in ~1.3s**.
-
-| Module | Tests | Covers |
-|--------|-------|--------|
-| `tests/test_autograd.py` | 63 | Ops, VJPs with non-uniform cotangents, matmul broadcasting/1-D cases, stable CE, repeated backward, deep graphs, division, transpose/concat edge cases. |
-| `tests/test_transformer.py` | 98 | Attention parity, causality, graph/inference masks and caches, RoPE, generation, ragged batches, batched masked generation, sliding-window masked decoding. |
-| `tests/test_validation.py` | 60 | Public-API validation across constructors, tokens, padding masks, KV caches, RoPE, generation, and norms. |
-| `tests/test_modern.py` | 37 | Llama-style stack: RMSNorm, RoPE, SwiGLU, AdamW, gradient accumulation, LoRA. |
-| `tests/test_training.py` | 28 | Training loop, checkpoint save/resume/transactionality, optimizer identity, RNG state, CLI. |
-| `tests/test_data.py` | 31 | Document corpora: parsing, encoding, batch layout, loss/gradient equivalence, exception-safe evaluation, 4 in-process CLI runs. |
-| `tests/test_grad_mode.py` | 29 | Suppression provenance, parent pruning, leaf semantics, nesting/exceptions/decorators/thread-locality, backward errors. |
-| `tests/test_recompute.py` | 19 | Plain-call equivalence, residual-consumer safety, RNG neutrality, dropout replay, model-level trajectory equality, LoRA. |
-| `tests/test_features.py` | 15 | Tokenizers, schedulers, sampling filters, misc CLI features. |
-
-**Canonical CLI regression anchor** (verified 2026-07-31, reproducible run to run, and
-identical with `--grad-checkpoint`):
-
-```bash
-python src/train.py --iters 3 --eval-interval 1 --eval-iters 2 \
-  --ctx 32 --d 64 --heads 4 --layers 2 --batch 8 --seed 7 --no-sample
-```
-
-```text
-step 1/3  train_loss=3.6106  val_loss=3.5996  val_ppl=36.58  lr=0.0001  gnorm=2.677
-step 2/3  train_loss=3.5812  val_loss=3.5620  val_ppl=35.23  lr=0.0002  gnorm=2.654
-step 3/3  train_loss=3.5234  val_loss=3.4988  val_ppl=33.07  lr=0.0003  gnorm=2.547
-```
-
-Any refactor of the default token-stream path must reproduce these numbers exactly.
-
-**Measured tradeoffs** (recorded when the features landed):
-
-| Feature | Measurement |
-|---------|-------------|
-| `no_grad()` evaluation | 4 layers, `d_model=128`, `ctx=64`, batch 8, 10 passes: 1.102 s recorded → 0.586 s (1.88×). Live tensors after a forward pass: 346 → 65 (the model's own parameters). |
-| Gradient checkpointing | 6 layers, `d_model=128`, `ctx=64`, batch 8: retained activations 320.9 MiB (413 tensors) → 14.2 MiB (29 tensors), 22.7× less; 227 ms/step → 342 ms/step, 1.51× slower. |
-| Padded vs. unpadded equivalence | Logit difference exactly `0.0`; loss and every parameter gradient within 1e-12–1e-14. |
-| Decoding past the window (round 8) | 4 layers, `d_model=128`, `ctx=64`, 3 ragged rows: 1.10 ms/token inside the window → 11.21 ms/token once it fills, 10.2× slower. The cache is dropped at every crop, so each step re-prefills 64 positions. This is the pre-existing unmasked behaviour, now reachable with a mask; see next-round candidate 1. |
+1. Every differentiable op result is constructed through `Tensor.__init__`.
+2. `no_grad()` suppresses op results, not explicit leaves.
+3. Backward closures operate only on nodes that can hold gradients.
+4. A fully `-inf` attention-softmax row yields zero weights.
+5. A scored cross-entropy row must contain a finite logit.
+6. `ignore_index` mean reduction divides by scored targets and ignored rows receive exact
+   zero gradient.
+7. Causal masks use true `-inf`.
+8. `forward(mask=None)` remains causal and agrees with inference semantics.
+9. Training padding is right-sided; generation padding is left-sided.
+10. Activation recomputation replays detached copies under restored NumPy RNG state.
+11. `grad_checkpoint` is a runtime memory/time choice and does not belong in model config.
+12. Checkpoint restore is transactional.
+13. Default text training must preserve historical RNG order and seeded trajectory unless a
+    behavior is explicitly opt-in.
+14. Generation window crops renumber surviving positions from zero.
+15. Three-dimensional multi-head masks are batch-major.
+16. Caller-provided KV caches are completely validated before a past length is trusted.
+17. Token id `0` is a real vocabulary id; do not introduce `Embedding.padding_idx` semantics
+    that would suppress it.
+18. Public validation should raise deliberate `TypeError`/`ValueError` diagnostics instead
+    of leaking implementation-level Python/NumPy exceptions.
 
 ---
 
-## 5. Known limitations (deliberate, documented)
+## 3. Active review map
 
-These are stated in the README and enforced with clear errors — none is an open bug.
+Refresh this list before acting; heads can move at any time.
 
-- **`float64` only.** No dtype system, no mixed precision, no GPU.
-- **Right padding for training masks, left padding for generation masks.** Enforced, not assumed.
-- **A generation window crop renumbers positions from 0**, for masked and unmasked runs
-  alike. Tokens that leave the window are forgotten — that is the point of a window, but
-  it means a row's output depends on `context_len`, not only on its prompt.
-- **`recompute` wraps functions returning a single `Tensor`.** Multi-output and
-  multi-section forms are not implemented (block structure does not need them).
-- **Beam search takes no attention mask.** It decodes one sequence at a time.
-- **A fully masked query row returns exactly the output projection's bias** — a constant,
-  not a prediction. Such positions must be excluded from the loss.
-- **Checkpoints are pickles.** Load trusted files only.
-- **`plot_loss.py` is source-checkout only**, not part of the installed wheel.
-- **BPE is a teaching implementation** — training is O(merges × corpus) and not intended
-  for large corpora.
-- **Grad-mode decorators are synchronous-only.** Coroutine and generator targets are
-  rejected; task-local asynchronous grad mode would require a separate `ContextVar` design.
+### Stacked feature lines
 
-## 6. Repository state
+- **#83 → #84 → #85** — dense Jacobian → functional JVP → directional JVP checker.
+  **#119** is stacked on #85 for JVP-check tolerance overflow normalization.
+- **#86 → #87 → #88** — stable log-probability losses → training label smoothing → optional
+  validation RNG isolation. This stack was clean-replayed onto current main and each layer is
+  one commit on its dependency.
+- **#92 → #93 → #94** — incremental streaming iterator → stop-token termination → live CLI
+  output. This stack was also clean-replayed onto current main.
+- **#102 → #121** — Linear LoRA reconfiguration contract → layer real-value overflow
+  normalization.
+- **#114 → #116** — `concat(axis=None)` autograd → immutable snapshot of mutable sum-reduction
+  metadata.
 
-- History: `021dda5 Initial commit`, then one checkpoint commit on branch
-  `checkpoint/rounds-1-7` covering rounds 1–7, then one commit per round after it
-  (round 8 is the first). The checkpoint commit also carries the pre-existing user diff
-  (Llama/RoPE/SwiGLU/AdamW), which was interleaved with six rounds of work across the
-  same files and could not be separated after the fact — see the round 7 decision in
-  `task_plan.md`. Later rounds are separate, reviewable commits.
-- The checkpoint branch is not merged into `main`. To put it there:
-  `git checkout main && git merge --ff-only checkpoint/rounds-1-7`.
-- `git diff --check` is clean apart from pre-existing LF/CRLF notices on Windows.
-- No build/dist/venv/checkpoint artifacts are left in the tree.
-- Round 9 is currently an uncommitted, reviewable working-tree change on top of `5195930`.
+### Independent / mostly independent reviews
+
+- #95 optimizer state-envelope validation.
+- #96 tokenizer encoding/merge-count validation.
+- #100 gradcheck public target validation.
+- #101 Tensor flat-iterator mutation tracking.
+- #103 Module traversal through general mappings.
+- #104 paired benchmark measurement-order correction.
+- #105 custom-awaitable rejection in grad-mode decorators.
+- #106 safe checkpoint inspection CLI and packaging/workflow smoke.
+- #107 safe-checkpoint deep-manifest recursion normalization.
+- #108 scheduler real conversion overflow normalization.
+- #109 streaming benchmark NumPy-integer normalization.
+- #110 checkpoint RNG-state overflow normalization.
+- #111 recompute with unused trainable inputs.
+- #112 gradcheck tolerance conversion overflow normalization.
+- #113 attention real-value conversion overflow normalization.
+- #115 direct beam temperature overflow normalization.
+- #117 trusted pickle → safe checkpoint conversion helper.
+- #118 serialization of embedded safe-training checkpoint swaps.
+- #120 `plot_loss.py` JSONL record validation.
+- #122 Transformer/GPT real-value conversion overflow normalization.
+- #123 optimizer constructor parameter-collection validation.
+- #124 semantic digests for safe checkpoints.
+
+### High-conflict paths while those PRs remain open
+
+Treat these paths as occupied unless deliberately stacking on the owning PR:
+
+- `src/engine/autograd.py`, `src/engine/__init__.py` — #83–#85.
+- `src/engine/ops.py` — #114/#116.
+- `src/engine/tensor.py` — #101.
+- `src/engine/optim.py` — #95/#123.
+- `src/engine/scheduler.py` — #108.
+- `src/engine/checkpoint.py` — #110.
+- `src/engine/safe_checkpoint.py` — #107.
+- `src/engine/recompute.py` — #111.
+- `src/engine/grad_mode.py` — #105.
+- `src/engine/gradcheck.py`, `src/engine/_gradcheck_impl.py` — #100/#112.
+- `src/nn/layers.py` — #102/#121.
+- `src/nn/module.py` — #103.
+- `src/nn/attention.py` — #113.
+- `src/nn/transformer.py` — #122.
+- `src/nn/beam.py` — #115.
+- `src/nn/streaming.py`, `src/nn/__init__.py`, `src/streaming_cli.py` — #92–#94.
+- `src/train.py` — #87/#88.
+- `src/tokenizer.py` — #96.
+- `src/benchmark.py` — #104.
+- `src/streaming_benchmark.py` — #109.
+- `src/safe_train_cli.py` — #118.
+- `plot_loss.py` — #120.
+- `pyproject.toml`, `.github/workflows/tests.yml` — #106.
+
+New standalone modules can still be reasonable when they solve a real problem and do not
+silently duplicate an open PR (for example #117 and #124 intentionally add new files only).
 
 ---
 
-## 7. Next-round candidates
+## 4. Development procedure
 
-Ranked. None blocks the default training or generation path.
+For every new engineering round:
 
-1. **Decoding cost once the window fills.** Correct but slow: after the window fills, the
-   cache is dropped every step, so each new token re-prefills `context_len` positions
-   instead of extending a cache. A ring/shift cache that drops the oldest key and value
-   in place would restore incremental decoding — but only for RoPE, since learned
-   absolute positions genuinely change under a crop. Round 8 recorded the measurement
-   (16 full-window re-prefills for a 20-token run at `context_len=8`).
-   *Highest value now: it is a real cost on the path round 8 just opened.*
-2. **Multi-output / multi-section `recompute`.** Currently one function returning one
-   `Tensor`. A tuple-returning form would let a caller checkpoint a section that also
-   emits a cache or auxiliary loss. Needs care: the replay must seed each output's
-   cotangent, and the RNG capture must still cover the whole section.
-3. **Evaluation throughput.** Evaluation runs under `no_grad()` but still goes through the
-   graph-building `forward`. Routing it through the existing NumPy `infer` path would be
-   faster; the risk is that the two paths could drift, so it needs a parity test first.
-4. **Perplexity-correct evaluation for document corpora.** `evaluate_documents` averages
-   per-batch scored means; a token-weighted aggregate across batches would be the more
-   defensible number for ragged data.
+1. Fetch live `main` SHA and the latest open PR list.
+2. Search open PR titles/bodies and changed paths for overlap before editing.
+3. Reproduce a real bug or define a concrete API/operational gap; avoid speculative changes.
+4. Base directly on exact live `main`, or deliberately on the exact head of a dependency PR
+   when stacking is necessary.
+5. Keep the production delta narrow and add a regression that fails for the old behavior.
+6. Preserve validation ordering, caller-owned state, NumPy RNG state, and default trajectory
+   where those are part of the contract.
+7. Run exact-head GitHub Actions and require Python 3.10–3.13 success.
+8. Inspect at least one full job log for the exact test count and all smoke/compile steps.
+9. Compare base → head and require the expected ahead/behind and file list.
+10. Update PR metadata when a branch is replayed so reviewers do not see stale SHAs/CI counts.
+11. **Never merge automatically.** Leave reviewed green PRs open unless the user explicitly
+    requests a merge.
 
-Before starting any of these, re-read §5 of this file and the invariant list in
-`CLAUDE.md` — most of the traps in this codebase are interactions between rounds, not
-bugs inside a single file.
+For large-file rewrites, reconstruct the exact current blob first, verify its Git blob SHA,
+compute/verify the intended replacement blob, and immediately inspect the resulting compare.
+
+---
+
+## 5. Deliberate limits / non-goals
+
+- The project is educational and NumPy-first: no GPU backend, mixed precision, distributed
+  training, or production-scale kernel fusion on main.
+- A tokenizer OOV error is an error; do not silently add or map to an `<unk>` token unless the
+  language/model contract is deliberately redesigned.
+- Do not weaken mask, finite-value, mutation, checkpoint, or transactional validation merely
+  to accept malformed inputs.
+- Do not change default CLI output, option defaults, checkpoint semantics, or seeded training
+  arithmetic as collateral damage from an opt-in feature.
+
+When this snapshot disagrees with GitHub, **GitHub wins**. Refresh this file when `main`
+advances materially or the review map changes enough that it would misdirect future work.
