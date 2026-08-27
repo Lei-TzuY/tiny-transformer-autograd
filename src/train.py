@@ -324,7 +324,9 @@ def batch_eval_loss(model, tokens, targets, mask=None):
     infer = getattr(model, "infer", None)
     if not callable(infer):
         with no_grad():
-            return float(batch_loss(model, tokens, targets, mask, 0.0).data)
+            # Keep the historical four-argument call shape: tests and external
+            # callers may replace batch_loss with a compatible wrapper.
+            return float(batch_loss(model, tokens, targets, mask).data)
 
     if mask is None:
         logits, _ = infer(tokens)
