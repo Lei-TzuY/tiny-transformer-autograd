@@ -15,6 +15,10 @@ intentionally not claimed to equal a strict re-prefill.
 a time. Consumers can render output immediately or stop iteration without
 running inference for tokens they no longer need. ``stream_generate`` simply
 collects that iterator, keeping one source of decoding semantics.
+
+An optional ``stop_token_id`` terminates generation once every batch row has
+emitted that token. Rows that finish earlier enter an absorbing stop state, so
+the rectangular batch output remains well-defined while active rows continue.
 """
 
 import numpy as np
@@ -37,12 +41,18 @@ def stream_generate(
     top_p=None,
     strategy="sample",
     attention_mask=None,
+    stop_token_id=None,
 ):
     """Generate with a bounded, shifted RoPE KV cache.
 
     Parameters mirror the sampling subset of ``GPT.generate``. ``model`` must
     use ``pos_encoding='rope'``. Beam search is deliberately absent because
     this helper represents one linear streaming cache, not a beam cache tree.
+
+    ``stop_token_id`` applies only to newly generated tokens. A row that emits
+    it keeps emitting that same token while other rows continue; generation
+    stops as soon as every row has finished. The stop token itself is included
+    in the returned array.
 
     The returned token array keeps any left padding from the prompt, matching
     ``GPT.generate``. ``max_new_tokens=0`` returns a copy of the validated
@@ -57,6 +67,7 @@ def stream_generate(
         top_p=top_p,
         strategy=strategy,
         attention_mask=attention_mask,
+        stop_token_id=stop_token_id,
     )
     generated = list(iterator)
     if not generated:
@@ -73,6 +84,7 @@ def stream_generate_iter(
     top_p=None,
     strategy="sample",
     attention_mask=None,
+    stop_token_id=None,
 ):
     """Return an iterator yielding one generated token per batch row per step.
 
@@ -82,6 +94,8 @@ def stream_generate_iter(
     ``(batch,)``. Stopping or closing the iterator therefore performs no future
     inference. Mutating a yielded array cannot change subsequent decoding.
 
+    With ``stop_token_id`` set, the iterator ends when every row has emitted the
+    stop token. Finished rows stay at that token while unfinished rows continue.
     Fully consuming the iterator is exactly the generated suffix returned by
     :func:`stream_generate` for the same model, inputs, options, and RNG state.
     """
@@ -94,8 +108,25 @@ def stream_generate_iter(
         top_p=top_p,
         strategy=strategy,
         attention_mask=attention_mask,
+        stop_token_id=stop_token_id,
     )
     return iterator
+
+
+def _validate_stop_token_id(model, stop_token_id):
+    """Normalize one optional vocabulary id used as an absorbing stop token."""
+    if stop_token_id is None:
+        return None
+    if isinstance(stop_token_id, (bool, np.bool_)) or not isinstance(
+        stop_token_id, (int, np.integer)
+    ):
+        raise TypeError("stop_token_id must be an integer or None")
+    stop_token_id = int(stop_token_id)
+    if stop_token_id < 0 or stop_token_id >= model.vocab_size:
+        raise ValueError(
+            f"stop_token_id must be in [0, {model.vocab_size - 1}]"
+        )
+    return stop_token_id
 
 
 def _make_stream_iterator(
@@ -108,6 +139,7 @@ def _make_stream_iterator(
     top_p,
     strategy,
     attention_mask,
+    stop_token_id,
 ):
     """Validate one request eagerly and build its lazy token-step iterator."""
     if getattr(model, "rope", None) is None:
@@ -120,6 +152,7 @@ def _make_stream_iterator(
     temperature, top_k, top_p = _validate_sampling_options(
         temperature, top_k, top_p
     )
+    stop_token_id = _validate_stop_token_id(model, stop_token_id)
 
     prompt = np.array(model._validate_token_batch(idx), dtype=np.int64, copy=True)
     keep = None
@@ -135,8 +168,53 @@ def _make_stream_iterator(
         top_k,
         top_p,
         strategy,
+        stop_token_id,
     )
     return prompt, iterator
+
+
+def _select_next_tokens(
+    logits_last,
+    strategy,
+    temperature,
+    top_k,
+    top_p,
+    stop_token_id,
+    finished,
+):
+    """Select one token per row without consuming RNG for finished rows."""
+    batch = logits_last.shape[0]
+    if strategy == "greedy":
+        next_token = np.argmax(logits_last, axis=-1).astype(np.int64, copy=False)
+    elif finished is None:
+        next_token = np.array(
+            [
+                _sample(
+                    logit,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                )
+                for logit in logits_last
+            ],
+            dtype=np.int64,
+        )
+    else:
+        next_token = np.full(batch, stop_token_id, dtype=np.int64)
+        for row, logit in enumerate(logits_last):
+            if not finished[row]:
+                next_token[row] = _sample(
+                    logit,
+                    temperature=temperature,
+                    top_k=top_k,
+                    top_p=top_p,
+                )
+
+    if finished is not None and np.any(finished):
+        next_token = np.where(finished, stop_token_id, next_token).astype(
+            np.int64, copy=False
+        )
+    return next_token
 
 
 def _stream_generation_steps(
@@ -148,6 +226,7 @@ def _stream_generation_steps(
     top_k,
     top_p,
     strategy,
+    stop_token_id,
 ):
     """Yield selected token ids while owning all shifted-cache state."""
     if max_new_tokens == 0:
@@ -166,30 +245,33 @@ def _stream_generation_steps(
         attention_mask=cache_keep,
         position_ids=positions,
     )
+    finished = (
+        None
+        if stop_token_id is None
+        else np.zeros(prompt.shape[0], dtype=bool)
+    )
 
     for step in range(max_new_tokens):
         logits_last = _validate_selection_logits(
             logits[:, -1, :], "generation logits"
         )
-        if strategy == "greedy":
-            next_token = np.argmax(logits_last, axis=-1).astype(np.int64, copy=False)
-        else:
-            next_token = np.array(
-                [
-                    _sample(
-                        logit,
-                        temperature=temperature,
-                        top_k=top_k,
-                        top_p=top_p,
-                    )
-                    for logit in logits_last
-                ],
-                dtype=np.int64,
-            )
+        next_token = _select_next_tokens(
+            logits_last,
+            strategy,
+            temperature,
+            top_k,
+            top_p,
+            stop_token_id,
+            finished,
+        )
+        if finished is not None:
+            finished |= next_token == stop_token_id
 
         # Yield a copy so consumer mutation cannot rewrite the state used by the
         # next cache extension. No next-step inference occurs until iteration resumes.
         yield np.array(next_token, dtype=np.int64, copy=True)
+        if finished is not None and np.all(finished):
+            break
         if step + 1 == max_new_tokens:
             break
 
