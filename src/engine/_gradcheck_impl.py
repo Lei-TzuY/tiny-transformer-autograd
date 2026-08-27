@@ -279,7 +279,10 @@ def _validate_tolerance(name, value, *, strictly_positive):
         value, (int, float, np.integer, np.floating)
     ):
         raise TypeError(f"gradcheck {name} must be a real number")
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"gradcheck {name} must be finite") from exc
     if not np.isfinite(value):
         raise ValueError(f"gradcheck {name} must be finite")
     if strictly_positive and value <= 0:
