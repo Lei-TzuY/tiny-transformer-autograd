@@ -54,7 +54,7 @@ class Module:
                 seen_containers.add(marker)
                 for item in obj:
                     _collect(item)
-            elif isinstance(obj, dict):
+            elif isinstance(obj, Mapping):
                 marker = id(obj)
                 if marker in seen_containers:
                     return
@@ -95,7 +95,7 @@ class Module:
                 seen_containers.add(marker)
                 for item in obj:
                     _collect(item)
-            elif isinstance(obj, dict):
+            elif isinstance(obj, Mapping):
                 marker = id(obj)
                 if marker in seen_containers:
                     return
@@ -139,7 +139,7 @@ class Module:
                 seen_containers.add(marker)
                 for i, item in enumerate(obj):
                     yield from _collect(item, f"{pfx}[{i}]")
-            elif isinstance(obj, dict):
+            elif isinstance(obj, Mapping):
                 marker = id(obj)
                 if marker in seen_containers:
                     return
@@ -176,7 +176,7 @@ class Module:
                 seen_containers.add(marker)
                 for i, item in enumerate(obj):
                     yield from _collect(item, f"{pfx}[{i}]")
-            elif isinstance(obj, dict):
+            elif isinstance(obj, Mapping):
                 marker = id(obj)
                 if marker in seen_containers:
                     return
