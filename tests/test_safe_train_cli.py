@@ -14,7 +14,7 @@ from engine.checkpoint import read_checkpoint
 from engine.safe_checkpoint import read_safe_checkpoint, save_safe_checkpoint
 
 
-def _tiny_train_argv(program, *, iters=1, save=None, resume=None):
+def _tiny_train_argv(program, *, iters=1, save=None, resume=None, min_lr=None):
     argv = [
         program,
         "--iters", str(iters),
@@ -28,6 +28,8 @@ def _tiny_train_argv(program, *, iters=1, save=None, resume=None):
         "--seed", "23",
         "--no-sample",
     ]
+    if min_lr is not None:
+        argv.extend(["--min-lr", str(min_lr)])
     if save is not None:
         argv.extend(["--save", str(save)])
     if resume is not None:
@@ -133,7 +135,12 @@ def test_safe_cli_resumes_and_rewrites_safe_checkpoint(
     monkeypatch.setattr(
         sys,
         "argv",
-        _tiny_train_argv("tiny-train-safe", iters=1, save=path),
+        _tiny_train_argv(
+            "tiny-train-safe",
+            iters=1,
+            save=path,
+            min_lr=1e-4,
+        ),
     )
     safe_train_cli.main()
     capsys.readouterr()
@@ -151,6 +158,7 @@ def test_safe_cli_resumes_and_rewrites_safe_checkpoint(
             iters=2,
             save=path,
             resume=path,
+            min_lr=1e-4,
         ),
     )
     safe_train_cli.main()
