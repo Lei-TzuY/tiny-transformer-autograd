@@ -12,6 +12,13 @@ import numpy as np
 CHECKPOINT_VERSION = 2
 
 
+def _snapshot_checkpoint_state(state):
+    """Freeze one top-level Mapping view so validation and restore see one payload."""
+    if not isinstance(state, Mapping):
+        raise TypeError("checkpoint state must be a mapping")
+    return dict(state.items())
+
+
 def read_checkpoint(path):
     """Read and validate a trusted local checkpoint file.
 
@@ -21,7 +28,7 @@ def read_checkpoint(path):
     ``restore_checkpoint``.
     """
     with open(path, "rb") as handle:
-        state = pickle.load(handle)
+        state = _snapshot_checkpoint_state(pickle.load(handle))
     _validate_checkpoint_envelope(state)
     return state
 
@@ -100,6 +107,7 @@ def restore_checkpoint(state, model, optimizer=None, scheduler=None, strict=True
     """Restore an already-read checkpoint and return its completed step."""
     if not isinstance(strict, bool):
         raise TypeError("strict must be a boolean")
+    state = _snapshot_checkpoint_state(state)
     step = _validate_checkpoint_envelope(state)
 
     if optimizer is not None and state.get("optimizer") is not None:
