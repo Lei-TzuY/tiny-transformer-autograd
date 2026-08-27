@@ -21,9 +21,10 @@ jobs:
           python -m pip install ".[dev]"
       - name: Smoke-test installed package and CLI
         run: |
-          python -c "import engine, nn, train, safe_train_cli, tokenizer, benchmark, streaming_cli, streaming_benchmark"
+          python -c "import engine, nn, train, safe_train_cli, safe_checkpoint_inspect, tokenizer, benchmark, streaming_cli, streaming_benchmark"
           tiny-train --help
           tiny-train-safe --help
+          tiny-safe-inspect --help
           tiny-stream --help
           tiny-stream-benchmark --help
       - name: Smoke-test benchmark reports
