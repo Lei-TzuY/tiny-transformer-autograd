@@ -24,6 +24,7 @@ cross_entropy  : combined softmax + NLL; ∂L/∂logits = (softmax - one_hot) / 
 """
 
 from fractions import Fraction
+import operator
 
 import numpy as np
 from .tensor import Tensor
@@ -588,8 +589,21 @@ def cross_entropy(logits: Tensor, targets, ignore_index=None) -> Tensor:
 # sum
 # ---------------------------------------------------------------------------
 def sum(x: Tensor, axis=None, keepdims=False) -> Tensor:
+    data = _stable_sum_data(x.data, axis=axis, keepdims=keepdims)
+
+    # NumPy accepts integer-like scalar arrays as reduction metadata. Once the
+    # forward succeeds, snapshot those caller-owned values so later mutation
+    # cannot change which axes the recorded backward graph restores.
+    if axis is None:
+        backward_axis = None
+    elif isinstance(axis, tuple):
+        backward_axis = tuple(operator.index(item) for item in axis)
+    else:
+        backward_axis = operator.index(axis)
+    backward_keepdims = bool(operator.index(keepdims))
+
     out = Tensor(
-        _stable_sum_data(x.data, axis=axis, keepdims=keepdims),
+        data,
         requires_grad=x.requires_grad,
         _children=(x,),
         _op="sum",
@@ -599,8 +613,8 @@ def sum(x: Tensor, axis=None, keepdims=False) -> Tensor:
         if x.requires_grad:
             x._ensure_grad()
             grad = out.grad
-            if axis is not None and not keepdims:
-                grad = np.expand_dims(grad, axis=axis)
+            if backward_axis is not None and not backward_keepdims:
+                grad = np.expand_dims(grad, axis=backward_axis)
             x.grad += np.broadcast_to(grad, x.shape)
 
     out._backward = _backward
