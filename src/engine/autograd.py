@@ -1,6 +1,7 @@
 """Functional reverse-mode automatic differentiation helpers."""
 
 from collections.abc import Iterable
+from fractions import Fraction
 
 import numpy as np
 
@@ -54,6 +55,67 @@ def _validate_grad_request(output, inputs):
     if any(id(value) not in reachable for value in requested):
         raise ValueError("all requested inputs must be reachable from output")
     return requested, topo
+
+
+def _validate_tangents(requested, tangents, *, single_input):
+    """Return finite float64 tangent snapshots aligned with requested inputs."""
+    if single_input:
+        supplied = (tangents,)
+    else:
+        if isinstance(tangents, (str, bytes)) or not isinstance(tangents, Iterable):
+            raise TypeError("tangents must be an iterable with one value per input")
+        supplied = tuple(tangents)
+        if len(supplied) != len(requested):
+            raise ValueError(
+                "tangents must contain exactly one value per requested input"
+            )
+
+    validated = []
+    for index, (value, tangent) in enumerate(zip(requested, supplied)):
+        raw = np.asarray(tangent)
+        is_integer = np.issubdtype(raw.dtype, np.integer)
+        is_floating = np.issubdtype(raw.dtype, np.floating)
+        if np.issubdtype(raw.dtype, np.bool_) or not (is_integer or is_floating):
+            raise TypeError(f"tangent {index} must contain real numeric values")
+        tangent_array = np.array(raw, dtype=np.float64, copy=True)
+        if tangent_array.shape != value.shape:
+            raise ValueError(
+                f"tangent {index} shape mismatch: expected {value.shape}, "
+                f"got {tangent_array.shape}"
+            )
+        if not np.isfinite(tangent_array).all():
+            raise ValueError(f"tangent {index} must contain only finite values")
+        validated.append(tangent_array)
+    return tuple(validated)
+
+
+def _exact_directional_sum(derivatives, tangents):
+    """Exactly accumulate finite derivative*tangent terms, then round once."""
+    exact = Fraction()
+    for derivative, tangent in zip(derivatives, tangents):
+        for left, right in zip(derivative.flat, tangent.flat):
+            exact += Fraction.from_float(float(left)) * Fraction.from_float(float(right))
+    try:
+        return float(exact)
+    except OverflowError:
+        return -np.inf if exact < 0 else np.inf
+
+
+def _directional_sum(derivatives, tangents):
+    """Preserve ordinary NumPy contraction while recovering finite cancellation."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        terms = [
+            np.sum(derivative * tangent)
+            for derivative, tangent in zip(derivatives, tangents)
+        ]
+        historical = np.sum(np.asarray(terms, dtype=np.float64))
+    if np.isfinite(historical):
+        return float(historical)
+
+    source_finite = all(np.isfinite(value).all() for value in derivatives)
+    if not source_finite:
+        return float(historical)
+    return _exact_directional_sum(derivatives, tangents)
 
 
 def grad(output, inputs, grad_output=None):
@@ -155,3 +217,59 @@ def jacobian(output, inputs):
             view[output_index] = derivative
 
     return tuple(jacobians)
+
+
+def jvp(output, inputs, tangents):
+    """Compute a Jacobian-vector product from an already-built reverse graph.
+
+    Parameters
+    ----------
+    output : Tensor
+        Differentiable graph output.
+    inputs : Tensor or iterable[Tensor]
+        Reachable trainable tensors whose input-space direction is specified.
+    tangents : array-like or iterable[array-like]
+        Tangent structure mirrors ``inputs``. If ``inputs`` itself is one
+        Tensor, pass one array-like tangent directly. If ``inputs`` is an
+        iterable, pass an iterable with exactly one tangent for every element,
+        including when that iterable contains only one Tensor.
+
+    Returns
+    -------
+    numpy.ndarray
+        Independent float64 array with shape ``output.shape`` containing
+        ``J @ v`` for the requested joint input direction.
+
+    Notes
+    -----
+    This engine records reverse-mode VJPs, not forward-mode dual numbers. A JVP
+    therefore requires one reverse pass per output element. Unlike
+    :func:`jacobian`, this helper contracts each row immediately and never
+    materialises the full dense Jacobian, reducing peak diagnostic memory when
+    only a directional derivative is needed.
+    """
+    single_input = isinstance(inputs, Tensor)
+    requested, _ = _validate_grad_request(output, inputs)
+    tangent_arrays = _validate_tangents(
+        requested,
+        tangents,
+        single_input=single_input,
+    )
+    result = np.empty(output.shape, dtype=np.float64)
+    output_size = int(output.data.size)
+
+    # Match jacobian(): even a zero-element result must validate the tape so a
+    # stale graph cannot hide behind an otherwise allocation-only fast path.
+    if output_size == 0:
+        grad(output, requested, np.zeros_like(output.data, dtype=np.float64))
+        return result
+
+    seed = np.zeros(output.shape, dtype=np.float64)
+    flat_seed = seed.reshape(-1)
+    flat_result = result.reshape(-1)
+    for output_index in range(output_size):
+        flat_seed.fill(0.0)
+        flat_seed[output_index] = 1.0
+        derivatives = grad(output, requested, seed)
+        flat_result[output_index] = _directional_sum(derivatives, tangent_arrays)
+    return result
