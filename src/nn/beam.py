@@ -47,7 +47,10 @@ def beam_generate(
     """
     max_new_tokens = _validate_non_negative_int(max_new_tokens, "max_new_tokens")
     beam_width = _validate_positive_int(beam_width, "beam_width")
-    temperature = _validate_positive_finite_real(temperature, "temperature")
+    try:
+        temperature = _validate_positive_finite_real(temperature, "temperature")
+    except OverflowError as exc:
+        raise ValueError("temperature must be finite") from exc
     if not isinstance(use_cache, (bool, np.bool_)):
         raise TypeError("use_cache must be boolean")
     use_cache = bool(use_cache)
