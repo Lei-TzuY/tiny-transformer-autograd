@@ -109,6 +109,44 @@ def test_encode_requires_text(tokenizer_cls):
 
 
 @pytest.mark.parametrize(
+    "tokenizer",
+    [
+        CharTokenizer("abc"),
+        BPETokenizer(["a", "b", " ", "ab"], [("a", "b")]),
+    ],
+    ids=["char", "bpe"],
+)
+def test_encode_rejects_characters_absent_from_vocabulary(tokenizer):
+    with pytest.raises(
+        ValueError,
+        match=r"not present in the tokenizer vocabulary: 'x', 'z'",
+    ):
+        tokenizer.encode("zax")
+
+
+def test_bpe_encode_validates_raw_characters_before_merging():
+    tokenizer = BPETokenizer(["a", "b", "ab"], [("a", "b")])
+
+    with pytest.raises(
+        ValueError,
+        match=r"not present in the tokenizer vocabulary: 'c'",
+    ):
+        tokenizer.encode("abc")
+
+
+def test_empty_encode_remains_supported_with_int64_result():
+    tokenizers = [
+        CharTokenizer("abc"),
+        BPETokenizer(["a", "b", "ab"], [("a", "b")]),
+    ]
+
+    for tokenizer in tokenizers:
+        encoded = tokenizer.encode("")
+        assert encoded.shape == (0,)
+        assert encoded.dtype == np.int64
+
+
+@pytest.mark.parametrize(
     "call",
     [
         lambda: CharTokenizer.train(""),
@@ -120,7 +158,23 @@ def test_training_rejects_empty_text(call):
         call()
 
 
-@pytest.mark.parametrize("num_merges", [-1, 1.5, True])
-def test_bpe_training_rejects_invalid_merge_count(num_merges):
+@pytest.mark.parametrize("num_merges", [-1, np.int64(-2)])
+def test_bpe_training_rejects_negative_merge_count(num_merges):
     with pytest.raises(ValueError, match="non-negative integer"):
         BPETokenizer.train("ababa", num_merges=num_merges)
+
+
+@pytest.mark.parametrize("num_merges", [1.5, True, np.bool_(False), "1", None])
+def test_bpe_training_rejects_non_integer_merge_count(num_merges):
+    with pytest.raises(TypeError, match="non-negative integer"):
+        BPETokenizer.train("ababa", num_merges=num_merges)
+
+
+def test_bpe_training_accepts_numpy_integer_merge_count():
+    tokenizer = BPETokenizer.train("ababa", num_merges=np.int64(2))
+
+    assert tokenizer.merges
+    np.testing.assert_array_equal(
+        tokenizer.encode("ababa"),
+        BPETokenizer.train("ababa", num_merges=2).encode("ababa"),
+    )

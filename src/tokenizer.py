@@ -27,7 +27,7 @@ class CharTokenizer:
         return len(self.vocab)
 
     def encode(self, text):
-        _validate_text(text)
+        _validate_encode_text(text, self.stoi)
         return np.array([self.stoi[token] for token in text], dtype=np.int64)
 
     def decode(self, ids):
@@ -53,18 +53,19 @@ class BPETokenizer:
         _validate_text(text)
         if not text:
             raise ValueError("cannot train a BPE tokenizer on empty text")
-        if (
-            not isinstance(num_merges, (int, np.integer))
-            or isinstance(num_merges, (bool, np.bool_))
-            or num_merges < 0
+        if isinstance(num_merges, (bool, np.bool_)) or not isinstance(
+            num_merges, (int, np.integer)
         ):
+            raise TypeError("num_merges must be a non-negative integer")
+        num_merges = int(num_merges)
+        if num_merges < 0:
             raise ValueError("num_merges must be a non-negative integer")
 
         segments = _segments(text)
         vocab = sorted(set(text))
         merges = []
 
-        for _ in range(int(num_merges)):
+        for _ in range(num_merges):
             counts = Counter(
                 pair
                 for segment in segments
@@ -86,7 +87,7 @@ class BPETokenizer:
         return len(self.vocab)
 
     def encode(self, text):
-        _validate_text(text)
+        _validate_encode_text(text, self.stoi)
         segments = _segments(text)
         for pair in self.merges:
             segments = [_merge(segment, pair) for segment in segments]
@@ -218,6 +219,17 @@ def _validate_decode_ids(ids, vocab_size):
 def _validate_text(text):
     if not isinstance(text, str):
         raise TypeError("tokenizer text must be a string")
+
+
+def _validate_encode_text(text, stoi):
+    _validate_text(text)
+    missing = sorted(set(text).difference(stoi))
+    if missing:
+        rendered = ", ".join(repr(token) for token in missing)
+        raise ValueError(
+            "tokenizer text contains characters not present in the tokenizer vocabulary: "
+            + rendered
+        )
 
 
 def _segments(text):
