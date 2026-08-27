@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import engine.ops as ops
 from engine.checkpoint import read_checkpoint, restore_checkpoint, save_checkpoint
 from engine.grad_mode import no_grad
+from engine.losses import label_smoothed_cross_entropy
 from engine.optim import Adam, AdamW
 from engine.scheduler import WarmupCosineScheduler
 from nn.transformer import GPT
@@ -221,12 +222,44 @@ def get_document_batch(documents, batch_size, pad_token=PAD_TOKEN,
     return tokens, targets, mask
 
 
-def batch_loss(model, tokens, targets, mask=None):
-    """Cross entropy for one training batch, tracked by the autograd graph."""
+def _normalise_label_smoothing(value, *, source="label_smoothing"):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
+        raise TypeError(f"{source} must be a real number")
+    value = float(value)
+    if not np.isfinite(value):
+        raise ValueError(f"{source} must be finite")
+    if value < 0.0 or value > 1.0:
+        raise ValueError(f"{source} must be in [0, 1]")
+    return value
+
+
+def batch_loss(model, tokens, targets, mask=None, label_smoothing=0.0):
+    """Training loss for one batch, tracked by the autograd graph.
+
+    ``label_smoothing=0`` deliberately uses the historical combined
+    ``ops.cross_entropy`` path so existing seeded training trajectories keep
+    their exact arithmetic. Positive smoothing switches only the training
+    objective; validation remains unsmoothed NLL/perplexity.
+    """
+    label_smoothing = _normalise_label_smoothing(label_smoothing)
     if mask is None:
-        return ops.cross_entropy(model(tokens), targets)
-    return ops.cross_entropy(
-        model(tokens, attention_mask=mask), targets, ignore_index=IGNORE_INDEX
+        logits = model(tokens)
+        if label_smoothing == 0.0:
+            return ops.cross_entropy(logits, targets)
+        return label_smoothed_cross_entropy(
+            logits, targets, smoothing=label_smoothing
+        )
+
+    logits = model(tokens, attention_mask=mask)
+    if label_smoothing == 0.0:
+        return ops.cross_entropy(logits, targets, ignore_index=IGNORE_INDEX)
+    return label_smoothed_cross_entropy(
+        logits,
+        targets,
+        smoothing=label_smoothing,
+        ignore_index=IGNORE_INDEX,
     )
 
 
@@ -287,10 +320,12 @@ def _cross_entropy_np(logits, targets, ignore_index=None):
 
 
 def batch_eval_loss(model, tokens, targets, mask=None):
-    """Inference-only batch loss, falling back for models without ``infer``."""
+    """Inference-only unsmoothed batch NLL for comparable validation metrics."""
     infer = getattr(model, "infer", None)
     if not callable(infer):
         with no_grad():
+            # Keep the historical four-argument call shape: tests and external
+            # callers may replace batch_loss with a compatible wrapper.
             return float(batch_loss(model, tokens, targets, mask).data)
 
     if mask is None:
@@ -309,24 +344,23 @@ def batch_eval_loss(model, tokens, targets, mask=None):
     return _cross_entropy_np(logits, targets, ignore_index=ignore_index)
 
 
-def accumulate_document_gradients(model, sample_batch, params, grad_accum):
+def accumulate_document_gradients(
+    model, sample_batch, params, grad_accum, label_smoothing=0.0
+):
     """Accumulate ragged document gradients as one token-weighted mean loss.
 
-    ``cross_entropy`` returns a mean over the scored targets in each individual
-    micro-batch. Averaging those means would give a short document batch the
-    same influence as a long one. Instead, seed each scalar backward pass with
-    its scored-token count to recover a loss sum, accumulate those sums, and
-    divide the resulting leaf gradients by the total number of scored tokens.
-
-    This helper is used only for document training with ``grad_accum > 1``;
-    the historical single-micro-batch and plain token-stream paths stay
-    byte-for-byte equivalent in their numerical operations.
+    The per-micro-batch training objective is a mean over scored targets for
+    both ordinary and label-smoothed cross entropy. Averaging those means would
+    give a short document batch the same influence as a long one. Instead, seed
+    each scalar backward pass with its scored-token count to recover a loss sum,
+    accumulate those sums, and divide leaf gradients by the total scored count.
 
     If a later micro-batch fails after an earlier backward pass, caller-owned
     gradient buffers are restored exactly so the failed accumulation is atomic.
     """
     if grad_accum <= 1:
         raise ValueError("document gradient accumulation requires grad_accum > 1")
+    label_smoothing = _normalise_label_smoothing(label_smoothing)
 
     try:
         params = tuple(params)
@@ -349,7 +383,9 @@ def accumulate_document_gradients(model, sample_batch, params, grad_accum):
             if scored == 0:
                 raise ValueError("training batch contains no scored tokens")
 
-            loss = batch_loss(model, *batch)
+            loss = batch_loss(
+                model, *batch, label_smoothing=label_smoothing
+            )
             loss.backward(float(scored))
             weighted_loss_sum += float(loss.data) * scored
             total_scored += scored
@@ -371,7 +407,7 @@ def accumulate_document_gradients(model, sample_batch, params, grad_accum):
 def evaluate_batches(
     model, sample_batch, eval_iters, weight_by_scored_tokens=False
 ):
-    """Mean loss and perplexity over batches sampled for validation."""
+    """Mean unsmoothed NLL and perplexity over validation batches."""
     previous_mode = getattr(model, "training", True)
     model.eval()
     losses = []
@@ -481,6 +517,16 @@ def parse_args():
     )
     parser.add_argument("--grad-clip", type=float, default=1.0, help="0 disables clipping")
     parser.add_argument(
+        "--label-smoothing",
+        type=float,
+        default=None,
+        help=(
+            "Training-only label smoothing in [0,1]. New runs default to 0; "
+            "resume inherits a saved nonzero value unless explicitly matched. "
+            "Validation loss/perplexity remain unsmoothed."
+        ),
+    )
+    parser.add_argument(
         "--grad-checkpoint",
         action="store_true",
         help="Recompute block activations in backward (less memory, ~1 extra forward)",
@@ -535,6 +581,7 @@ def main():
 
     checkpoint = read_checkpoint(args.resume) if args.resume else None
     metadata = checkpoint.get("metadata", {}) if checkpoint else {}
+    args.label_smoothing = _resolve_label_smoothing(args.label_smoothing, metadata)
     if "tokenizer" in metadata:
         tokenizer = tokenizer_from_state_dict(metadata["tokenizer"])
     else:
@@ -619,10 +666,15 @@ def main():
     scheduler.warmup_steps = min(scheduler.warmup_steps, args.iters)
     print(f"[info] {model}")
     accum_text = f"  grad_accum={args.grad_accum}" if args.grad_accum > 1 else ""
+    smoothing_text = (
+        f"  label_smoothing={args.label_smoothing:g}"
+        if args.label_smoothing > 0.0
+        else ""
+    )
     print(
         f"[info] optimizer={optimizer.__class__.__name__}  peak_lr={scheduler.base_lr:g}  "
         f"warmup={scheduler.warmup_steps}  steps={args.iters}  "
-        f"resume_step={start_step}{accum_text}"
+        f"resume_step={start_step}{accum_text}{smoothing_text}"
     )
 
     if args.generate_only:
@@ -664,14 +716,22 @@ def main():
         optimizer.zero_grad()
         if train_docs is not None and args.grad_accum > 1:
             step_loss = accumulate_document_gradients(
-                model, sample_batch, params, args.grad_accum
+                model,
+                sample_batch,
+                params,
+                args.grad_accum,
+                label_smoothing=args.label_smoothing,
             )
         else:
             # Keep the historical stream path (and document grad_accum=1) in
             # exactly the same arithmetic order for seeded trajectory stability.
             micro_losses = []
             for _ in range(args.grad_accum):
-                loss = batch_loss(model, *sample_batch())
+                loss = batch_loss(
+                    model,
+                    *sample_batch(),
+                    label_smoothing=args.label_smoothing,
+                )
                 loss.backward()
                 micro_losses.append(float(loss.data))
             if args.grad_accum > 1:
@@ -712,16 +772,29 @@ def main():
                         "val_ppl": val_ppl,
                         "lr": lr,
                         "grad_norm": grad_norm,
+                        "label_smoothing": args.label_smoothing,
                         "elapsed_sec": elapsed,
                     },
                 )
 
         if args.save and args.save_every and step % args.save_every == 0:
-            save_checkpoint(args.save, model, optimizer, scheduler, step, _metadata(model, tokenizer))
+            save_checkpoint(
+                args.save,
+                model,
+                optimizer,
+                scheduler,
+                step,
+                _metadata(model, tokenizer, args.label_smoothing),
+            )
 
     if args.save:
         save_checkpoint(
-            args.save, model, optimizer, scheduler, args.iters, _metadata(model, tokenizer)
+            args.save,
+            model,
+            optimizer,
+            scheduler,
+            args.iters,
+            _metadata(model, tokenizer, args.label_smoothing),
         )
         print(f"[info] saved checkpoint: {args.save}")
 
@@ -777,11 +850,49 @@ def _prompt_array(args, tokenizer, corpus, context_len):
     return np.array([encoded[-context_len:]], dtype=np.int64)
 
 
-def _metadata(model, tokenizer):
-    return {
+def _metadata(model, tokenizer, label_smoothing=0.0):
+    """Checkpoint metadata, retaining legacy shape when smoothing is disabled."""
+    label_smoothing = _normalise_label_smoothing(
+        label_smoothing, source="label_smoothing metadata"
+    )
+    metadata = {
         "model_config": model.config(),
         "tokenizer": tokenizer.state_dict(),
     }
+    if label_smoothing != 0.0:
+        metadata["training_config"] = {"label_smoothing": label_smoothing}
+    return metadata
+
+
+def _resolve_label_smoothing(requested, metadata):
+    """Resolve the training objective without silently changing it on resume."""
+    saved = None
+    if metadata:
+        training_config = metadata.get("training_config", {})
+        if training_config is None:
+            training_config = {}
+        if not isinstance(training_config, dict):
+            raise ValueError("checkpoint training_config metadata must be a mapping")
+        if "label_smoothing" in training_config:
+            saved = _normalise_label_smoothing(
+                training_config["label_smoothing"],
+                source="checkpoint label_smoothing",
+            )
+
+    if requested is not None:
+        requested = _normalise_label_smoothing(
+            requested, source="--label-smoothing"
+        )
+    if requested is not None and saved is not None and requested != saved:
+        raise ValueError(
+            f"--label-smoothing {requested:g} conflicts with checkpoint "
+            f"label_smoothing {saved:g}"
+        )
+    if requested is not None:
+        return requested
+    if saved is not None:
+        return saved
+    return 0.0
 
 
 def _resolve_optimizer_name(requested, checkpoint):
@@ -854,6 +965,10 @@ def _validate_args(args):
         _validate_real_arg(args, name)
     if args.top_p is not None:
         _validate_real_arg(args, "top_p")
+    if hasattr(args, "label_smoothing") and args.label_smoothing is not None:
+        _normalise_label_smoothing(
+            args.label_smoothing, source="--label-smoothing"
+        )
 
     if args.iters <= 0:
         raise ValueError("--iters must be positive")
