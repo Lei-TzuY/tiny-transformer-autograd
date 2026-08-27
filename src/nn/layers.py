@@ -24,6 +24,22 @@ def _normalization_scale(data):
     return np.where(needs_scaling, max_abs, 1.0)
 
 
+def _constant_finite_rows(data):
+    """Identify finite rows whose centered LayerNorm activation is exactly zero."""
+    return np.all(np.isfinite(data), axis=-1, keepdims=True) & np.all(
+        data == data[..., :1], axis=-1, keepdims=True
+    )
+
+
+def _layernorm_scale(data):
+    """Keep exact constant rows in original units so epsilon cannot underflow."""
+    scale = _normalization_scale(data)
+    if scale is None:
+        return None
+    scale = np.where(_constant_finite_rows(data), 1.0, scale)
+    return None if np.all(scale == 1.0) else scale
+
+
 def _positive_int(name, value):
     """Validate a positive integral layer dimension and normalize it to int."""
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
@@ -204,7 +220,7 @@ class LayerNorm(Module):
 
     def forward(self, x: Tensor) -> Tensor:
         self._validate_input_shape(x.shape)
-        scale = _normalization_scale(x.data)
+        scale = _layernorm_scale(x.data)
         if scale is None:
             mu = ops.mean(x, axis=-1, keepdims=True)        # (..., 1)
             diff = x - mu                                    # (..., C)
@@ -229,11 +245,16 @@ class LayerNorm(Module):
             var = ((x - mu) ** 2).mean(axis=-1, keepdims=True)
             return (x - mu) * ((var + self.eps) ** -0.5) * self.gamma.data + self.beta.data
 
-        scaled = x / scale
+        # Exact constant finite rows normalize to zero regardless of magnitude.
+        # Evaluate them through a zero surrogate so NumPy never has to sum huge
+        # equal values or divide epsilon by a scale large enough to underflow it.
+        constant_rows = _constant_finite_rows(x)
+        safe_scale = np.where(constant_rows, 1.0, scale)
+        scaled = np.where(constant_rows, 0.0, x / safe_scale)
         mu = scaled.mean(axis=-1, keepdims=True)
         diff = scaled - mu
         var = (diff ** 2).mean(axis=-1, keepdims=True)
-        eps_scaled = (self.eps / scale) / scale
+        eps_scaled = (self.eps / safe_scale) / safe_scale
         return diff * ((var + eps_scaled) ** -0.5) * self.gamma.data + self.beta.data
 
     def _validate_input_shape(self, shape):
