@@ -67,8 +67,8 @@ def test_zero_max_norm_zeros_nonzero_active_gradients():
 
 
 def test_unrepresentable_global_norm_still_gets_meaningful_clipping_scale():
-    first = _parameter([1.0], [1e308])
-    second = _parameter([1.0], [1e308])
+    first = _parameter([1.0], [1.4e308])
+    second = _parameter([1.0], [1.4e308])
 
     with np.errstate(all="raise"):
         total_norm = clip_grad_norm_([first, second], 1.0)
