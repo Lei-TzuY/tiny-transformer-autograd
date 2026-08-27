@@ -761,7 +761,10 @@ def _validate_positive_finite_real(value, name):
         value, (int, float, np.integer, np.floating)
     ):
         raise TypeError(f"{name} must be a real number")
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be finite") from exc
     if not np.isfinite(value):
         raise ValueError(f"{name} must be finite")
     if value <= 0:
@@ -774,7 +777,10 @@ def _validate_dropout_probability(value, name):
         value, (int, float, np.integer, np.floating)
     ):
         raise TypeError(f"{name} must be a real number")
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be finite") from exc
     if not np.isfinite(value):
         raise ValueError(f"{name} must be finite")
     if not 0.0 <= value < 1.0:
@@ -805,7 +811,10 @@ def _validate_sampling_options(temperature, top_k, top_p):
             top_p, (int, float, np.integer, np.floating)
         ):
             raise TypeError("top_p must be a real number")
-        top_p = float(top_p)
+        try:
+            top_p = float(top_p)
+        except OverflowError as exc:
+            raise ValueError("top_p must be finite") from exc
         if not np.isfinite(top_p):
             raise ValueError("top_p must be finite")
         if not 0.0 < top_p <= 1.0:
