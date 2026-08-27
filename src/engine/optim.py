@@ -6,6 +6,7 @@ The update rules operate directly on tensor.data (in-place NumPy), so
 they are not part of the computational graph themselves.
 """
 
+from collections.abc import Mapping
 from numbers import Integral, Real
 
 import numpy as np
@@ -60,6 +61,11 @@ class SGD:
         }
 
     def load_state_dict(self, state):
+        state = _validate_optimizer_state_mapping(
+            state,
+            {"lr", "momentum", "weight_decay", "v"},
+            "SGD",
+        )
         lr = _real_scalar("SGD lr", state["lr"], positive=True)
         momentum = _real_scalar(
             "SGD momentum",
@@ -153,6 +159,11 @@ class Adam:
         }
 
     def load_state_dict(self, state):
+        state = _validate_optimizer_state_mapping(
+            state,
+            {"lr", "betas", "eps", "weight_decay", "t", "m", "v"},
+            self.__class__.__name__,
+        )
         lr = _real_scalar("Adam lr", state["lr"], positive=True)
         beta1, beta2 = _validate_betas(state["betas"], "Adam betas")
         eps = _real_scalar("Adam eps", state["eps"], positive=True)
@@ -222,6 +233,16 @@ def _unique_parameters(parameters):
             )
         seen.add(marker)
     return materialized
+
+
+def _validate_optimizer_state_mapping(state, required, label):
+    """Validate one optimizer state envelope before reading any saved field."""
+    if not isinstance(state, Mapping):
+        raise TypeError(f"{label} state must be a mapping")
+    missing = sorted(required - set(state))
+    if missing:
+        raise ValueError(f"{label} state missing keys: {missing}")
+    return state
 
 
 def _bool_flag(name, value):
