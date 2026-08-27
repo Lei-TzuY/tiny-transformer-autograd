@@ -6,7 +6,7 @@ import numpy as np
 
 from engine.checkpoint import read_checkpoint, restore_checkpoint
 from engine.safe_checkpoint import read_safe_checkpoint
-from nn.streaming import stream_generate
+from nn.streaming import stream_generate, stream_generate_iter
 from nn.transformer import (
     GPT,
     _validate_non_negative_int,
@@ -46,6 +46,17 @@ def parse_args():
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--top-p", type=float, default=None)
+    parser.add_argument(
+        "--stop-token-id",
+        type=int,
+        default=None,
+        help="Stop after every batch row emits this newly generated token id",
+    )
+    parser.add_argument(
+        "--incremental-output",
+        action="store_true",
+        help="Decode, print, and flush each generated token as soon as it is available",
+    )
     parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
@@ -105,6 +116,31 @@ def _validate_args(args):
     if args.strategy not in {"sample", "greedy"}:
         raise ValueError("--strategy must be 'sample' or 'greedy'")
 
+    stop_token_id = getattr(args, "stop_token_id", None)
+    if stop_token_id is not None:
+        _validate_non_negative_int(stop_token_id, "--stop-token-id")
+    incremental_output = getattr(args, "incremental_output", False)
+    if not isinstance(incremental_output, (bool, np.bool_)):
+        raise TypeError("--incremental-output must be a boolean flag")
+
+
+def _validate_stop_token_id(stop_token_id, vocab_size):
+    """Validate a CLI stop id once the checkpoint vocabulary is known."""
+    if stop_token_id is None:
+        return None
+    stop_token_id = _validate_non_negative_int(stop_token_id, "--stop-token-id")
+    if stop_token_id >= vocab_size:
+        raise ValueError(f"--stop-token-id must be in [0, {vocab_size})")
+    return stop_token_id
+
+
+def _print_incremental(tokenizer, visible_prompt, iterator):
+    """Print one single-row generation stream without buffering future tokens."""
+    print(tokenizer.decode(visible_prompt[0]), end="", flush=True)
+    for token in iterator:
+        print(tokenizer.decode(token), end="", flush=True)
+    print(flush=True)
+
 
 def main():
     args = parse_args()
@@ -113,6 +149,7 @@ def main():
         args.checkpoint,
         checkpoint_format=args.checkpoint_format,
     )
+    stop_token_id = _validate_stop_token_id(args.stop_token_id, model.vocab_size)
     prompt = _read_prompt(args)
     if not prompt:
         raise ValueError("generation prompt must not be empty")
@@ -128,15 +165,20 @@ def main():
 
     np.random.seed(args.seed)
     visible_prompt = np.asarray(encoded[-model.context_len:], dtype=np.int64)[None, :]
-    generated = stream_generate(
-        model,
-        visible_prompt,
-        max_new_tokens=args.tokens,
-        temperature=args.temperature,
-        top_k=args.top_k,
-        top_p=args.top_p,
-        strategy=args.strategy,
-    )
+    generation_options = {
+        "max_new_tokens": args.tokens,
+        "temperature": args.temperature,
+        "top_k": args.top_k,
+        "top_p": args.top_p,
+        "strategy": args.strategy,
+        "stop_token_id": stop_token_id,
+    }
+    if args.incremental_output:
+        iterator = stream_generate_iter(model, visible_prompt, **generation_options)
+        _print_incremental(tokenizer, visible_prompt, iterator)
+        return
+
+    generated = stream_generate(model, visible_prompt, **generation_options)
     print(tokenizer.decode(generated[0]))
 
 
