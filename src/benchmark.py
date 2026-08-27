@@ -109,11 +109,17 @@ def _run_benchmark(args, warmup, repeats, seed):
 
     cached_durations = []
     uncached_durations = []
-    for _ in range(repeats):
-        # Keep the paired cache/no-cache samples adjacent so slow host drift
-        # does not masquerade as a cache effect.
-        cached_durations.append(_time_call(generate_cached_once))
-        uncached_durations.append(_time_call(generate_uncached_once))
+    for repeat in range(repeats):
+        # Keep cache/no-cache samples adjacent and alternate their order so a
+        # systematic first-run or second-run effect cannot masquerade as a
+        # cache speedup. Appending remains keyed by mode, so each list index
+        # still represents the same repeat for paired speedup calculation.
+        if repeat % 2 == 0:
+            cached_durations.append(_time_call(generate_cached_once))
+            uncached_durations.append(_time_call(generate_uncached_once))
+        else:
+            uncached_durations.append(_time_call(generate_uncached_once))
+            cached_durations.append(_time_call(generate_cached_once))
 
     infer_tokens = args.steps * args.batch * args.ctx
     forward_rates = [infer_tokens / seconds for seconds in forward_durations]
