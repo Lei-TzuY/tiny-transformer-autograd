@@ -2,13 +2,14 @@
 
 ``evaluating(module)`` and ``training(module)`` temporarily place the module tree in
 one mode and then restore the exact per-module training-mode state that existed on
-entry.  These helpers are intentionally separate from autograd grad mode: module mode
-controls behavior such as dropout, while ``no_grad()`` controls graph recording.
+entry. ``inference(module)`` composes evaluation mode with ``no_grad()`` for callers
+that want both inference behaviors in one explicit scope.
 """
 
 from contextlib import contextmanager
 import threading
 
+from engine.grad_mode import no_grad
 from nn.module import Module
 
 
@@ -44,13 +45,13 @@ def _temporary_mode(module, mode):
 def evaluating(module):
     """Temporarily put ``module`` and its current descendants in evaluation mode.
 
-    Existing child modules may have different training flags.  The context snapshots
+    Existing child modules may have different training flags. The context snapshots
     those flags individually, calls the normal recursive ``eval()`` path, and restores
-    the exact entry state in ``finally``.  A module that did not have a local
+    the exact entry state in ``finally``. A module that did not have a local
     ``training`` attribute before entry has that temporary attribute removed again.
 
     Helper-managed contexts are serialized because overlapping contexts can otherwise
-    restore shared module state out of order.  Direct ``train()``/``eval()`` calls made
+    restore shared module state out of order. Direct ``train()``/``eval()`` calls made
     outside these helpers are not synchronized.
     """
     _validate_module(module, "evaluating")
@@ -64,9 +65,23 @@ def training(module):
 
     The complete entry mode of every existing module is restored on exit, including
     mixed train/eval subtrees and modules that originally lacked a local ``training``
-    attribute.  This is useful for controlled training-mode forwards without making a
+    attribute. This is useful for controlled training-mode forwards without making a
     permanent recursive ``train()`` change.
     """
     _validate_module(module, "training")
     with _temporary_mode(module, True) as active:
         yield active
+
+
+@contextmanager
+def inference(module):
+    """Temporarily enable evaluation mode and disable autograd graph recording.
+
+    Module training flags are restored with the same exact per-module semantics as
+    ``evaluating()``. Grad mode is thread-local and restored by ``no_grad()`` even when
+    the body raises, so this helper does not leak either kind of inference state.
+    """
+    _validate_module(module, "inference")
+    with _temporary_mode(module, False) as active:
+        with no_grad():
+            yield active
