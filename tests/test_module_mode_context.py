@@ -1,4 +1,4 @@
-"""Temporary evaluation mode must restore exact per-module state."""
+"""Temporary module-mode contexts must restore exact per-module state."""
 
 import os
 import sys
@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from engine.module_mode import evaluating
+from engine.module_mode import evaluating, training
 from nn.module import Module
 
 
@@ -24,6 +24,12 @@ class Tree(Module):
     def __init__(self):
         self.left = Leaf(True)
         self.right = Leaf(False)
+
+
+def _assert_rng_equal(before, after):
+    assert before[0] == after[0]
+    np.testing.assert_array_equal(before[1], after[1])
+    assert before[2:] == after[2:]
 
 
 def test_evaluating_sets_all_existing_modules_false_and_restores_mixed_state():
@@ -41,12 +47,40 @@ def test_evaluating_sets_all_existing_modules_false_and_restores_mixed_state():
     assert model.right.training is False
 
 
+def test_training_sets_all_existing_modules_true_and_restores_mixed_state():
+    model = Tree()
+    assert "training" not in vars(model)
+
+    with training(model) as returned:
+        assert returned is model
+        assert model.training is True
+        assert model.left.training is True
+        assert model.right.training is True
+
+    assert "training" not in vars(model)
+    assert model.left.training is True
+    assert model.right.training is False
+
+
 def test_evaluating_restores_after_body_exception():
     model = Tree()
 
     with pytest.raises(RuntimeError, match="boom"):
         with evaluating(model):
             model.train(True)
+            raise RuntimeError("boom")
+
+    assert "training" not in vars(model)
+    assert model.left.training is True
+    assert model.right.training is False
+
+
+def test_training_restores_after_body_exception():
+    model = Tree()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with training(model):
+            model.eval()
             raise RuntimeError("boom")
 
     assert "training" not in vars(model)
@@ -71,39 +105,62 @@ def test_evaluating_is_reentrant_and_preserves_outer_eval_state():
     assert model.right.training is False
 
 
-def test_evaluating_rejects_non_module_before_touching_rng():
+def test_training_and_evaluating_nest_and_restore_each_scope():
+    model = Tree()
+
+    with training(model):
+        assert model.training is True
+        assert model.left.training is True
+        assert model.right.training is True
+        with evaluating(model):
+            assert model.training is False
+            assert model.left.training is False
+            assert model.right.training is False
+        assert model.training is True
+        assert model.left.training is True
+        assert model.right.training is True
+
+    assert "training" not in vars(model)
+    assert model.left.training is True
+    assert model.right.training is False
+
+
+@pytest.mark.parametrize(
+    ("helper", "message"),
+    [
+        (evaluating, "evaluating module must be an nn.Module"),
+        (training, "training module must be an nn.Module"),
+    ],
+)
+def test_mode_helpers_reject_non_module_before_touching_rng(helper, message):
     np.random.seed(123)
     before = np.random.get_state()
 
-    with pytest.raises(TypeError, match="evaluating module must be an nn.Module"):
-        with evaluating(object()):
+    with pytest.raises(TypeError, match=message):
+        with helper(object()):
             raise AssertionError("unreachable")
 
-    after = np.random.get_state()
-    assert before[0] == after[0]
-    np.testing.assert_array_equal(before[1], after[1])
-    assert before[2:] == after[2:]
+    _assert_rng_equal(before, np.random.get_state())
 
 
-def test_evaluating_does_not_touch_numpy_rng():
+@pytest.mark.parametrize("helper", [evaluating, training])
+def test_mode_helpers_do_not_touch_numpy_rng(helper):
     model = Tree()
     np.random.seed(456)
     before = np.random.get_state()
 
-    with evaluating(model):
+    with helper(model):
         pass
 
-    after = np.random.get_state()
-    assert before[0] == after[0]
-    np.testing.assert_array_equal(before[1], after[1])
-    assert before[2:] == after[2:]
+    _assert_rng_equal(before, np.random.get_state())
 
 
-def test_overlapping_helper_contexts_are_serialized():
+def test_overlapping_mixed_helper_contexts_are_serialized():
     model = Tree()
     entered_first = threading.Event()
     release_first = threading.Event()
     entered_second = threading.Event()
+    second_saw_training = []
     errors = []
 
     def first():
@@ -117,7 +174,8 @@ def test_overlapping_helper_contexts_are_serialized():
     def second():
         try:
             entered_first.wait(timeout=2.0)
-            with evaluating(model):
+            with training(model):
+                second_saw_training.append(model.right.training)
                 entered_second.set()
         except BaseException as exc:  # pragma: no cover - failure reporting path
             errors.append(exc)
@@ -139,6 +197,7 @@ def test_overlapping_helper_contexts_are_serialized():
     assert not thread_b.is_alive()
     assert not errors
     assert entered_second.is_set()
+    assert second_saw_training == [True]
     assert "training" not in vars(model)
     assert model.left.training is True
     assert model.right.training is False
