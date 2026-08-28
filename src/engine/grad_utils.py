@@ -105,6 +105,9 @@ def clip_grad_norm_(parameters, max_norm=1.0):
             raise ValueError(f"gradient {index} must be writeable for clipping")
 
     scale = (max_norm / largest) / scaled_norm
-    for _, grad in gradients:
-        grad *= scale
+    # Clipping can legitimately round tiny components to zero. That is not a
+    # failed transaction and should remain valid under caller warning policies.
+    with np.errstate(under="ignore"):
+        for _, grad in gradients:
+            grad *= scale
     return total
