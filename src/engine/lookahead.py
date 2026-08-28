@@ -107,7 +107,9 @@ def _interpolate(slow, fast, alpha):
     # For same-sign endpoints, fast - slow cannot exceed the binary64 range.
     # For opposite signs that subtraction can overflow, so use a convex weighted
     # sum whose two terms have opposite signs and individually shrink in magnitude.
-    with np.errstate(over="raise", invalid="raise"):
+    # Tiny valid components may underflow while scaling; that is mathematically
+    # harmless for binary64 interpolation and should stay warning-neutral.
+    with np.errstate(over="raise", invalid="raise", under="ignore"):
         if np.any(same_sign):
             before = slow[same_sign]
             after = fast[same_sign]
