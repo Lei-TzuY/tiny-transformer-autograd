@@ -87,3 +87,33 @@ def test_persistent_tensor_namespace_keeps_its_existing_collision_error():
         match=r"^ambiguous persistent tensor name 'params\[1\]' maps to multiple tensors$",
     ):
         list(module.named_tensors())
+
+
+@pytest.mark.parametrize("prefix", [None, 1, True, [], object()])
+def test_named_parameters_reject_non_string_prefixes(prefix):
+    module = _MappingParameters({"weight": Tensor([1.0], requires_grad=True)})
+
+    with pytest.raises(TypeError, match=r"^named_parameters prefix must be a string$"):
+        list(module.named_parameters(prefix=prefix))
+
+
+@pytest.mark.parametrize("prefix", [None, 1, True, [], object()])
+def test_named_tensors_reject_non_string_prefixes(prefix):
+    module = _MappingParameters({"buffer": Tensor([1.0], requires_grad=False)})
+
+    with pytest.raises(TypeError, match=r"^named_tensors prefix must be a string$"):
+        list(module.named_tensors(prefix=prefix))
+
+
+def test_string_prefixes_keep_existing_named_namespace_behavior():
+    weight = Tensor([1.0], requires_grad=True)
+    buffer = Tensor([2.0], requires_grad=False)
+    module = _MappingParameters({"weight": weight, "buffer": buffer})
+
+    assert list(module.named_parameters(prefix="root")) == [
+        ("root.params[weight]", weight),
+    ]
+    assert list(module.named_tensors(prefix="root")) == [
+        ("root.params[weight]", weight),
+        ("root.params[buffer]", buffer),
+    ]
