@@ -112,8 +112,18 @@ class ExponentialMovingAverage:
         self._parameters = parameters
         self._shapes = tuple(shapes)
         self._averages = tuple(averages)
-        self.decay = decay
+        self._decay = decay
         self.num_updates = 0
+
+    @property
+    def decay(self):
+        """Return the validated decay used by future updates."""
+        return self._decay
+
+    @decay.setter
+    def decay(self, value):
+        """Change the decay while preserving the constructor validation contract."""
+        self._decay = _normalise_decay(value)
 
     def averages(self):
         """Return independent copies of the current shadow arrays."""
