@@ -266,6 +266,104 @@ def test_overlapping_mixed_helper_contexts_are_serialized():
     assert model.right.training is False
 
 
+def test_parent_and_child_helper_contexts_are_serialized():
+    model = Tree()
+    entered_parent = threading.Event()
+    release_parent = threading.Event()
+    entered_child = threading.Event()
+    errors = []
+
+    def parent_worker():
+        try:
+            with evaluating(model):
+                entered_parent.set()
+                release_parent.wait(timeout=2.0)
+        except BaseException as exc:  # pragma: no cover - failure reporting path
+            errors.append(exc)
+
+    def child_worker():
+        try:
+            entered_parent.wait(timeout=2.0)
+            with training(model.left):
+                entered_child.set()
+        except BaseException as exc:  # pragma: no cover - failure reporting path
+            errors.append(exc)
+
+    thread_a = threading.Thread(target=parent_worker)
+    thread_b = threading.Thread(target=child_worker)
+    thread_a.start()
+    thread_b.start()
+
+    assert entered_parent.wait(timeout=2.0)
+    time.sleep(0.05)
+    assert not entered_child.is_set()
+
+    release_parent.set()
+    thread_a.join(timeout=2.0)
+    thread_b.join(timeout=2.0)
+
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
+    assert not errors
+    assert entered_child.is_set()
+    assert "training" not in vars(model)
+    assert model.left.training is True
+    assert model.right.training is False
+
+
+def test_disjoint_module_trees_can_use_mode_contexts_concurrently():
+    first_model = Tree()
+    second_model = Tree()
+    entered_first = threading.Event()
+    release_first = threading.Event()
+    entered_second = threading.Event()
+    release_second = threading.Event()
+    errors = []
+
+    def first_worker():
+        try:
+            with evaluating(first_model):
+                entered_first.set()
+                release_first.wait(timeout=2.0)
+        except BaseException as exc:  # pragma: no cover - failure reporting path
+            errors.append(exc)
+
+    def second_worker():
+        try:
+            entered_first.wait(timeout=2.0)
+            with training(second_model):
+                entered_second.set()
+                release_second.wait(timeout=2.0)
+        except BaseException as exc:  # pragma: no cover - failure reporting path
+            errors.append(exc)
+
+    thread_a = threading.Thread(target=first_worker)
+    thread_b = threading.Thread(target=second_worker)
+    thread_a.start()
+    thread_b.start()
+
+    assert entered_first.wait(timeout=2.0)
+    assert entered_second.wait(timeout=2.0)
+    assert not errors
+    assert first_model.left.training is False
+    assert second_model.right.training is True
+
+    release_second.set()
+    release_first.set()
+    thread_a.join(timeout=2.0)
+    thread_b.join(timeout=2.0)
+
+    assert not thread_a.is_alive()
+    assert not thread_b.is_alive()
+    assert not errors
+    assert "training" not in vars(first_model)
+    assert first_model.left.training is True
+    assert first_model.right.training is False
+    assert "training" not in vars(second_model)
+    assert second_model.left.training is True
+    assert second_model.right.training is False
+
+
 def test_inference_combines_eval_mode_and_no_grad_then_restores_both():
     model = Tree()
     x = Tensor([2.0], requires_grad=True)
