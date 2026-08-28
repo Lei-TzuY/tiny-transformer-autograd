@@ -24,6 +24,8 @@ def _validate_seed(seed):
 def _validate_state(state):
     if state is None:
         return None
+    if isinstance(state, np.random.RandomState):
+        state = state.get_state()
     probe = np.random.RandomState()
     try:
         probe.set_state(state)
@@ -38,13 +40,15 @@ def fork_rng(seed=None, *, state=None):
 
     With neither argument, the context starts from the caller's current RNG state, so
     draws inside it predict the caller's next draws without consuming them. ``seed``
-    starts a deterministic stream, while ``state`` replays an exact state previously
-    returned by ``np.random.get_state()``. Seed and state are mutually exclusive.
+    starts a deterministic stream, while ``state`` replays either an exact state from
+    ``np.random.get_state()`` or the current state of an independent ``RandomState``.
+    Seed and state are mutually exclusive.
 
     State validation happens on an isolated ``RandomState`` before the process-global
-    RNG is inspected or changed. Nested contexts are reentrant, and overlapping threads
-    are serialized because NumPy's legacy RNG is process-global. Exceptions restore the
-    state observed on entry.
+    RNG is inspected or changed. Passing a ``RandomState`` snapshots it without
+    consuming that source stream. Nested contexts are reentrant, and overlapping
+    threads are serialized because NumPy's legacy RNG is process-global. Exceptions
+    restore the state observed on entry.
     """
     seed = _validate_seed(seed)
     if seed is not None and state is not None:
