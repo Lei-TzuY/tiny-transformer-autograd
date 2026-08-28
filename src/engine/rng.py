@@ -21,22 +21,43 @@ def _validate_seed(seed):
     return seed
 
 
+def _validate_state(state):
+    if state is None:
+        return None
+    probe = np.random.RandomState()
+    try:
+        probe.set_state(state)
+    except (TypeError, ValueError, IndexError, OverflowError) as exc:
+        raise ValueError("state must be a valid NumPy RandomState state") from exc
+    return probe.get_state()
+
+
 @contextmanager
-def fork_rng(seed=None):
+def fork_rng(seed=None, *, state=None):
     """Temporarily fork NumPy's global RNG and restore the caller state exactly.
 
-    With ``seed=None``, the context starts from the caller's current RNG state, so
-    draws inside it predict the caller's next draws without consuming them. Supplying
-    a seed instead starts an isolated deterministic stream. Nested contexts are
-    reentrant, and overlapping threads are serialized because NumPy's legacy RNG is
-    process-global. Exceptions restore the state observed on entry.
+    With neither argument, the context starts from the caller's current RNG state, so
+    draws inside it predict the caller's next draws without consuming them. ``seed``
+    starts a deterministic stream, while ``state`` replays an exact state previously
+    returned by ``np.random.get_state()``. Seed and state are mutually exclusive.
+
+    State validation happens on an isolated ``RandomState`` before the process-global
+    RNG is inspected or changed. Nested contexts are reentrant, and overlapping threads
+    are serialized because NumPy's legacy RNG is process-global. Exceptions restore the
+    state observed on entry.
     """
     seed = _validate_seed(seed)
+    if seed is not None and state is not None:
+        raise ValueError("seed and state are mutually exclusive")
+    state = _validate_state(state)
+
     with _RNG_FORK_LOCK:
-        state = np.random.get_state()
+        caller_state = np.random.get_state()
         try:
-            if seed is not None:
+            if state is not None:
+                np.random.set_state(state)
+            elif seed is not None:
                 np.random.seed(seed)
             yield
         finally:
-            np.random.set_state(state)
+            np.random.set_state(caller_state)
