@@ -99,7 +99,7 @@ def test_shared_tensor_is_counted_once_through_module_traversal_contract():
 
 def test_summary_is_observational_for_tensor_grad_version_and_rng_state():
     model = _Toy()
-    model.scalar.grad[:] = 7.0
+    model.scalar.grad[...] = 7.0
     model.child.weight.grad[:] = np.arange(6.0).reshape(2, 3)
 
     tensors = tuple(model.named_tensors())
