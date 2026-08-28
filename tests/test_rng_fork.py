@@ -9,13 +9,20 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from engine.rng import fork_rng
+import engine
+from engine import fork_rng
+from engine.rng import fork_rng as module_fork_rng
 
 
 def _assert_rng_state_equal(first, second):
     assert first[0] == second[0]
     np.testing.assert_array_equal(first[1], second[1])
     assert first[2:] == second[2:]
+
+
+def test_fork_rng_is_exported_from_engine():
+    assert engine.fork_rng is module_fork_rng
+    assert fork_rng is module_fork_rng
 
 
 def test_seeded_fork_is_deterministic_and_restores_caller_state():
