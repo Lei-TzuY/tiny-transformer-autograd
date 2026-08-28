@@ -8,6 +8,7 @@ mutates model Tensors when ``copy_to()`` or ``average_parameters()`` is used.
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from numbers import Integral, Real
+import threading
 
 import numpy as np
 
@@ -96,6 +97,10 @@ class ExponentialMovingAverage:
     writes go through ``Tensor.data`` mutation tracking, so already-built graphs
     are invalidated normally.  ``average_parameters()`` temporarily installs
     the shadows and restores the exact entry values even if the body raises.
+
+    Operations on one EMA instance are serialized.  In particular, overlapping
+    ``average_parameters()`` scopes cannot snapshot or restore the same bound
+    Tensors out of order, while same-thread nested scopes remain supported.
     """
 
     def __init__(self, parameters, decay=0.999):
@@ -114,20 +119,25 @@ class ExponentialMovingAverage:
         self._averages = tuple(averages)
         self._decay = decay
         self.num_updates = 0
+        self._lock = threading.RLock()
 
     @property
     def decay(self):
         """Return the validated decay used by future updates."""
-        return self._decay
+        with self._lock:
+            return self._decay
 
     @decay.setter
     def decay(self, value):
         """Change the decay while preserving the constructor validation contract."""
-        self._decay = _normalise_decay(value)
+        value = _normalise_decay(value)
+        with self._lock:
+            self._decay = value
 
     def averages(self):
         """Return independent copies of the current shadow arrays."""
-        return tuple(np.array(value, copy=True) for value in self._averages)
+        with self._lock:
+            return tuple(np.array(value, copy=True) for value in self._averages)
 
     def _validate_shapes(self):
         for index, (parameter, expected) in enumerate(
@@ -141,90 +151,94 @@ class ExponentialMovingAverage:
 
     def update(self):
         """Update every shadow from the current bound parameter values."""
-        self._validate_shapes()
-        current = [
-            _finite_parameter_copy(parameter, index)
-            for index, parameter in enumerate(self._parameters)
-        ]
+        with self._lock:
+            self._validate_shapes()
+            current = [
+                _finite_parameter_copy(parameter, index)
+                for index, parameter in enumerate(self._parameters)
+            ]
 
-        if self.decay == 1.0:
+            if self._decay == 1.0:
+                self.num_updates += 1
+                return self
+            if self._decay == 0.0:
+                self._averages = tuple(current)
+                self.num_updates += 1
+                return self
+
+            retain = self._decay
+            add = 1.0 - retain
+            updated = []
+            try:
+                with np.errstate(over="raise", invalid="raise", under="ignore"):
+                    for average, value in zip(self._averages, current):
+                        next_average = average * retain + value * add
+                        if not np.isfinite(next_average).all():
+                            raise FloatingPointError
+                        updated.append(np.array(next_average, copy=True))
+            except FloatingPointError as exc:
+                # A convex combination of finite float64 values should remain
+                # finite.  Fail before committing any shadow if NumPy reports
+                # otherwise, rather than leaving a partially advanced EMA.
+                raise ValueError("EMA update produced non-finite values") from exc
+
+            self._averages = tuple(updated)
             self.num_updates += 1
             return self
-        if self.decay == 0.0:
-            self._averages = tuple(current)
-            self.num_updates += 1
-            return self
-
-        retain = self.decay
-        add = 1.0 - retain
-        updated = []
-        try:
-            with np.errstate(over="raise", invalid="raise", under="ignore"):
-                for average, value in zip(self._averages, current):
-                    next_average = average * retain + value * add
-                    if not np.isfinite(next_average).all():
-                        raise FloatingPointError
-                    updated.append(np.array(next_average, copy=True))
-        except FloatingPointError as exc:
-            # A convex combination of finite float64 values should remain
-            # finite.  Fail before committing any shadow if NumPy reports
-            # otherwise, rather than leaving a partially advanced EMA.
-            raise ValueError("EMA update produced non-finite values") from exc
-
-        self._averages = tuple(updated)
-        self.num_updates += 1
-        return self
 
     def copy_to(self):
         """Copy shadows into the bound Tensors after a complete preflight."""
-        self._validate_shapes()
-        writes = []
-        for index, (parameter, average) in enumerate(
-            zip(self._parameters, self._averages)
-        ):
-            data = np.asarray(parameter.data)
-            if np.array_equal(data, average):
-                continue
-            if not parameter.data.flags.writeable:
-                raise ValueError(f"EMA parameter {index} data is not writeable")
-            writes.append((parameter, average))
+        with self._lock:
+            self._validate_shapes()
+            writes = []
+            for index, (parameter, average) in enumerate(
+                zip(self._parameters, self._averages)
+            ):
+                data = np.asarray(parameter.data)
+                if np.array_equal(data, average):
+                    continue
+                if not parameter.data.flags.writeable:
+                    raise ValueError(f"EMA parameter {index} data is not writeable")
+                writes.append((parameter, average))
 
-        for parameter, average in writes:
-            parameter.data[...] = average
-        return self
+            for parameter, average in writes:
+                parameter.data[...] = average
+            return self
 
     @contextmanager
     def average_parameters(self):
         """Temporarily install EMA values and restore entry values on exit."""
-        self._validate_shapes()
-        originals = tuple(
-            np.array(parameter.data, copy=True) for parameter in self._parameters
-        )
-        self.copy_to()
-        try:
-            yield self
-        finally:
-            for parameter, original in zip(self._parameters, originals):
-                data = np.asarray(parameter.data)
-                if data.shape == original.shape and np.array_equal(
-                    data, original, equal_nan=True
-                ):
-                    continue
-                if data.shape == original.shape and parameter.data.flags.writeable:
-                    parameter.data[...] = original
-                else:
-                    # The context body may have replaced storage or its shape.
-                    # The property setter restores the original shape/value and
-                    # deliberately records another Tensor mutation.
-                    parameter.data = original
+        with self._lock:
+            self._validate_shapes()
+            originals = tuple(
+                np.array(parameter.data, copy=True) for parameter in self._parameters
+            )
+            self.copy_to()
+            try:
+                yield self
+            finally:
+                for parameter, original in zip(self._parameters, originals):
+                    data = np.asarray(parameter.data)
+                    if data.shape == original.shape and np.array_equal(
+                        data, original, equal_nan=True
+                    ):
+                        continue
+                    if data.shape == original.shape and parameter.data.flags.writeable:
+                        parameter.data[...] = original
+                    else:
+                        # The context body may have replaced storage or its shape.
+                        # The property setter restores the original shape/value and
+                        # deliberately records another Tensor mutation.
+                        parameter.data = original
 
     def state_dict(self):
         """Return an independent, serializable snapshot of EMA state."""
-        return {
-            "decay": self.decay,
-            "num_updates": self.num_updates,
-            "averages": [np.array(value, copy=True) for value in self._averages],
-        }
+        with self._lock:
+            return {
+                "decay": self._decay,
+                "num_updates": self.num_updates,
+                "averages": [np.array(value, copy=True) for value in self._averages],
+            }
 
     def load_state_dict(self, state):
         """Transactionally restore EMA metadata and shadows for this shape set."""
@@ -251,7 +265,8 @@ class ExponentialMovingAverage:
             for index, (value, shape) in enumerate(zip(averages, self._shapes))
         )
 
-        self.decay = decay
-        self.num_updates = num_updates
-        self._averages = restored
-        return self
+        with self._lock:
+            self._decay = decay
+            self.num_updates = num_updates
+            self._averages = restored
+            return self
