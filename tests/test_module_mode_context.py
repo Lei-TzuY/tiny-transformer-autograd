@@ -45,6 +45,18 @@ class GuardedLeaf(Leaf):
         super().__setattr__(name, value)
 
 
+class ModeHookTree(Tree):
+    def __init__(self):
+        super().__init__()
+        self.source = Tensor([2.0], requires_grad=True)
+        self.mode_hook_observations = []
+
+    def train(self, mode=True):
+        probe = self.source * 3.0
+        self.mode_hook_observations.append((is_grad_enabled(), probe))
+        return super().train(mode)
+
+
 def _assert_rng_equal(before, after):
     assert before[0] == after[0]
     np.testing.assert_array_equal(before[1], after[1])
@@ -274,6 +286,35 @@ def test_inference_combines_eval_mode_and_no_grad_then_restores_both():
     assert "training" not in vars(model)
     assert model.left.training is True
     assert model.right.training is False
+
+
+def test_inference_disables_grad_recording_during_mode_installation():
+    model = ModeHookTree()
+    assert is_grad_enabled()
+
+    with inference(model):
+        enabled, probe = model.mode_hook_observations[0]
+        assert enabled is False
+        assert probe.requires_grad is False
+        assert not probe._children
+
+    assert is_grad_enabled()
+    assert len(model.mode_hook_observations) == 1
+
+
+@pytest.mark.parametrize("helper", [evaluating, training])
+def test_plain_mode_helpers_leave_grad_enabled_during_mode_installation(helper):
+    model = ModeHookTree()
+    assert is_grad_enabled()
+
+    with helper(model):
+        enabled, probe = model.mode_hook_observations[0]
+        assert enabled is True
+        assert probe.requires_grad is True
+        assert probe._children
+
+    assert is_grad_enabled()
+    assert len(model.mode_hook_observations) == 1
 
 
 def test_inference_restores_outer_disabled_grad_mode_after_exception():
