@@ -11,7 +11,11 @@ class WarmupCosineScheduler:
     """Linear warmup followed by cosine decay."""
 
     def __init__(self, optimizer, total_steps, warmup_steps=0, min_lr=0.0):
-        base_lr = _positive_finite_real("optimizer.lr", optimizer.lr)
+        try:
+            optimizer_lr = optimizer.lr
+        except AttributeError as exc:
+            raise TypeError("optimizer must expose an lr attribute") from exc
+        base_lr = _positive_finite_real("optimizer.lr", optimizer_lr)
         total_steps = _positive_integer("total_steps", total_steps)
         warmup_steps = _integer("warmup_steps", warmup_steps, minimum=0)
         if warmup_steps > total_steps:
