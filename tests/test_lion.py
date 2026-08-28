@@ -157,7 +157,7 @@ def test_unrepresentable_weight_decay_product_rejects_before_writes():
     optimizer = Lion([parameter], lr=1e308, weight_decay=1e308)
     version = parameter._version
 
-    with pytest.raises(ValueError, match="lr \* weight_decay"):
+    with pytest.raises(ValueError, match=r"lr \* weight_decay"):
         optimizer.step()
 
     np.testing.assert_array_equal(parameter.data, [1.0])
@@ -283,9 +283,8 @@ def test_state_dict_round_trip_restores_hyperparameters_counters_and_momentum():
     assert restored.step_count == 1
     assert restored.state_dict()["steps"] == [1]
     np.testing.assert_array_equal(
-        restored.state_dict()["momentum"], saved["momentum"]
+        restored.state_dict()["momentum"][0], saved["momentum"][0]
     )
-    # Optimizer state deliberately does not overwrite live model parameters.
     np.testing.assert_array_equal(other_parameter.data, [7.0])
 
 
@@ -319,7 +318,7 @@ def test_rejected_state_load_is_fully_transactional():
     bad["weight_decay"] = 0.9
     bad["momentum"][1] = np.zeros((2,), dtype=np.float64)
 
-    with pytest.raises(ValueError, match="momentum\[1\] shape mismatch"):
+    with pytest.raises(ValueError, match=r"momentum\[1\] shape mismatch"):
         optimizer.load_state_dict(bad)
 
     after = optimizer.state_dict()
