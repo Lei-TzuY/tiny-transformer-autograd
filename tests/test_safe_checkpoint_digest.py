@@ -105,6 +105,26 @@ def test_digest_preserves_array_dtype_as_part_of_identity(tmp_path):
     assert safe_checkpoint_digest(first) != safe_checkpoint_digest(second)
 
 
+def test_digest_normalizes_recursive_hash_walk_failures(monkeypatch):
+    state = []
+    cursor = state
+    for _ in range(sys.getrecursionlimit() + 100):
+        nested = []
+        cursor.append(nested)
+        cursor = nested
+
+    monkeypatch.setattr(
+        "engine.safe_checkpoint_digest.read_safe_checkpoint",
+        lambda path: state,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="safe checkpoint state nesting is too deep to digest",
+    ):
+        safe_checkpoint_digest("ignored.safe.npz")
+
+
 def test_verify_accepts_exact_and_uppercase_expected_digest(tmp_path):
     path = tmp_path / "checkpoint.safe.npz"
     _save(path)
