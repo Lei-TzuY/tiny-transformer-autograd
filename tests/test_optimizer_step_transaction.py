@@ -216,7 +216,8 @@ def test_optimizer_parameter_collection_drift_is_restored():
             optimizer.parameters.append(extra)
 
     assert optimizer.parameters is original_container
-    assert optimizer.parameters == [parameter]
+    assert len(optimizer.parameters) == 1
+    assert optimizer.parameters[0] is parameter
 
 
 def test_replaced_optimizer_parameter_list_is_restored_on_failure():
@@ -233,7 +234,8 @@ def test_replaced_optimizer_parameter_list_is_restored_on_failure():
             raise Marker("abort")
 
     assert optimizer.parameters is original_container
-    assert optimizer.parameters == [parameter]
+    assert len(optimizer.parameters) == 1
+    assert optimizer.parameters[0] is parameter
 
 
 def test_read_only_storage_created_inside_body_uses_replacement_rollback():
@@ -280,15 +282,22 @@ def test_nonfinite_optimizer_state_baseline_is_rejected_before_body():
     assert entered is False
 
 
-@pytest.mark.parametrize("factory", [SGD, Adam, AdamW])
-def test_empty_builtin_optimizers_are_valid_transactions(factory):
+@pytest.mark.parametrize(
+    ("factory", "expected_step"),
+    [(SGD, None), (Adam, 1), (AdamW, 1)],
+)
+def test_empty_builtin_optimizers_commit_their_existing_step_semantics(
+    factory, expected_step
+):
     optimizer = factory([])
-    state_before = _snapshot_state(optimizer)
+    expected = _snapshot_state(optimizer)
 
     with optimizer_step_transaction(optimizer):
         optimizer.step()
 
-    _assert_state_equal(optimizer.state_dict(), state_before)
+    if expected_step is not None:
+        expected["t"] = expected_step
+    _assert_state_equal(optimizer.state_dict(), expected)
 
 
 def test_unsupported_optimizer_is_rejected_explicitly():
@@ -340,6 +349,27 @@ def test_same_thread_nested_transactions_are_reentrant():
             optimizer.step()
 
     np.testing.assert_allclose(parameter.data, [0.8], rtol=0.0, atol=1e-15)
+
+
+def test_outer_rollback_undoes_a_successful_nested_transaction():
+    class Marker(Exception):
+        pass
+
+    parameter = Tensor([1.0], requires_grad=True)
+    parameter.grad[...] = [1.0]
+    optimizer = SGD([parameter], lr=0.1, momentum=0.9)
+    value_before = parameter.data.copy()
+    state_before = _snapshot_state(optimizer)
+
+    with pytest.raises(Marker):
+        with optimizer_step_transaction(optimizer):
+            optimizer.step()
+            with optimizer_step_transaction(optimizer):
+                optimizer.step()
+            raise Marker("abort outer transaction")
+
+    np.testing.assert_array_equal(parameter.data, value_before)
+    _assert_state_equal(optimizer.state_dict(), state_before)
 
 
 def test_rollback_restores_optimizer_state_but_not_gradient_buffers():
