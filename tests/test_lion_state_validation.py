@@ -163,7 +163,7 @@ def test_read_only_internal_momentum_rejects_load_before_any_state_changes():
     state["lr"] = 0.5
     optimizer._momentum[1].flags.writeable = False
 
-    with pytest.raises(ValueError, match="momentum\[1\] must be writeable"):
+    with pytest.raises(ValueError, match=r"momentum\[1\] must be writeable"):
         optimizer.load_state_dict(state)
 
     assert optimizer.lr == baseline["lr"]
@@ -178,7 +178,7 @@ def test_state_dict_rejects_corrupted_internal_momentum_without_mutating_paramet
     versions = [parameter._version for parameter in parameters]
     optimizer._momentum[0][...] = np.inf
 
-    with pytest.raises(ValueError, match="momentum\[0\].*finite"):
+    with pytest.raises(ValueError, match=r"momentum\[0\].*finite"):
         optimizer.state_dict()
 
     for parameter, expected, version in zip(parameters, parameter_values, versions):
