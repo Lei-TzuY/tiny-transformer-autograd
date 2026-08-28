@@ -10,6 +10,7 @@ from .ops import sum as tensor_sum, mean as tensor_mean
 from .autograd import grad
 from .gradcheck import gradcheck
 from .recompute import recompute
+from .grad_utils import clip_grad_norm_, global_grad_norm
 from .optim import SGD, Adam, AdamW
 from .scheduler import WarmupCosineScheduler
 from .checkpoint import read_checkpoint, restore_checkpoint, save_checkpoint
