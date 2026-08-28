@@ -27,7 +27,10 @@ def safe_checkpoint_digest(path):
     """
     state = read_safe_checkpoint(path)
     digest = hashlib.sha256()
-    _hash_value(digest, state)
+    try:
+        _hash_value(digest, state)
+    except RecursionError as exc:
+        raise ValueError("safe checkpoint state nesting is too deep to digest") from exc
     return digest.hexdigest()
 
 
