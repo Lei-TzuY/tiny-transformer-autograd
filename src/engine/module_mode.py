@@ -87,10 +87,14 @@ def inference(module):
     """Temporarily enable evaluation mode and disable autograd graph recording.
 
     Module training flags are restored with the same exact per-module semantics as
-    ``evaluating()``. Grad mode is thread-local and restored by ``no_grad()`` even when
-    the body raises, so this helper does not leak either kind of inference state.
+    ``evaluating()``. The ``no_grad()`` scope covers mode installation as well as the
+    caller body, so custom ``train(False)`` hooks cannot accidentally record a graph
+    while entering inference. Grad mode is restored exactly even when setup or the
+    body raises.
     """
     _validate_module(module, "inference")
-    with _temporary_mode(module, False) as active:
-        with no_grad():
+    # Enter no-grad before installing evaluation mode. Custom ``train()`` overrides
+    # may compute/cache Tensors, and inference should not record those setup graphs.
+    with no_grad():
+        with _temporary_mode(module, False) as active:
             yield active
