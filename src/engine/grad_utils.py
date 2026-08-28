@@ -64,9 +64,13 @@ def _norm_parts(gradients):
         return 0.0, 0.0, 0.0
 
     scaled_sumsq = 0.0
-    for _, grad in gradients:
-        scaled = np.asarray(grad, dtype=np.float64) / largest
-        scaled_sumsq += float(np.sum(scaled * scaled, dtype=np.float64))
+    # Tiny components may legitimately round to zero after scaling by the
+    # largest gradient. That does not make the L2 norm invalid and must remain
+    # warning-neutral even when callers promote floating underflow to errors.
+    with np.errstate(under="ignore"):
+        for _, grad in gradients:
+            scaled = np.asarray(grad, dtype=np.float64) / largest
+            scaled_sumsq += float(np.sum(scaled * scaled, dtype=np.float64))
     scaled_norm = float(np.sqrt(scaled_sumsq))
 
     float_max = np.finfo(np.float64).max
