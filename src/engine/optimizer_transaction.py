@@ -2,14 +2,13 @@
 
 The helper in this module snapshots both model parameters and optimizer state,
 then either commits a healthy step or rolls the complete optimizer/parameter
-state back.  Rollback intentionally never rewinds Tensor mutation versions:
+state back. Rollback intentionally never rewinds Tensor mutation versions:
 if a failed step wrote a Tensor, pre-existing autograd graphs must stay stale.
 """
 
 from contextlib import contextmanager
 import copy
 import math
-from numbers import Complex, Real
 import threading
 import weakref
 
@@ -65,6 +64,7 @@ def _parameter_snapshot(parameter, index):
     return {
         "data": np.array(data, dtype=np.float64, copy=True),
         "requires_grad": bool(parameter.requires_grad),
+        "writeable": bool(parameter.data.flags.writeable),
     }
 
 
@@ -189,6 +189,11 @@ class _OptimizerTransaction:
                     "optimizer transaction requires_grad changed at index "
                     f"{index}"
                 )
+            if bool(parameter.data.flags.writeable) != snapshot["writeable"]:
+                raise ValueError(
+                    "optimizer transaction parameter writability changed at index "
+                    f"{index}"
+                )
 
         current_state = self.optimizer.state_dict()
         _validate_finite_state(current_state)
@@ -208,10 +213,12 @@ class _OptimizerTransaction:
                     parameter.data[...] = saved
                 else:
                     # Replacing storage is the recovery path for shape drift or
-                    # caller-made read-only storage.  Tensor.data tracks this as
+                    # caller-made read-only storage. Tensor.data tracks this as
                     # another mutation, which is required for graph safety.
                     parameter.data = saved
             parameter.requires_grad = snapshot["requires_grad"]
+            if bool(parameter.data.flags.writeable) != snapshot["writeable"]:
+                parameter.data.setflags(write=snapshot["writeable"])
 
         self.optimizer.load_state_dict(copy.deepcopy(self.optimizer_state))
 
@@ -233,21 +240,21 @@ def optimizer_step_transaction(optimizer):
             optimizer.step()
 
     The transaction snapshots every bound parameter plus the optimizer's own
-    ``state_dict()``.  A body exception rolls both back and is re-raised.  On
-    normal exit, parameter identity, shape, finiteness, ``requires_grad``, and
-    optimizer-state finiteness are checked; a failed check is rolled back and
-    then raised.
+    ``state_dict()``. A body exception rolls both back and is re-raised. On
+    normal exit, parameter identity, shape, finiteness, ``requires_grad``,
+    storage writability, and optimizer-state finiteness are checked; a failed
+    check is rolled back and then raised.
 
-    Successful steps are left untouched.  Rollback restores parameter *values*
+    Successful steps are left untouched. Rollback restores parameter *values*
     but never decrements Tensor mutation versions, so graphs built before a
     failed write remain correctly invalidated.
 
     Transactions on the same optimizer instance are serialized across threads
-    with a reentrant lock; same-thread nesting remains supported.  Direct calls
+    with a reentrant lock; same-thread nesting remains supported. Direct calls
     to ``optimizer.step()`` outside this helper are not synchronized by it.
 
     The context currently supports the repository's built-in ``SGD``, ``Adam``,
-    and ``AdamW`` optimizers.  Gradient buffers and NumPy RNG state are outside
+    and ``AdamW`` optimizers. Gradient buffers and NumPy RNG state are outside
     the transaction because these optimizer ``step()`` implementations do not
     mutate or consume them.
     """
