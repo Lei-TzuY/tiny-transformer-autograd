@@ -1,12 +1,10 @@
 """Read-only diagnostics for parameter changes across optimizer steps.
 
 ``ParameterUpdateTracker`` binds to a fixed Tensor collection, snapshots its
-values, and later reports how much those same Tensor objects changed.  The
+values, and later reports how much those same Tensor objects changed. The
 tracker does not participate in autograd and never mutates Tensor data,
 gradients, mutation versions, or NumPy RNG state.
 """
-
-from numbers import Integral
 
 import numpy as np
 
@@ -38,13 +36,14 @@ def _normalise_entries(parameters):
     if not raw_entries:
         return "unnamed", ()
 
-    named_flags = []
-    for entry in raw_entries:
-        named_flags.append(
-            isinstance(entry, (tuple, list)) and len(entry) == 2
-        )
+    named_flags = tuple(
+        isinstance(entry, (tuple, list)) and len(entry) == 2
+        for entry in raw_entries
+    )
     if any(named_flags) and not all(named_flags):
-        raise TypeError("parameter update tracker cannot mix named and unnamed entries")
+        raise TypeError(
+            "parameter update tracker cannot mix named and unnamed entries"
+        )
 
     seen_tensors = set()
     if all(named_flags):
@@ -55,12 +54,16 @@ def _normalise_entries(parameters):
             if not isinstance(name, str):
                 raise TypeError(f"parameter update name {index} must be a string")
             if not isinstance(parameter, Tensor):
-                raise TypeError(f"parameter update entry {index} must contain a Tensor")
+                raise TypeError(
+                    f"parameter update entry {index} must contain a Tensor"
+                )
             if name in seen_names:
                 raise ValueError(f"duplicate parameter update name: {name!r}")
             identity = id(parameter)
             if identity in seen_tensors:
-                raise ValueError("parameter update tracker cannot bind duplicate Tensors")
+                raise ValueError(
+                    "parameter update tracker cannot bind duplicate Tensors"
+                )
             seen_names.add(name)
             seen_tensors.add(identity)
             entries.append((name, parameter))
@@ -73,7 +76,9 @@ def _normalise_entries(parameters):
             raise TypeError(f"parameter update entry {index} must be a Tensor")
         identity = id(parameter)
         if identity in seen_tensors:
-            raise ValueError("parameter update tracker cannot bind duplicate Tensors")
+            raise ValueError(
+                "parameter update tracker cannot bind duplicate Tensors"
+            )
         seen_tensors.add(identity)
         entries.append((index, parameter))
     return "unnamed", tuple(entries)
@@ -92,41 +97,33 @@ def _snapshot(parameter, locator):
     }
 
 
-def _scaled_l2(arrays):
-    """Return (representable_norm_or_None, overflow, largest, scaled_norm)."""
+def _stable_l2(arrays):
+    """Return ``(norm_or_none, overflow)`` without intermediate squaring overflow."""
     largest = 0.0
     materialized = []
     for values in arrays:
         values = np.asarray(values, dtype=np.float64)
         materialized.append(values)
         if values.size:
-            candidate = float(np.max(np.abs(values)))
-            if candidate > largest:
-                largest = candidate
+            largest = max(largest, float(np.max(np.abs(values))))
 
     if largest == 0.0:
-        return 0.0, False, 0.0, 0.0
+        return 0.0, False
 
     scaled_sumsq = 0.0
     with np.errstate(under="ignore"):
         for values in materialized:
-            if not values.size:
-                continue
-            scaled = values / largest
-            scaled_sumsq += float(np.sum(scaled * scaled, dtype=np.float64))
+            if values.size:
+                scaled = values / largest
+                scaled_sumsq += float(np.sum(scaled * scaled, dtype=np.float64))
     scaled_norm = float(np.sqrt(scaled_sumsq))
     if scaled_norm > 0.0 and largest > _FLOAT_MAX / scaled_norm:
-        return None, True, largest, scaled_norm
-    return float(largest * scaled_norm), False, largest, scaled_norm
+        return None, True
+    return float(largest * scaled_norm), False
 
 
 def _absolute_updates(before, current):
-    """Compute finite absolute deltas without overflowing subtraction.
-
-    Returns ``(values, overflow)``.  If any true elementwise absolute delta is
-    larger than binary64 can represent, ``values`` is ``None`` and ``overflow``
-    is true.  Both inputs must be finite float64 arrays with identical shape.
-    """
+    """Return finite absolute deltas, or ``(None, True)`` on true float overflow."""
     before = np.asarray(before, dtype=np.float64)
     current = np.asarray(current, dtype=np.float64)
     scale = np.maximum(np.abs(before), np.abs(current))
@@ -143,16 +140,22 @@ def _absolute_updates(before, current):
             return None, True
 
     with np.errstate(under="ignore"):
-        values = normalised * scale
-    return values, False
+        return normalised * scale, False
 
 
-def _ratio(update_norm, baseline_norm, *, unavailable=False):
-    if unavailable or update_norm is None or baseline_norm is None:
-        return None, baseline_norm == 0.0 if baseline_norm is not None else False
+def _norm_ratio(update_norm, baseline_norm, *, unavailable=False):
+    """Return ``(ratio_or_none, overflow, baseline_zero)``."""
     if baseline_norm == 0.0:
-        return None, True
-    return float(update_norm / baseline_norm), False
+        return None, False, True
+    if unavailable or update_norm is None or baseline_norm is None:
+        return None, False, False
+    if baseline_norm < 1.0 and update_norm > _FLOAT_MAX * baseline_norm:
+        return None, True, False
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        ratio = update_norm / baseline_norm
+    if not np.isfinite(ratio):
+        return None, True, False
+    return float(ratio), False, False
 
 
 def _json_shape(shape):
@@ -162,20 +165,23 @@ def _json_shape(shape):
 class ParameterUpdateTracker:
     """Track value changes on a fixed ordered collection of Tensor objects.
 
-    Parameters can be a single Tensor, an iterable of Tensors, or an iterable
-    of ``(name, Tensor)`` pairs such as ``model.named_parameters()``.  Named
+    Parameters may be a single Tensor, an iterable of Tensors, or an iterable
+    of ``(name, Tensor)`` pairs such as ``model.named_parameters()``. Named
     entries are sorted by name for deterministic reports; unnamed entries keep
     positional order.
 
-    The initial baseline must be finite.  ``report()`` deliberately does *not*
-    reject non-finite current values: an optimizer that produced NaN/Inf should
-    be diagnosable.  Numerical update magnitudes become unavailable instead of
-    understating the update by ignoring those elements.
+    Baselines must be finite. ``report()`` deliberately accepts non-finite
+    *current* values so a failed numerical update remains diagnosable. Metrics
+    that cannot be represented faithfully are reported as ``None`` plus an
+    explicit availability/overflow flag, keeping the report compatible with
+    ``json.dumps(..., allow_nan=False)``.
     """
 
     def __init__(self, parameters):
         mode, entries = _normalise_entries(parameters)
-        snapshots = tuple(_snapshot(parameter, locator) for locator, parameter in entries)
+        snapshots = tuple(
+            _snapshot(parameter, locator) for locator, parameter in entries
+        )
         self._mode = mode
         self._entries = entries
         self._snapshots = snapshots
@@ -199,13 +205,14 @@ class ParameterUpdateTracker:
 
     def baseline_values(self):
         """Return independent copies of the current baseline arrays."""
-        return tuple(np.array(snapshot["data"], copy=True) for snapshot in self._snapshots)
+        return tuple(
+            np.array(snapshot["data"], copy=True) for snapshot in self._snapshots
+        )
 
     def report(self):
-        """Return a deterministic strict-JSON-friendly update report."""
+        """Return a deterministic strict-JSON-friendly parameter update report."""
         entry_reports = []
         baseline_arrays = []
-        current_finite_arrays = []
         update_arrays = []
 
         total_baseline_elements = 0
@@ -219,7 +226,6 @@ class ParameterUpdateTracker:
         shape_changed_tensors = 0
         requires_grad_changed_tensors = 0
         nonfinite_tensors = 0
-        any_update_overflow = False
         global_max_update = 0.0
         global_max_update_overflow = False
 
@@ -230,7 +236,7 @@ class ParameterUpdateTracker:
             total_baseline_elements += int(before.size)
             total_current_elements += int(current.size)
 
-            baseline_l2, baseline_l2_overflow, _, _ = _scaled_l2((before,))
+            baseline_l2, baseline_l2_overflow = _stable_l2((before,))
             version_now = int(parameter._version)
             version_delta = version_now - snapshot["version"]
             mutation_observed = version_delta != 0
@@ -267,6 +273,7 @@ class ParameterUpdateTracker:
                 "max_abs_update": None,
                 "max_abs_update_overflow": False,
                 "update_to_baseline_ratio": None,
+                "update_to_baseline_ratio_overflow": False,
                 "baseline_zero": baseline_l2 == 0.0,
             }
             if self._mode == "named":
@@ -277,78 +284,68 @@ class ParameterUpdateTracker:
             if current.shape != before.shape:
                 shape_changed_tensors += 1
                 common["status"] = "shape_changed"
-                if np.isfinite(current).all():
-                    current_l2, current_l2_overflow, _, _ = _scaled_l2((current,))
+                nonfinite_count = int(np.count_nonzero(~np.isfinite(current)))
+                common["nonfinite_current_count"] = nonfinite_count
+                if nonfinite_count:
+                    nonfinite_elements += nonfinite_count
+                    nonfinite_tensors += 1
+                else:
+                    current_l2, current_l2_overflow = _stable_l2((current,))
                     common["current_l2"] = current_l2
                     common["current_l2_overflow"] = current_l2_overflow
-                    current_finite_arrays.append(np.asarray(current, dtype=np.float64))
-                else:
-                    count = int(np.count_nonzero(~np.isfinite(current)))
-                    common["nonfinite_current_count"] = count
-                    nonfinite_elements += count
-                    nonfinite_tensors += 1
                 entry_reports.append(common)
                 continue
 
             comparable_elements += int(before.size)
-            finite_mask = np.isfinite(current)
-            nonfinite_count = int(current.size - np.count_nonzero(finite_mask))
+            nonfinite_count = int(np.count_nonzero(~np.isfinite(current)))
             common["nonfinite_current_count"] = nonfinite_count
+            changed_count = int(np.count_nonzero(np.not_equal(current, before)))
+            changed_elements += changed_count
+            common["changed_element_count"] = changed_count
+            common["changed_fraction"] = (
+                0.0 if current.size == 0 else float(changed_count / current.size)
+            )
+
             if nonfinite_count:
                 nonfinite_elements += nonfinite_count
                 nonfinite_tensors += 1
-                common["status"] = "nonfinite"
-                changed_count = int(np.count_nonzero(np.not_equal(current, before)))
-                common["changed_element_count"] = changed_count
-                common["changed_fraction"] = (
-                    0.0 if current.size == 0 else float(changed_count / current.size)
-                )
                 if changed_count:
                     changed_tensors += 1
+                common["status"] = "nonfinite"
                 entry_reports.append(common)
                 continue
 
             current64 = np.asarray(current, dtype=np.float64)
-            current_finite_arrays.append(current64)
-            current_l2, current_l2_overflow, _, _ = _scaled_l2((current64,))
+            current_l2, current_l2_overflow = _stable_l2((current64,))
             common["current_l2"] = current_l2
             common["current_l2_overflow"] = current_l2_overflow
 
-            changed_mask = np.not_equal(current64, before)
-            changed_count = int(np.count_nonzero(changed_mask))
-            changed_elements += changed_count
-            common["changed_element_count"] = changed_count
-            common["changed_fraction"] = (
-                0.0 if current64.size == 0 else float(changed_count / current64.size)
+            absolute_update, element_update_overflow = _absolute_updates(
+                before, current64
             )
-
-            absolute_update, update_overflow = _absolute_updates(before, current64)
-            if update_overflow:
-                any_update_overflow = True
+            if element_update_overflow:
                 global_max_update_overflow = True
                 common["update_l2_overflow"] = True
                 common["max_abs_update_overflow"] = True
             else:
                 update_arrays.append(absolute_update)
-                update_l2, update_l2_overflow, _, _ = _scaled_l2((absolute_update,))
+                update_l2, update_l2_overflow = _stable_l2((absolute_update,))
                 common["update_l2"] = update_l2
                 common["update_l2_overflow"] = update_l2_overflow
-                if update_l2_overflow:
-                    any_update_overflow = True
                 max_update = (
                     0.0
                     if absolute_update.size == 0
                     else float(np.max(absolute_update))
                 )
                 common["max_abs_update"] = max_update
-                if max_update > global_max_update:
-                    global_max_update = max_update
-                ratio, baseline_zero = _ratio(
+                global_max_update = max(global_max_update, max_update)
+                ratio, ratio_overflow, baseline_zero = _norm_ratio(
                     update_l2,
                     baseline_l2,
                     unavailable=update_l2_overflow or baseline_l2_overflow,
                 )
                 common["update_to_baseline_ratio"] = ratio
+                common["update_to_baseline_ratio_overflow"] = ratio_overflow
                 common["baseline_zero"] = baseline_zero
 
             if changed_count:
@@ -361,14 +358,15 @@ class ParameterUpdateTracker:
                 common["status"] = "unchanged"
             entry_reports.append(common)
 
-        baseline_l2, baseline_l2_overflow, _, _ = _scaled_l2(baseline_arrays)
+        baseline_l2, baseline_l2_overflow = _stable_l2(baseline_arrays)
         all_current_finite = nonfinite_tensors == 0
         structurally_stable = shape_changed_tensors == 0
 
         if all_current_finite:
-            # Shape changes do not prevent a current-value norm.
-            all_current_arrays = [np.asarray(parameter.data, dtype=np.float64) for _, parameter in self._entries]
-            current_l2, current_l2_overflow, _, _ = _scaled_l2(all_current_arrays)
+            current_l2, current_l2_overflow = _stable_l2(
+                np.asarray(parameter.data, dtype=np.float64)
+                for _, parameter in self._entries
+            )
         else:
             current_l2 = None
             current_l2_overflow = False
@@ -380,11 +378,9 @@ class ParameterUpdateTracker:
                 update_l2_overflow = True
                 max_abs_update = None
             else:
-                update_l2, update_l2_overflow, _, _ = _scaled_l2(update_arrays)
+                update_l2, update_l2_overflow = _stable_l2(update_arrays)
                 max_abs_update = global_max_update
-                if update_l2_overflow:
-                    any_update_overflow = True
-            update_ratio, baseline_zero = _ratio(
+            update_ratio, update_ratio_overflow, baseline_zero = _norm_ratio(
                 update_l2,
                 baseline_l2,
                 unavailable=update_l2_overflow or baseline_l2_overflow,
@@ -394,9 +390,22 @@ class ParameterUpdateTracker:
             update_l2_overflow = False
             max_abs_update = None
             update_ratio = None
+            update_ratio_overflow = False
             baseline_zero = baseline_l2 == 0.0
 
-        unchanged_tensors = len(self._entries) - changed_tensors - shape_changed_tensors
+        unchanged_tensors = (
+            len(self._entries)
+            - changed_tensors
+            - shape_changed_tensors
+            - rewritten_tensors
+        )
+        value_changed = changed_tensors > 0 or shape_changed_tensors > 0
+        changed = (
+            value_changed
+            or rewritten_tensors > 0
+            or requires_grad_changed_tensors > 0
+        )
+
         return {
             "mode": self._mode,
             "tensor_count": len(self._entries),
@@ -424,12 +433,9 @@ class ParameterUpdateTracker:
             "max_abs_update": max_abs_update,
             "max_abs_update_overflow": global_max_update_overflow,
             "update_to_baseline_ratio": update_ratio,
+            "update_to_baseline_ratio_overflow": update_ratio_overflow,
             "baseline_zero": baseline_zero,
-            "changed": (
-                changed_tensors > 0
-                or shape_changed_tensors > 0
-                or requires_grad_changed_tensors > 0
-                or nonfinite_tensors > 0
-            ),
+            "value_changed": value_changed,
+            "changed": changed,
             "entries": entry_reports,
         }
