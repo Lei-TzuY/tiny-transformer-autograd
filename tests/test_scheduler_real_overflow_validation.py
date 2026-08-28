@@ -1,4 +1,4 @@
-"""Regression coverage for scheduler real-value overflow validation."""
+"""Regression coverage for scheduler public numeric/interface validation."""
 
 import os
 import sys
@@ -14,6 +14,11 @@ from engine.scheduler import WarmupCosineScheduler
 class _DummyOptimizer:
     def __init__(self, lr):
         self.lr = lr
+
+
+def test_constructor_rejects_optimizer_without_learning_rate_attribute():
+    with pytest.raises(TypeError, match="optimizer must expose an lr attribute"):
+        WarmupCosineScheduler(object(), total_steps=10)
 
 
 def test_constructor_normalizes_unrepresentable_optimizer_lr():
