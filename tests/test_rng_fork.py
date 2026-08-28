@@ -2,6 +2,7 @@
 
 import os
 import sys
+import threading
 
 import numpy as np
 import pytest
@@ -58,6 +59,51 @@ def test_nested_forks_restore_the_outer_stream_exactly():
 
     np.random.seed(202)
     np.testing.assert_array_equal(nested, np.random.random(3))
+
+
+def test_overlapping_threaded_forks_are_serialized_and_restore_caller_state():
+    np.random.seed(29)
+    before = np.random.get_state()
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_attempting = threading.Event()
+    second_entered = threading.Event()
+    values = {}
+
+    def first_worker():
+        with fork_rng(101):
+            values["first"] = np.random.random(4)
+            first_entered.set()
+            assert release_first.wait(timeout=5.0)
+
+    def second_worker():
+        assert first_entered.wait(timeout=5.0)
+        second_attempting.set()
+        with fork_rng(202):
+            second_entered.set()
+            values["second"] = np.random.random(4)
+
+    first = threading.Thread(target=first_worker)
+    second = threading.Thread(target=second_worker)
+    first.start()
+    second.start()
+
+    assert first_entered.wait(timeout=5.0)
+    assert second_attempting.wait(timeout=5.0)
+    assert not second_entered.wait(timeout=0.1)
+    release_first.set()
+
+    first.join(timeout=5.0)
+    second.join(timeout=5.0)
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert second_entered.is_set()
+    _assert_rng_state_equal(np.random.get_state(), before)
+
+    np.random.seed(101)
+    np.testing.assert_array_equal(values["first"], np.random.random(4))
+    np.random.seed(202)
+    np.testing.assert_array_equal(values["second"], np.random.random(4))
 
 
 def test_exception_restores_rng_state():
