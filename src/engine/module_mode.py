@@ -22,6 +22,17 @@ def _validate_module(module, helper_name):
         raise TypeError(f"{helper_name} module must be an nn.Module")
 
 
+def _restore_mode_states(states):
+    for child, state in states:
+        namespace = vars(child)
+        if state is _MISSING:
+            namespace.pop("training", None)
+        else:
+            # Restore the exact snapshotted local state without invoking a custom
+            # ``__setattr__`` that may itself reject the rollback operation.
+            namespace["training"] = state
+
+
 @contextmanager
 def _temporary_mode(module, mode):
     with _MODE_CONTEXT_LOCK:
@@ -30,15 +41,13 @@ def _temporary_mode(module, mode):
             (child, vars(child).get("training", _MISSING)) for child in modules
         )
 
-        module.train(mode)
+        # Installation is part of the transaction too. A custom ``train()`` may
+        # mutate part of a tree and then raise before the context body is entered.
         try:
+            module.train(mode)
             yield module
         finally:
-            for child, state in states:
-                if state is _MISSING:
-                    vars(child).pop("training", None)
-                else:
-                    child.training = state
+            _restore_mode_states(states)
 
 
 @contextmanager
