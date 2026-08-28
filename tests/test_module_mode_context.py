@@ -10,7 +10,9 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from engine.module_mode import evaluating, training
+from engine.grad_mode import enable_grad, is_grad_enabled, no_grad
+from engine.module_mode import evaluating, inference, training
+from engine.tensor import Tensor
 from nn.module import Module
 
 
@@ -130,6 +132,7 @@ def test_training_and_evaluating_nest_and_restore_each_scope():
     [
         (evaluating, "evaluating module must be an nn.Module"),
         (training, "training module must be an nn.Module"),
+        (inference, "inference module must be an nn.Module"),
     ],
 )
 def test_mode_helpers_reject_non_module_before_touching_rng(helper, message):
@@ -143,7 +146,7 @@ def test_mode_helpers_reject_non_module_before_touching_rng(helper, message):
     _assert_rng_equal(before, np.random.get_state())
 
 
-@pytest.mark.parametrize("helper", [evaluating, training])
+@pytest.mark.parametrize("helper", [evaluating, training, inference])
 def test_mode_helpers_do_not_touch_numpy_rng(helper):
     model = Tree()
     np.random.seed(456)
@@ -201,3 +204,58 @@ def test_overlapping_mixed_helper_contexts_are_serialized():
     assert "training" not in vars(model)
     assert model.left.training is True
     assert model.right.training is False
+
+
+def test_inference_combines_eval_mode_and_no_grad_then_restores_both():
+    model = Tree()
+    x = Tensor([2.0], requires_grad=True)
+    assert is_grad_enabled()
+
+    with inference(model) as returned:
+        assert returned is model
+        assert model.training is False
+        assert model.left.training is False
+        assert model.right.training is False
+        assert not is_grad_enabled()
+
+        y = x * 3.0
+        assert y.requires_grad is False
+        assert not y._children
+
+    assert is_grad_enabled()
+    assert "training" not in vars(model)
+    assert model.left.training is True
+    assert model.right.training is False
+
+
+def test_inference_restores_outer_disabled_grad_mode_after_exception():
+    model = Tree()
+
+    with no_grad():
+        assert not is_grad_enabled()
+        with pytest.raises(RuntimeError, match="boom"):
+            with inference(model):
+                assert not is_grad_enabled()
+                model.train(True)
+                raise RuntimeError("boom")
+        assert not is_grad_enabled()
+
+    assert is_grad_enabled()
+    assert "training" not in vars(model)
+    assert model.left.training is True
+    assert model.right.training is False
+
+
+def test_inference_allows_explicit_inner_enable_grad_without_leaking_it():
+    model = Tree()
+    x = Tensor([2.0], requires_grad=True)
+
+    with inference(model):
+        assert not is_grad_enabled()
+        with enable_grad():
+            assert is_grad_enabled()
+            y = x * 3.0
+            assert y.requires_grad is True
+        assert not is_grad_enabled()
+
+    assert is_grad_enabled()
