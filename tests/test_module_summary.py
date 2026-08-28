@@ -33,7 +33,7 @@ class _Toy(Module):
         self.child = _Child()
 
 
-def test_summary_counts_persistent_trainable_and_frozen_state_exactly():
+def test_summary_counts_persistent_trainable_frozen_and_gradient_state_exactly():
     model = _Toy()
 
     report = module_summary(model)
@@ -43,12 +43,15 @@ def test_summary_counts_persistent_trainable_and_frozen_state_exactly():
     assert report["persistent_tensor_count"] == 4
     assert report["trainable_tensor_count"] == 2
     assert report["frozen_tensor_count"] == 2
+    assert report["gradient_tensor_count"] == 2
     assert report["persistent_element_count"] == 9
     assert report["trainable_element_count"] == 7
     assert report["frozen_element_count"] == 2
+    assert report["gradient_element_count"] == 7
     assert report["persistent_byte_count"] == 9 * 8
     assert report["trainable_byte_count"] == 7 * 8
     assert report["frozen_byte_count"] == 2 * 8
+    assert report["gradient_byte_count"] == 7 * 8
     json.dumps(report, sort_keys=True, allow_nan=False)
 
 
@@ -73,6 +76,8 @@ def test_tensor_entries_preserve_named_tensor_order_and_metadata():
         "byte_count": 8,
         "requires_grad": True,
         "has_grad": True,
+        "gradient_element_count": 1,
+        "gradient_byte_count": 8,
         "mutation_version": 0,
     }
     assert entries[1]["shape"] == [0, 4]
@@ -80,7 +85,29 @@ def test_tensor_entries_preserve_named_tensor_order_and_metadata():
     assert entries[1]["byte_count"] == 0
     assert entries[1]["requires_grad"] is False
     assert entries[1]["has_grad"] is False
+    assert entries[1]["gradient_element_count"] == 0
+    assert entries[1]["gradient_byte_count"] == 0
     assert entries[2]["mutation_version"] == 1
+
+
+def test_gradient_totals_follow_actual_allocated_buffers_not_trainability():
+    model = _Toy()
+    model.scalar.grad = None
+    model.child.buffer.grad = np.zeros_like(model.child.buffer.data)
+
+    report = module_summary(model)
+
+    assert report["trainable_tensor_count"] == 2
+    assert report["gradient_tensor_count"] == 2
+    assert report["gradient_element_count"] == 8
+    assert report["gradient_byte_count"] == 8 * 8
+    by_name = {entry["name"]: entry for entry in report["tensors"]}
+    assert by_name["scalar"]["has_grad"] is False
+    assert by_name["scalar"]["gradient_byte_count"] == 0
+    assert by_name["child.buffer"]["requires_grad"] is False
+    assert by_name["child.buffer"]["has_grad"] is True
+    assert by_name["child.buffer"]["gradient_element_count"] == 2
+    assert by_name["child.buffer"]["gradient_byte_count"] == 16
 
 
 def test_shared_tensor_is_counted_once_through_module_traversal_contract():
@@ -93,7 +120,9 @@ def test_shared_tensor_is_counted_once_through_module_traversal_contract():
 
     assert report["persistent_tensor_count"] == 1
     assert report["trainable_tensor_count"] == 1
+    assert report["gradient_tensor_count"] == 1
     assert report["persistent_element_count"] == 2
+    assert report["gradient_element_count"] == 2
     assert [entry["name"] for entry in report["tensors"]] == ["left"]
 
 
@@ -132,8 +161,11 @@ def test_empty_module_has_zero_totals_and_valid_json():
     assert report["persistent_tensor_count"] == 0
     assert report["trainable_tensor_count"] == 0
     assert report["frozen_tensor_count"] == 0
+    assert report["gradient_tensor_count"] == 0
     assert report["persistent_element_count"] == 0
+    assert report["gradient_element_count"] == 0
     assert report["persistent_byte_count"] == 0
+    assert report["gradient_byte_count"] == 0
     assert report["tensors"] == []
     json.dumps(report, sort_keys=True, allow_nan=False)
 
