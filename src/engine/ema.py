@@ -99,8 +99,9 @@ class ExponentialMovingAverage:
     """
 
     def __init__(self, parameters, decay=0.999):
-        parameters = _normalise_parameters(parameters)
+        # Validate scalar options before consuming a caller-owned generator.
         decay = _normalise_decay(decay)
+        parameters = _normalise_parameters(parameters)
 
         averages = []
         shapes = []
