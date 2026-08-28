@@ -2,7 +2,7 @@
 
 The training loop needs a fast scalar global norm, while debugging often needs
 more context: which parameter is missing a gradient, where NaN/Inf appeared,
-or whether a whole gradient buffer collapsed to zero.  This module provides a
+or whether a whole gradient buffer collapsed to zero. This module provides a
 standalone, side-effect-free report without changing optimizer or Tensor state.
 """
 
@@ -213,21 +213,29 @@ def gradient_report(parameters):
     entries = [_gradient_entry(index, name, tensor) for index, name, tensor in records]
 
     trainable_arrays = []
-    trainable_norm_available = True
+    trainable_norm_invalid = False
+    trainable_norm_overflow = False
     for entry, (_, _, tensor) in zip(entries, records):
         if not tensor.requires_grad:
             continue
-        if entry["status"] in _ANOMALOUS_STATUSES or entry["l2_overflow"]:
-            trainable_norm_available = False
+        if entry["status"] in _ANOMALOUS_STATUSES:
+            trainable_norm_invalid = True
+            continue
+        if entry["l2_overflow"]:
+            trainable_norm_overflow = True
             continue
         trainable_arrays.append(tensor.grad)
 
-    if trainable_norm_available:
+    if trainable_norm_invalid:
+        trainable_global_l2_norm = None
+        trainable_global_l2_overflow = False
+    elif trainable_norm_overflow:
+        trainable_global_l2_norm = None
+        trainable_global_l2_overflow = True
+    else:
         trainable_global_l2_norm, trainable_global_l2_overflow = _stable_l2(
             trainable_arrays
         )
-    else:
-        trainable_global_l2_norm, trainable_global_l2_overflow = None, False
 
     finite_abs_values = [
         entry["max_finite_abs"]
