@@ -82,7 +82,7 @@ def vector_to_parameters_(vector, parameters):
         )
 
     for index, parameter in enumerate(parameters):
-        if not parameter.data.flags.writeable:
+        if parameter.data.size and not parameter.data.flags.writeable:
             raise ValueError(f"parameter {index} data must be writeable")
 
     offset = 0
