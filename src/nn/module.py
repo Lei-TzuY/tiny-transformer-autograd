@@ -231,17 +231,28 @@ class Module:
                 f"state_dict mismatch: missing={missing}, unexpected={unexpected}"
             )
 
-        # Validate every destination before copying any value so a malformed
-        # late entry cannot leave the module partially restored. Snapshot every
-        # matched source as well: a caller may legally pass live NumPy views of
-        # another destination Tensor, and earlier writes must not mutate later
-        # sources during the same atomic load.
+        # Validate and convert every matched source before copying any value.
+        # Snapshotting directly in the destination dtype keeps the commit phase
+        # free of late casts while preserving caller-owned view isolation.
         snapshots = {}
         for name, value in state.items():
             if name not in tensors:
                 continue
-            _validate_state_tensor(name, tensors[name], value)
-            snapshots[name] = np.array(value, copy=True, subok=False)
+            tensor = tensors[name]
+            _validate_state_tensor(name, tensor, value)
+            source_is_finite = np.isfinite(value).all()
+            with np.errstate(over="ignore", invalid="ignore"):
+                snapshot = np.array(
+                    value,
+                    dtype=tensor.data.dtype,
+                    copy=True,
+                    subok=False,
+                )
+            if source_is_finite and not np.isfinite(snapshot).all():
+                raise ValueError(
+                    f"state_dict value for {name} must contain only finite values"
+                )
+            snapshots[name] = snapshot
 
         for name, value in snapshots.items():
             tensors[name].data[:] = value
