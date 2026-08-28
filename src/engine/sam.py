@@ -95,7 +95,15 @@ def _validate_gradients(parameters, label):
             raise ValueError(
                 f"{label} gradient for parameter {index} must contain only finite values"
             )
-        gradients.append(np.asarray(gradient, dtype=np.float64))
+        with np.errstate(over="ignore", invalid="ignore"):
+            converted = np.array(
+                gradient, dtype=np.float64, copy=True, subok=False
+            )
+        if not np.isfinite(converted).all():
+            raise ValueError(
+                f"{label} gradient for parameter {index} must fit in float64"
+            )
+        gradients.append(converted)
     if active == 0:
         raise ValueError(f"SAM {label} requires at least one gradient")
     return gradients
