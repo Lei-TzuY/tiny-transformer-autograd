@@ -28,6 +28,23 @@ class Tree(Module):
         self.right = Leaf(False)
 
 
+class PartiallyFailingTree(Tree):
+    def train(self, mode=True):
+        super().train(mode)
+        raise RuntimeError("mode install failed")
+
+
+class GuardedLeaf(Leaf):
+    def __init__(self, training):
+        self.reject_training_writes = False
+        super().__init__(training)
+
+    def __setattr__(self, name, value):
+        if name == "training" and vars(self).get("reject_training_writes", False):
+            raise RuntimeError("training write rejected")
+        super().__setattr__(name, value)
+
+
 def _assert_rng_equal(before, after):
     assert before[0] == after[0]
     np.testing.assert_array_equal(before[1], after[1])
@@ -88,6 +105,37 @@ def test_training_restores_after_body_exception():
     assert "training" not in vars(model)
     assert model.left.training is True
     assert model.right.training is False
+
+
+@pytest.mark.parametrize("helper", [evaluating, training, inference])
+def test_mode_helpers_restore_when_recursive_mode_installation_raises(helper):
+    model = PartiallyFailingTree()
+    np.random.seed(2468)
+    before_rng = np.random.get_state()
+    assert is_grad_enabled()
+
+    with pytest.raises(RuntimeError, match="mode install failed"):
+        with helper(model):
+            raise AssertionError("context body must not run")
+
+    assert "training" not in vars(model)
+    assert model.left.training is True
+    assert model.right.training is False
+    assert is_grad_enabled()
+    _assert_rng_equal(before_rng, np.random.get_state())
+
+
+def test_mode_restore_bypasses_custom_training_setattr_after_entry():
+    model = Module()
+    model.child = GuardedLeaf(True)
+
+    with evaluating(model):
+        assert model.child.training is False
+        model.child.reject_training_writes = True
+
+    assert "training" not in vars(model)
+    assert model.child.training is True
+    assert model.child.reject_training_writes is True
 
 
 def test_evaluating_is_reentrant_and_preserves_outer_eval_state():
