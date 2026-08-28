@@ -4,6 +4,7 @@ The NPZ container itself is not a stable content identifier: ZIP metadata and
 compression details may change when the same checkpoint state is rewritten.
 This module hashes the validated decoded state instead, with explicit type and
 length framing so equivalent safe checkpoints receive the same SHA-256 digest.
+It also reports deterministic paths for semantic differences between checkpoints.
 """
 
 import hashlib
@@ -62,10 +63,97 @@ def safe_checkpoints_equal(first, second):
     return hmac.compare_digest(first_digest, second_digest)
 
 
+def safe_checkpoint_differences(first, second):
+    """Return deterministic paths whose decoded checkpoint values differ.
+
+    Paths use ``$`` for the decoded checkpoint root, ``['key']`` for mappings, and
+    ``[index]`` for sequences. Mapping insertion order is ignored. Array identity
+    follows the digest contract exactly: dtype, shape, and C-order bytes all matter.
+    Missing mapping keys or sequence elements are reported at their missing path.
+
+    The first checkpoint is fully validated before the second is opened, matching
+    :func:`safe_checkpoints_equal` error precedence.
+    """
+    first_state = read_safe_checkpoint(first)
+    second_state = read_safe_checkpoint(second)
+    differences = []
+    try:
+        _collect_differences(first_state, second_state, "$", differences)
+    except RecursionError as exc:
+        raise ValueError("safe checkpoint state nesting is too deep to compare") from exc
+    return tuple(differences)
+
+
 def _write_bytes(digest, tag, payload=b""):
     digest.update(tag)
     digest.update(struct.pack(">Q", len(payload)))
     digest.update(payload)
+
+
+def _array_identity(value):
+    array = np.ascontiguousarray(value)
+    return (
+        array.dtype.str,
+        repr(array.dtype.descr),
+        array.shape,
+        array.tobytes(order="C"),
+    )
+
+
+def _scalar_equal(first, second):
+    if type(first) is not type(second):
+        return False
+    if isinstance(first, float):
+        return struct.pack(">d", first) == struct.pack(">d", second)
+    return first == second
+
+
+def _collect_differences(first, second, path, differences):
+    if isinstance(first, np.ndarray) or isinstance(second, np.ndarray):
+        if not isinstance(first, np.ndarray) or not isinstance(second, np.ndarray):
+            differences.append(path)
+            return
+        if _array_identity(first) != _array_identity(second):
+            differences.append(path)
+        return
+
+    scalar_types = (type(None), bool, int, float, str)
+    if isinstance(first, scalar_types) or isinstance(second, scalar_types):
+        if not isinstance(first, scalar_types) or not isinstance(second, scalar_types):
+            differences.append(path)
+            return
+        if not _scalar_equal(first, second):
+            differences.append(path)
+        return
+
+    if isinstance(first, dict) or isinstance(second, dict):
+        if not isinstance(first, dict) or not isinstance(second, dict):
+            differences.append(path)
+            return
+        for key in sorted(first.keys() | second.keys()):
+            child_path = f"{path}[{key!r}]"
+            if key not in first or key not in second:
+                differences.append(child_path)
+            else:
+                _collect_differences(first[key], second[key], child_path, differences)
+        return
+
+    sequence_types = (list, tuple)
+    if isinstance(first, sequence_types) or isinstance(second, sequence_types):
+        if type(first) is not type(second):
+            differences.append(path)
+            return
+        common = min(len(first), len(second))
+        for index in range(common):
+            _collect_differences(first[index], second[index], f"{path}[{index}]", differences)
+        for index in range(common, max(len(first), len(second))):
+            differences.append(f"{path}[{index}]")
+        return
+
+    raise TypeError(
+        "unsupported decoded safe-checkpoint value: "
+        f"{type(first).__name__}/{type(second).__name__}"
+    )
 
 
 def _hash_value(digest, value):
