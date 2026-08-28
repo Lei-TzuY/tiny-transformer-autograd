@@ -23,8 +23,9 @@ HUGE = 10**400
     ],
 )
 def test_constructor_normalizes_real_conversion_overflow(factory, message):
-    with pytest.raises(ValueError, match=rf"^{message}$"):
+    with pytest.raises(ValueError) as exc_info:
         factory()
+    assert str(exc_info.value) == message
 
 
 def test_sgd_state_overflow_is_transactional():
