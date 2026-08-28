@@ -108,6 +108,8 @@ class Module:
 
     def named_tensors(self, prefix=""):
         """Yield all persistent tensors, including frozen tensors and buffers."""
+        if not isinstance(prefix, str):
+            raise TypeError("named_tensors prefix must be a string")
         seen_tensors = set()
         seen_names = {}
         seen_modules = set()
@@ -151,7 +153,10 @@ class Module:
 
     def named_parameters(self, prefix=""):
         """Yield (name, tensor) pairs for all trainable parameters."""
+        if not isinstance(prefix, str):
+            raise TypeError("named_parameters prefix must be a string")
         seen_tensors = set()
+        seen_names = {}
         seen_modules = set()
         seen_containers = set()
 
@@ -159,6 +164,12 @@ class Module:
             if isinstance(obj, Tensor) and obj.requires_grad:
                 marker = id(obj)
                 if marker not in seen_tensors:
+                    if pfx in seen_names and seen_names[pfx] != marker:
+                        raise ValueError(
+                            f"ambiguous trainable parameter name {pfx!r} "
+                            "maps to multiple tensors"
+                        )
+                    seen_names[pfx] = marker
                     seen_tensors.add(marker)
                     yield pfx, obj
             elif isinstance(obj, Module):
