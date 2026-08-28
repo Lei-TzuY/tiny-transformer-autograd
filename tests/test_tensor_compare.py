@@ -117,13 +117,13 @@ def test_tolerances_control_value_matching_and_metrics_remain_observational():
     assert strict["entries"][0]["mismatch_elements"] == 1
     assert strict["mismatch_element_count"] == 1
     assert strict["max_abs_diff"] == pytest.approx(0.5)
-    assert strict["max_symmetric_relative_diff"] == pytest.approx(0.05)
+    assert strict["max_symmetric_relative_diff"] == pytest.approx(1.0 / 21.0)
 
     assert relaxed["allclose"] is True
     assert relaxed["entries"][0]["close_elements"] == 2
     # Difference metrics describe the actual arrays, not just failed elements.
     assert relaxed["max_abs_diff"] == pytest.approx(0.5)
-    assert relaxed["max_symmetric_relative_diff"] == pytest.approx(0.05)
+    assert relaxed["max_symmetric_relative_diff"] == pytest.approx(1.0 / 21.0)
 
 
 def test_requires_grad_is_part_of_structural_identity():
