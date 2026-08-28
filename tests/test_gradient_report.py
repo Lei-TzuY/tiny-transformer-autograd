@@ -188,7 +188,7 @@ def test_extreme_finite_gradients_use_stable_norm_without_warnings():
 
 def test_unrepresentable_global_l2_is_reported_as_overflow_not_infinity():
     tensor = Tensor([1.0, 2.0], requires_grad=True)
-    tensor.grad = np.array([1e308, 1e308], dtype=np.float64)
+    tensor.grad = np.array([1.3e308, 1.3e308], dtype=np.float64)
 
     with np.errstate(all="raise"):
         report = gradient_report([tensor])
