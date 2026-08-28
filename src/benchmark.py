@@ -57,37 +57,48 @@ def run_benchmark(args):
 
 
 def _run_benchmark(args, warmup, repeats, seed):
+    # Programmatic callers may supply NumPy integer scalars. Normalize once after
+    # validation so later products/divisions cannot overflow in a narrow dtype.
+    vocab = int(args.vocab)
+    ctx = int(args.ctx)
+    d_model = int(args.d)
+    heads = int(args.heads)
+    layers = int(args.layers)
+    batch = int(args.batch)
+    steps = int(args.steps)
+    generate = int(args.generate)
+
     model = GPT(
-        vocab_size=args.vocab,
-        context_len=args.ctx,
-        d_model=args.d,
-        num_heads=args.heads,
-        d_ff=4 * args.d,
-        num_layers=args.layers,
+        vocab_size=vocab,
+        context_len=ctx,
+        d_model=d_model,
+        num_heads=heads,
+        d_ff=4 * d_model,
+        num_layers=layers,
         **_ARCH_PRESETS[args.arch],
     )
     model.eval()
 
-    idx = np.random.randint(0, args.vocab, size=(args.batch, args.ctx))
-    prompt = idx[:1, : min(args.ctx, max(1, args.ctx // 2))]
+    idx = np.random.randint(0, vocab, size=(batch, ctx))
+    prompt = idx[:1, : min(ctx, max(1, ctx // 2))]
 
     def forward_no_grad_once():
         # This is the old validation model path: no backward graph is retained,
         # but every operator still travels through Tensor/autograd machinery.
         with no_grad():
-            for _ in range(args.steps):
+            for _ in range(steps):
                 model(idx)
 
     def infer_once():
         # Pure NumPy path used by inference and by the optimized validation path.
-        for _ in range(args.steps):
+        for _ in range(steps):
             model.infer(idx)
 
     def generate_cached_once():
-        model.generate(prompt, args.generate, strategy="greedy", use_cache=True)
+        model.generate(prompt, generate, strategy="greedy", use_cache=True)
 
     def generate_uncached_once():
-        model.generate(prompt, args.generate, strategy="greedy", use_cache=False)
+        model.generate(prompt, generate, strategy="greedy", use_cache=False)
 
     for _ in range(warmup):
         forward_no_grad_once()
@@ -121,15 +132,15 @@ def _run_benchmark(args, warmup, repeats, seed):
             uncached_durations.append(_time_call(generate_uncached_once))
             cached_durations.append(_time_call(generate_cached_once))
 
-    infer_tokens = args.steps * args.batch * args.ctx
+    infer_tokens = steps * batch * ctx
     forward_rates = [infer_tokens / seconds for seconds in forward_durations]
     infer_rates = [infer_tokens / seconds for seconds in infer_durations]
     numpy_infer_speedups = [
         forward / infer
         for forward, infer in zip(forward_durations, infer_durations)
     ]
-    cached_rates = [args.generate / seconds for seconds in cached_durations]
-    uncached_rates = [args.generate / seconds for seconds in uncached_durations]
+    cached_rates = [generate / seconds for seconds in cached_durations]
+    uncached_rates = [generate / seconds for seconds in uncached_durations]
     cache_speedups = [
         uncached / cached
         for cached, uncached in zip(cached_durations, uncached_durations)
@@ -150,18 +161,18 @@ def _run_benchmark(args, warmup, repeats, seed):
     return {
         "benchmark_schema": 1,
         "arch": args.arch,
-        "vocab": int(args.vocab),
-        "context_len": int(args.ctx),
-        "d_model": int(args.d),
-        "heads": int(args.heads),
-        "layers": int(args.layers),
-        "batch": int(args.batch),
-        "d_ff": int(4 * args.d),
+        "vocab": vocab,
+        "context_len": ctx,
+        "d_model": d_model,
+        "heads": heads,
+        "layers": layers,
+        "batch": batch,
+        "d_ff": 4 * d_model,
         "parameters": model.param_count(),
         "dtype": str(model.token_emb.weight.data.dtype),
         "prompt_length": int(prompt.shape[1]),
-        "steps": int(args.steps),
-        "generate_tokens": int(args.generate),
+        "steps": steps,
+        "generate_tokens": generate,
         "generation_strategy": "greedy",
         "seed": seed,
         "warmup": warmup,
