@@ -108,6 +108,8 @@ class Module:
 
     def named_tensors(self, prefix=""):
         """Yield all persistent tensors, including frozen tensors and buffers."""
+        if not isinstance(prefix, str):
+            raise TypeError("named_tensors prefix must be a string")
         seen_tensors = set()
         seen_names = {}
         seen_modules = set()
@@ -151,6 +153,8 @@ class Module:
 
     def named_parameters(self, prefix=""):
         """Yield (name, tensor) pairs for all trainable parameters."""
+        if not isinstance(prefix, str):
+            raise TypeError("named_parameters prefix must be a string")
         seen_tensors = set()
         seen_names = {}
         seen_modules = set()
