@@ -13,7 +13,8 @@ from engine.grad_mode import no_grad
 from nn.module import Module
 
 
-_MODE_CONTEXT_LOCK = threading.RLock()
+_MODE_CONTEXT_CONDITION = threading.Condition(threading.RLock())
+_ACTIVE_MODE_MODULES = {}
 _MISSING = object()
 
 
@@ -33,10 +34,48 @@ def _restore_mode_states(states):
             namespace["training"] = state
 
 
+def _tree_is_available(markers, owner):
+    return all(
+        marker not in _ACTIVE_MODE_MODULES
+        or _ACTIVE_MODE_MODULES[marker][0] == owner
+        for marker in markers
+    )
+
+
+@contextmanager
+def _reserve_mode_tree(modules):
+    """Reserve one entry module tree while allowing disjoint trees to proceed."""
+    owner = threading.get_ident()
+    markers = tuple(id(module) for module in modules)
+
+    with _MODE_CONTEXT_CONDITION:
+        _MODE_CONTEXT_CONDITION.wait_for(lambda: _tree_is_available(markers, owner))
+        for marker in markers:
+            active = _ACTIVE_MODE_MODULES.get(marker)
+            if active is None:
+                _ACTIVE_MODE_MODULES[marker] = (owner, 1)
+            else:
+                _ACTIVE_MODE_MODULES[marker] = (owner, active[1] + 1)
+
+    try:
+        yield
+    finally:
+        with _MODE_CONTEXT_CONDITION:
+            for marker in markers:
+                active_owner, count = _ACTIVE_MODE_MODULES[marker]
+                if active_owner != owner:
+                    raise RuntimeError("module mode reservation ownership changed")
+                if count == 1:
+                    del _ACTIVE_MODE_MODULES[marker]
+                else:
+                    _ACTIVE_MODE_MODULES[marker] = (owner, count - 1)
+            _MODE_CONTEXT_CONDITION.notify_all()
+
+
 @contextmanager
 def _temporary_mode(module, mode):
-    with _MODE_CONTEXT_LOCK:
-        modules = tuple(module.modules())
+    modules = tuple(module.modules())
+    with _reserve_mode_tree(modules):
         states = tuple(
             (child, vars(child).get("training", _MISSING)) for child in modules
         )
@@ -59,9 +98,10 @@ def evaluating(module):
     the exact entry state in ``finally``. A module that did not have a local
     ``training`` attribute before entry has that temporary attribute removed again.
 
-    Helper-managed contexts are serialized because overlapping contexts can otherwise
-    restore shared module state out of order. Direct ``train()``/``eval()`` calls made
-    outside these helpers are not synchronized.
+    Helper-managed contexts that share any entry Module are serialized because their
+    restores could otherwise run out of order. Contexts over disjoint module trees may
+    run concurrently. Direct ``train()``/``eval()`` calls made outside these helpers are
+    not synchronized.
     """
     _validate_module(module, "evaluating")
     with _temporary_mode(module, False) as active:
