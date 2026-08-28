@@ -11,6 +11,7 @@ import numpy as np
 
 _FORMAT_VERSION = 1
 _SCHEDULER_NAME = "ReduceLROnPlateau"
+_MIN_POSITIVE_LR = float(np.finfo(np.float64).smallest_subnormal)
 
 
 class ReduceLROnPlateau:
@@ -108,13 +109,14 @@ class ReduceLROnPlateau:
                     threshold_mode=self.threshold_mode,
                 )
 
-                if cooldown_counter > 0:
+                was_in_cooldown = cooldown_counter > 0
+                if was_in_cooldown:
                     cooldown_counter -= 1
 
                 if improved:
                     best = metric
                     num_bad_epochs = 0
-                elif cooldown_counter > 0 or self.cooldown_counter > 0:
+                elif was_in_cooldown:
                     # Observations consumed while cooling down can still update
                     # ``best`` above, but they do not accumulate bad epochs.
                     num_bad_epochs = 0
@@ -127,10 +129,11 @@ class ReduceLROnPlateau:
                 candidate_lr = _reduced_lr(current_lr, self.factor, self.min_lr)
                 reduction = current_lr - candidate_lr
                 if reduction > self.eps:
-                    # This is the only external write. Every scheduler field is
-                    # still held in locals, so a rejecting optimizer property
-                    # setter leaves scheduler state exactly unchanged.
-                    self.optimizer.lr = candidate_lr
+                    _assign_optimizer_lr(
+                        self.optimizer,
+                        candidate_lr,
+                        previous_lr=current_lr,
+                    )
                     new_lr = candidate_lr
                     reductions += 1
                     cooldown_counter = self.cooldown
@@ -282,9 +285,12 @@ class ReduceLROnPlateau:
             )
 
         with self._lock:
-            # Write the external optimizer first. If a custom LR property rejects
-            # restoration, none of this scheduler's fields have changed yet.
-            self.optimizer.lr = current_lr
+            previous_lr = _optimizer_lr(self.optimizer)
+            _assign_optimizer_lr(
+                self.optimizer,
+                current_lr,
+                previous_lr=previous_lr,
+            )
 
             self.mode = mode
             self.factor = factor
@@ -323,11 +329,35 @@ def _is_better(metric, best, *, mode, threshold, threshold_mode):
 
 
 def _reduced_lr(current_lr, factor, min_lr):
-    # factor is in (0, 1), so overflow is impossible. Underflow to zero is a
-    # legitimate precursor to clamping at min_lr and should not emit warnings.
+    # factor is in (0, 1), so overflow is impossible. Underflow to zero is
+    # legitimate arithmetic, but the repository's optimizer LR contract is
+    # strictly positive. Clamp a zero floor to the smallest positive binary64.
     with np.errstate(under="ignore"):
         candidate = current_lr * factor
-    return max(candidate, min_lr)
+    floor = max(min_lr, _MIN_POSITIVE_LR)
+    return max(candidate, floor)
+
+
+def _assign_optimizer_lr(optimizer, target_lr, *, previous_lr):
+    """Set LR and roll back even when a property mutates before raising."""
+    if target_lr == previous_lr:
+        return target_lr
+
+    try:
+        optimizer.lr = target_lr
+        observed = _optimizer_lr(optimizer)
+        if observed != target_lr:
+            raise RuntimeError("optimizer.lr assignment did not preserve requested value")
+    except BaseException:
+        try:
+            optimizer.lr = previous_lr
+            restored = _optimizer_lr(optimizer)
+            if restored != previous_lr:
+                raise RuntimeError("optimizer.lr rollback did not restore previous value")
+        except BaseException as rollback_error:
+            raise RuntimeError("optimizer lr rollback failed") from rollback_error
+        raise
+    return target_lr
 
 
 def _optimizer_lr(optimizer):
