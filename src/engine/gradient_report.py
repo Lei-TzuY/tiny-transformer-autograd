@@ -242,6 +242,13 @@ def gradient_report(parameters):
         for entry in entries
         if entry["max_finite_abs"] is not None
     ]
+    max_finite_abs_gradient_overflow = any(
+        entry["magnitude_overflow"] for entry in entries
+    )
+    if max_finite_abs_gradient_overflow:
+        max_finite_abs_gradient = None
+    else:
+        max_finite_abs_gradient = max(finite_abs_values, default=None)
 
     return {
         "parameter_count": len(entries),
@@ -271,7 +278,8 @@ def gradient_report(parameters):
         "nan_element_count": sum(entry["nan_elements"] for entry in entries),
         "posinf_element_count": sum(entry["posinf_elements"] for entry in entries),
         "neginf_element_count": sum(entry["neginf_elements"] for entry in entries),
-        "max_finite_abs_gradient": max(finite_abs_values, default=None),
+        "max_finite_abs_gradient": max_finite_abs_gradient,
+        "max_finite_abs_gradient_overflow": max_finite_abs_gradient_overflow,
         "trainable_global_l2_norm": trainable_global_l2_norm,
         "trainable_global_l2_overflow": trainable_global_l2_overflow,
         "entries": entries,
