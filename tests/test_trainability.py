@@ -109,13 +109,13 @@ def test_optimizer_bound_before_freeze_skips_parameter_and_weight_decay():
 
 
 def test_sgd_bound_before_freeze_skips_existing_momentum_update():
-    parameter = Tensor(5.0, requires_grad=True)
+    parameter = Tensor([5.0], requires_grad=True)
     optimizer = SGD([parameter], lr=0.1, momentum=0.9)
-    parameter.grad = np.array(2.0)
+    parameter.grad = np.array([2.0])
     optimizer.step()
     velocity = optimizer._v[0].copy()
 
-    parameter.grad = np.array(9.0)
+    parameter.grad = np.array([9.0])
     freeze_(parameter)
     before = parameter.data.copy()
     optimizer.step()
