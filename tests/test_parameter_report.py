@@ -99,7 +99,7 @@ def test_all_nonfinite_has_no_finite_extrema():
 
 
 def test_extreme_finite_norm_is_warning_neutral():
-    value = 1.3e308
+    value = 1.2e308
     tensor = Tensor([value, -value])
 
     with np.errstate(all="raise"):
