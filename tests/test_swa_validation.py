@@ -116,6 +116,28 @@ def test_mutate_then_raise_copy_failure_rolls_back_all_attempted_parameters():
     np.testing.assert_array_equal(p2.data, before2)
 
 
+def test_copy_rollback_failure_still_restores_other_attempted_parameters():
+    p1 = Tensor([1.0])
+    p2 = Tensor([2.0])
+    p3 = Tensor([3.0])
+    swa = StochasticWeightAverage([p1, p2, p3])
+    swa.update()
+
+    p1.data[...] = [10.0]
+    p2._data = _FailOnSecondWriteArray([20.0])
+    p3._data = _FailOnceArray([30.0])
+    before1 = p1.data.copy()
+    before2 = np.array(p2.data, copy=True)
+    before3 = np.array(p3.data, copy=True)
+
+    with pytest.raises(RuntimeError, match="SWA parameter rollback failed"):
+        swa.copy_to_parameters()
+
+    np.testing.assert_array_equal(p1.data, before1)
+    np.testing.assert_array_equal(p2.data, before2)
+    np.testing.assert_array_equal(p3.data, before3)
+
+
 def test_empty_state_cannot_be_copied_or_used_as_context():
     p = Tensor([1.0])
     swa = StochasticWeightAverage(p)
