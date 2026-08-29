@@ -22,6 +22,14 @@ class MutateThenRaise(np.ndarray):
             raise RuntimeError("injected gradient write failure")
 
 
+class RejectWrites(np.ndarray):
+    def __new__(cls, values):
+        return np.asarray(values, dtype=np.float64).view(cls)
+
+    def __setitem__(self, key, value):
+        raise RuntimeError("gradient destination rejected write")
+
+
 class DropFirstWrite(np.ndarray):
     def __new__(cls, values):
         obj = np.asarray(values, dtype=np.float64).view(cls)
@@ -60,6 +68,19 @@ def test_late_mutate_then_raise_rolls_back_every_attempted_gradient():
     np.testing.assert_array_equal(second.grad, second_before)
     assert first._version == first_version
     assert second._version == second_version
+
+
+def test_rejected_unmodified_commit_re_raises_original_failure_without_rollback_write():
+    parameter = Tensor([3.0, 4.0], requires_grad=True)
+    parameter.grad = RejectWrites([6.0, 8.0])
+    gradient_ref = parameter.grad
+    before = parameter.grad.copy()
+
+    with pytest.raises(RuntimeError, match="gradient destination rejected write"):
+        adaptive_clip_grad_(parameter, clip_factor=0.1)
+
+    assert parameter.grad is gradient_ref
+    np.testing.assert_array_equal(parameter.grad, before)
 
 
 def test_silent_write_drop_is_detected_and_rolled_back():
