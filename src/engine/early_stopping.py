@@ -107,19 +107,23 @@ class EarlyStopping:
 
     @property
     def mode(self):
-        return self._mode
+        with self._lock:
+            return self._mode
 
     @property
     def patience(self):
-        return self._patience
+        with self._lock:
+            return self._patience
 
     @property
     def min_delta(self):
-        return self._min_delta
+        with self._lock:
+            return self._min_delta
 
     @property
     def threshold_mode(self):
-        return self._threshold_mode
+        with self._lock:
+            return self._threshold_mode
 
     @property
     def best(self):
