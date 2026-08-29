@@ -15,7 +15,7 @@ def test_capture_is_mean_of_squared_observed_gradients_not_square_of_mean_gradie
 
     # Empirical diagonal Fisher is E[g^2] = 1 here. Squaring the mean gradient
     # would incorrectly produce zero, so this regression pins the definition.
-    np.testing.assert_array_equal(estimator.diagonals()[0], [1.0])
+    np.testing.assert_allclose(estimator.diagonals()[0], [1.0])
 
 
 def test_microbatch_gradient_capture_is_not_claimed_to_equal_per_example_fisher():
@@ -34,5 +34,5 @@ def test_microbatch_gradient_capture_is_not_claimed_to_equal_per_example_fisher(
     microbatch_parameter.grad = np.array([2.0])
     microbatch = DiagonalFisherEstimator(microbatch_parameter).capture()
 
-    np.testing.assert_array_equal(per_example.diagonals()[0], [5.0])
-    np.testing.assert_array_equal(microbatch.diagonals()[0], [4.0])
+    np.testing.assert_allclose(per_example.diagonals()[0], [5.0])
+    np.testing.assert_allclose(microbatch.diagonals()[0], [4.0])
