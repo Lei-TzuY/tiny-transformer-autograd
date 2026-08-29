@@ -1,15 +1,21 @@
 """Transactional elementwise gradient clipping for Tensor collections.
 
 The helper clips existing gradient buffers in place without replacing their ndarray
-objects. The complete request is validated before the first write, and unexpected
-commit-time failures roll every attempted buffer back to its exact entry values.
+objects. The complete request is validated before the first write, unexpected
+commit-time failures roll every attempted buffer back to its exact entry values, and
+concurrent helper calls are serialized so one transaction cannot observe another's
+partial commit or rollback.
 """
 
 from numbers import Real
+import threading
 
 import numpy as np
 
 from .tensor import Tensor
+
+
+_TRANSACTION_LOCK = threading.RLock()
 
 
 def _positive_finite_real(value, name):
@@ -80,21 +86,7 @@ def _reject_parameter_storage_alias(gradient, parameters, index):
             )
 
 
-def clip_grad_value_(parameters, clip_value):
-    """Clamp present gradients to ``[-clip_value, clip_value]`` transactionally.
-
-    Parameters with ``grad is None`` are ignored. Present gradients must be floating
-    NumPy arrays with exactly the parameter shape and only finite values. Overlapping
-    gradient buffers are allowed only when neither buffer needs a write. A gradient
-    that needs clipping must not overlap any bound parameter's data storage. The
-    function returns the number of gradient buffers whose values changed.
-
-    Validation is all-or-nothing: malformed, aliased, or required read-only buffers are
-    rejected before any gradient changes. If a later in-place assignment unexpectedly
-    raises after mutating its destination, every attempted buffer is restored before
-    re-raising.
-    """
-
+def _clip_grad_value_transaction(parameters, clip_value):
     limit = _positive_finite_real(clip_value, "clip_value")
     items = _materialize_parameters(parameters)
 
@@ -143,3 +135,27 @@ def clip_grad_value_(parameters, clip_value):
         raise
 
     return sum(1 for _, _, changed in active if changed)
+
+
+def clip_grad_value_(parameters, clip_value):
+    """Clamp present gradients to ``[-clip_value, clip_value]`` transactionally.
+
+    Parameters with ``grad is None`` are ignored. Present gradients must be floating
+    NumPy arrays with exactly the parameter shape and only finite values. Overlapping
+    gradient buffers are allowed only when neither buffer needs a write. A gradient
+    that needs clipping must not overlap any bound parameter's data storage. The
+    function returns the number of gradient buffers whose values changed.
+
+    Validation is all-or-nothing: malformed, aliased, or required read-only buffers are
+    rejected before any gradient changes. If a later in-place assignment unexpectedly
+    raises after mutating its destination, every attempted buffer is restored before
+    re-raising.
+
+    Complete helper calls are serialized with a reentrant process-local lock. This
+    keeps validation, commit, and rollback one linearizable transaction: another thread
+    cannot validate against or overwrite an intermediate gradient state. Direct writes
+    to ``Tensor.grad`` outside this helper are not synchronized.
+    """
+
+    with _TRANSACTION_LOCK:
+        return _clip_grad_value_transaction(parameters, clip_value)
