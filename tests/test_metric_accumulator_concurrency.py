@@ -1,6 +1,8 @@
 import threading
 import time
 
+import pytest
+
 from engine.metric_accumulator import WeightedMetricAccumulator
 
 
@@ -89,32 +91,95 @@ def test_same_thread_operations_are_reentrant():
     assert meter.state_dict() == state
 
 
-def test_merge_does_not_hold_source_lock_while_waiting_for_target_lock():
-    source = WeightedMetricAccumulator()
-    target = WeightedMetricAccumulator()
+def test_merge_holds_source_while_waiting_for_target_when_source_orders_first():
+    first = WeightedMetricAccumulator()
+    second = WeightedMetricAccumulator()
+    source, target = sorted((first, second), key=id)
     source.update(7.0)
     target.update(1.0)
 
-    started = threading.Event()
-    finished = threading.Event()
+    merge_started = threading.Event()
+    merge_finished = threading.Event()
+    update_started = threading.Event()
+    update_finished = threading.Event()
 
     def merger():
-        started.set()
+        merge_started.set()
         target.merge(source)
-        finished.set()
+        merge_finished.set()
+
+    def updater():
+        update_started.set()
+        source.update(9.0)
+        update_finished.set()
 
     with target._lock:
-        thread = threading.Thread(target=merger)
-        thread.start()
-        assert started.wait(timeout=1.0)
+        merge_thread = threading.Thread(target=merger)
+        merge_thread.start()
+        assert merge_started.wait(timeout=1.0)
         time.sleep(0.05)
-        assert not finished.is_set()
+        assert not merge_finished.is_set()
 
-        # The merge has already snapshotted and released the source lock before
-        # waiting for the target, so unrelated source reads remain available.
-        assert source.state_dict()["mean"] == 7.0
+        update_thread = threading.Thread(target=updater)
+        update_thread.start()
+        assert update_started.wait(timeout=1.0)
+        time.sleep(0.05)
+        assert not update_finished.is_set()
 
-    thread.join(timeout=1.0)
-    assert not thread.is_alive()
-    assert finished.is_set()
+    merge_thread.join(timeout=1.0)
+    update_thread.join(timeout=1.0)
+    assert not merge_thread.is_alive()
+    assert not update_thread.is_alive()
     assert target.mean == 4.0
+    assert source.mean == 8.0
+
+
+def test_reciprocal_merges_are_deadlock_free_and_linearizable():
+    barrier = threading.Barrier(2)
+
+    class SnapshotBarrierAccumulator(WeightedMetricAccumulator):
+        def state_dict(self):
+            state = super().state_dict()
+            barrier.wait(timeout=1.0)
+            return state
+
+    left = SnapshotBarrierAccumulator()
+    right = SnapshotBarrierAccumulator()
+    left.update(1.0)
+    right.update(3.0)
+    failures = []
+
+    def merge_left():
+        try:
+            left.merge(right)
+        except BaseException as exc:
+            failures.append(exc)
+
+    def merge_right():
+        try:
+            right.merge(left)
+        except BaseException as exc:
+            failures.append(exc)
+
+    left_thread = threading.Thread(target=merge_left)
+    right_thread = threading.Thread(target=merge_right)
+    left_thread.start()
+    right_thread.start()
+    left_thread.join(timeout=1.0)
+    right_thread.join(timeout=1.0)
+
+    assert not left_thread.is_alive()
+    assert not right_thread.is_alive()
+    assert failures == []
+
+    outcome = (
+        left.observation_count,
+        left.total_weight,
+        left.mean,
+        right.observation_count,
+        right.total_weight,
+        right.mean,
+    )
+    serial_left_first = (2, 2.0, 2.0, 3, 3.0, pytest.approx(7.0 / 3.0))
+    serial_right_first = (3, 3.0, pytest.approx(5.0 / 3.0), 2, 2.0, 2.0)
+    assert outcome == serial_left_first or outcome == serial_right_first
