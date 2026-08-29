@@ -38,7 +38,7 @@ class SGD:
             if self.weight_decay != 0.0:
                 g = g + self.weight_decay * p.data
             if self.momentum != 0.0:
-                v[:] = self.momentum * v + g
+                v[...] = self.momentum * v + g
                 p.data -= self.lr * v
             else:
                 p.data -= self.lr * g
@@ -49,7 +49,7 @@ class SGD:
             if set_to_none:
                 p.grad = None
             elif p.grad is not None:
-                p.grad[:] = 0.0
+                p.grad[...] = 0.0
 
     def state_dict(self):
         return {
@@ -126,8 +126,8 @@ class Adam:
             if self.weight_decay != 0.0:
                 g = g + self.weight_decay * p.data
 
-            m[:] = self.beta1 * m + (1.0 - self.beta1) * g
-            v[:] = self.beta2 * v + (1.0 - self.beta2) * g * g
+            m[...] = self.beta1 * m + (1.0 - self.beta1) * g
+            v[...] = self.beta2 * v + (1.0 - self.beta2) * g * g
             m_hat = m / bc1
             v_hat = v / bc2
             p.data -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
@@ -138,7 +138,7 @@ class Adam:
             if set_to_none:
                 p.grad = None
             elif p.grad is not None:
-                p.grad[:] = 0.0
+                p.grad[...] = 0.0
 
     def state_dict(self):
         return {
@@ -202,8 +202,8 @@ class AdamW(Adam):
             bc2 = 1.0 - self.beta2 ** parameter_step
 
             g = p.grad
-            m[:] = self.beta1 * m + (1.0 - self.beta1) * g
-            v[:] = self.beta2 * v + (1.0 - self.beta2) * g * g
+            m[...] = self.beta1 * m + (1.0 - self.beta1) * g
+            v[...] = self.beta2 * v + (1.0 - self.beta2) * g * g
             if self.weight_decay != 0.0:
                 p.data -= self.lr * self.weight_decay * p.data
             p.data -= self.lr * (m / bc1) / (np.sqrt(v / bc2) + self.eps)
@@ -385,4 +385,4 @@ def _validate_buffers(destination, source, label):
 
 def _copy_buffers(destination, source):
     for current, saved in zip(destination, source):
-        current[:] = saved
+        current[...] = saved
