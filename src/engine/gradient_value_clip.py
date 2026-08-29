@@ -46,8 +46,10 @@ def _materialize_parameters(parameters):
     return items
 
 
-def _reject_overlapping_gradient_storage(gradient, previous_gradients, index):
-    for previous in previous_gradients:
+def _reject_overlapping_gradient_storage(gradient, changed, previous_gradients, index):
+    for previous, previous_changed in previous_gradients:
+        if not (changed or previous_changed):
+            continue
         if gradient is previous or np.shares_memory(gradient, previous):
             raise ValueError(
                 f"gradient for parameters[{index}] must not share storage with another gradient"
@@ -66,10 +68,10 @@ def clip_grad_value_(parameters, clip_value):
     """Clamp present gradients to ``[-clip_value, clip_value]`` transactionally.
 
     Parameters with ``grad is None`` are ignored. Present gradients must be floating
-    NumPy arrays with exactly the parameter shape and only finite values. Gradient
-    buffers for distinct parameters must not overlap in storage. A gradient that needs
-    clipping must not overlap any bound parameter's data storage. The function returns
-    the number of gradient buffers whose values changed.
+    NumPy arrays with exactly the parameter shape and only finite values. Overlapping
+    gradient buffers are allowed only when neither buffer needs a write. A gradient
+    that needs clipping must not overlap any bound parameter's data storage. The
+    function returns the number of gradient buffers whose values changed.
 
     Validation is all-or-nothing: malformed, aliased, or required read-only buffers are
     rejected before any gradient changes. If a later in-place assignment unexpectedly
@@ -95,11 +97,13 @@ def clip_grad_value_(parameters, clip_value):
         if not np.all(np.isfinite(gradient)):
             raise ValueError(f"gradient for parameters[{index}] must contain only finite values")
 
-        _reject_overlapping_gradient_storage(gradient, previous_gradients, index)
-        previous_gradients.append(gradient)
-
         candidate = np.clip(np.asarray(gradient), -limit, limit)
         changed = not np.array_equal(candidate, np.asarray(gradient))
+        _reject_overlapping_gradient_storage(
+            gradient, changed, previous_gradients, index
+        )
+        previous_gradients.append((gradient, changed))
+
         if changed:
             _reject_parameter_storage_alias(gradient, items, index)
             if not gradient.flags.writeable:
