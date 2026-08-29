@@ -10,6 +10,8 @@ import numpy as np
 
 _STATE_VERSION = 1
 _STATE_TYPE = "WeightedStreamingMoments"
+_MIN_M2_EXPONENT = -4096
+_MAX_M2_EXPONENT = 4096
 
 
 def _finite_real(name, value):
@@ -31,17 +33,30 @@ def _positive_real(name, value):
     return normalized
 
 
-def _nonnegative_int(name, value):
+def _integer(name, value):
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
-        raise TypeError(f"{name} must be a non-negative integer")
-    normalized = int(value)
+        raise TypeError(f"{name} must be an integer")
+    return int(value)
+
+
+def _nonnegative_int(name, value):
+    normalized = _integer(name, value)
     if normalized < 0:
         raise ValueError(f"{name} must be a non-negative integer")
     return normalized
 
 
+def _m2_exponent(value):
+    exponent = _integer("streaming moments m2_exponent", value)
+    if not (_MIN_M2_EXPONENT <= exponent <= _MAX_M2_EXPONENT):
+        raise ValueError(
+            "streaming moments m2_exponent is outside the supported range"
+        )
+    return exponent
+
+
 class _ScaledNonnegative:
-    """Non-negative binary floating value with an unbounded integer exponent."""
+    """Non-negative binary floating value with a separately stored exponent."""
 
     __slots__ = ("mantissa", "exponent")
 
@@ -89,9 +104,6 @@ class _ScaledNonnegative:
             self.mantissa * other.mantissa,
             self.exponent + other.exponent,
         )
-
-    def multiply_float(self, factor):
-        return self.multiply(_ScaledNonnegative.from_float(factor))
 
     def divide_float(self, divisor):
         if divisor <= 0.0 or not math.isfinite(divisor):
@@ -378,10 +390,7 @@ class WeightedStreamingMoments:
             "streaming moments m2_mantissa",
             state.get("m2_mantissa"),
         )
-        exponent = _nonnegative_int(
-            "streaming moments m2_exponent",
-            state.get("m2_exponent"),
-        )
+        exponent = _m2_exponent(state.get("m2_exponent"))
         if mantissa < 0.0:
             raise ValueError("streaming moments m2_mantissa must be non-negative")
         if mantissa == 0.0:
