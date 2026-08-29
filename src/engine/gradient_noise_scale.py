@@ -83,9 +83,11 @@ def _normalize_gradient(gradient, shape, index):
 def _stable_equal_mean(arrays):
     if not arrays:
         raise ValueError("cannot average an empty array sequence")
-    mean = arrays[0].copy()
+    shape = arrays[0].shape
+    mean = arrays[0].reshape(-1).copy()
     count = 1
-    for current in arrays[1:]:
+    for current_array in arrays[1:]:
+        current = current_array.reshape(-1)
         total = count + 1
         old_fraction = count / total
         new_fraction = 1.0 / total
@@ -111,7 +113,7 @@ def _stable_equal_mean(arrays):
             raise ValueError("mean gradient is not representable as float64")
         mean = candidate
         count = total
-    return mean
+    return mean.reshape(shape)
 
 
 # A scaled non-negative value is either None for exact zero or (mantissa, exponent)
@@ -193,31 +195,55 @@ def _scaled_sqrt_to_float(value):
     return _scaled_to_float((root_mantissa, root_exponent + exponent // 2))
 
 
+def _max_abs(array):
+    if not array.size:
+        return 0.0
+    return float(np.max(np.abs(array)))
+
+
 def _parameter_signal_and_m2(arrays, mean):
-    scale = 0.0
+    # Signal and noise intentionally use different scales. A huge fluctuating
+    # component can cancel out of the mean while a tiny stable component remains;
+    # normalizing that mean by the fluctuation scale could underflow real signal
+    # to a false exact zero.
+    signal_scale = _max_abs(mean)
+    if signal_scale == 0.0:
+        signal = None
+    else:
+        try:
+            with np.errstate(
+                over="raise", invalid="raise", divide="raise", under="ignore"
+            ):
+                mean_signal_normalized = mean / signal_scale
+                signal_normalized = float(
+                    np.sum(
+                        mean_signal_normalized * mean_signal_normalized,
+                        dtype=np.float64,
+                    )
+                )
+        except FloatingPointError as exc:
+            raise ValueError("gradient signal statistics are not representable") from exc
+        signal = _scaled_square(signal_scale, signal_normalized)
+
+    noise_scale = 0.0
     for array in arrays:
-        if array.size:
-            scale = max(scale, float(np.max(np.abs(array))))
-    if scale == 0.0:
-        return None, None
+        noise_scale = max(noise_scale, _max_abs(array))
+    if noise_scale == 0.0:
+        return signal, None
 
     try:
         with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
-            mean_normalized = mean / scale
-            signal_normalized = float(
-                np.sum(mean_normalized * mean_normalized, dtype=np.float64)
-            )
+            mean_noise_normalized = mean / noise_scale
             m2_normalized_parts = []
             for array in arrays:
-                residual = array / scale - mean_normalized
+                residual = array / noise_scale - mean_noise_normalized
                 m2_normalized_parts.append(
                     float(np.sum(residual * residual, dtype=np.float64))
                 )
     except FloatingPointError as exc:
         raise ValueError("gradient noise statistics are not representable") from exc
 
-    signal = _scaled_square(scale, signal_normalized)
-    m2 = _scaled_square(scale, math.fsum(m2_normalized_parts))
+    m2 = _scaled_square(noise_scale, math.fsum(m2_normalized_parts))
     return signal, m2
 
 
