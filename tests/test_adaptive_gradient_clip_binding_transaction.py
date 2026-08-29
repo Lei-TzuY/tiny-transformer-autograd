@@ -47,6 +47,27 @@ class ChangeTrainabilityOnWrite(np.ndarray):
             self.target.requires_grad = self.replacement
 
 
+class MutatePeerGradientOnWrite(np.ndarray):
+    def __new__(cls, values):
+        obj = np.asarray(values, dtype=np.float64).view(cls)
+        obj.peer = None
+        obj.replacement = None
+        obj.mutations_remaining = 1
+        return obj
+
+    def __array_finalize__(self, source):
+        if source is not None:
+            self.peer = getattr(source, "peer", None)
+            self.replacement = getattr(source, "replacement", None)
+            self.mutations_remaining = getattr(source, "mutations_remaining", 0)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if self.mutations_remaining > 0:
+            self.mutations_remaining -= 1
+            self.peer[...] = self.replacement
+
+
 def test_commit_detects_and_restores_own_gradient_binding_replacement():
     parameter = Tensor([3.0, 4.0], requires_grad=True)
     original = RebindGradOnWrite([6.0, 8.0])
@@ -120,5 +141,45 @@ def test_cross_parameter_trainability_change_is_detected_before_later_write():
     assert second.requires_grad is True
     assert first.grad is first_gradient
     assert second.grad is second_gradient
+    np.testing.assert_array_equal(first.grad, first_before)
+    np.testing.assert_array_equal(second.grad, second_before)
+
+
+def test_commit_detects_and_restores_cross_parameter_gradient_value_change():
+    first = Tensor([3.0, 4.0], requires_grad=True)
+    second = Tensor([3.0, 4.0], requires_grad=True)
+    first_gradient = MutatePeerGradientOnWrite([6.0, 8.0])
+    second_gradient = np.array([0.1, 0.2])
+    first_gradient.peer = second_gradient
+    first_gradient.replacement = np.array([-9.0, -8.0])
+    first.grad = first_gradient
+    second.grad = second_gradient
+    first_before = first_gradient.copy()
+    second_before = second_gradient.copy()
+
+    with pytest.raises(RuntimeError, match="gradient value changed for parameter 1"):
+        adaptive_clip_grad_([first, second], clip_factor=0.1)
+
+    assert first.grad is first_gradient
+    assert second.grad is second_gradient
+    np.testing.assert_array_equal(first.grad, first_before)
+    np.testing.assert_array_equal(second.grad, second_before)
+
+
+def test_cross_parameter_gradient_value_change_is_detected_before_later_write():
+    first = Tensor([3.0, 4.0], requires_grad=True)
+    second = Tensor([3.0, 4.0], requires_grad=True)
+    first_gradient = MutatePeerGradientOnWrite([6.0, 8.0])
+    second_gradient = np.array([7.0, 9.0])
+    first_gradient.peer = second_gradient
+    first_gradient.replacement = np.array([1.0, 1.0])
+    first.grad = first_gradient
+    second.grad = second_gradient
+    first_before = first_gradient.copy()
+    second_before = second_gradient.copy()
+
+    with pytest.raises(RuntimeError, match="gradient value changed for parameter 1"):
+        adaptive_clip_grad_([first, second], clip_factor=0.1)
+
     np.testing.assert_array_equal(first.grad, first_before)
     np.testing.assert_array_equal(second.grad, second_before)
