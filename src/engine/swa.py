@@ -113,6 +113,21 @@ def _stable_equal_weight_average(previous, current, previous_count):
     return result.reshape(previous.shape)
 
 
+def _validate_independent_parameter_storage(destinations):
+    """Reject aliased live parameter storage before a multi-parameter write."""
+    for right_index, right in enumerate(destinations):
+        for left_index in range(right_index):
+            try:
+                overlaps = np.shares_memory(destinations[left_index], right)
+            except ValueError as exc:
+                raise ValueError("SWA parameter storage overlap could not be determined") from exc
+            if overlaps:
+                raise ValueError(
+                    "SWA parameter data storage must not overlap between "
+                    f"parameters {left_index} and {right_index}"
+                )
+
+
 class StochasticWeightAverage:
     """Maintain the equal-weight mean of explicitly captured model checkpoints."""
 
@@ -181,7 +196,9 @@ class StochasticWeightAverage:
             if not data.flags.writeable and not np.array_equal(data, average):
                 raise ValueError(f"parameter {index} data must be writable")
             destinations.append(data)
-        return tuple(destinations)
+        destinations = tuple(destinations)
+        _validate_independent_parameter_storage(destinations)
+        return destinations
 
     def _copy_to_parameters_locked(self):
         destinations = self._preflight_copy_locked()
