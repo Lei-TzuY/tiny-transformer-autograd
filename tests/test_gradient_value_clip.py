@@ -81,6 +81,47 @@ def test_late_read_only_gradient_is_rejected_before_any_write():
         second.grad.flags.writeable = True
 
 
+def test_same_gradient_object_for_distinct_parameters_is_rejected_before_write():
+    first = _tensor([1.0, 2.0])
+    second = _tensor([3.0, 4.0])
+    shared = np.array([7.0, -8.0])
+    first.grad = shared
+    second.grad = shared
+    before = shared.copy()
+
+    with pytest.raises(ValueError, match=r"parameters\[1\].*share storage"):
+        clip_grad_value_([first, second], 1.0)
+
+    np.testing.assert_array_equal(shared, before)
+    assert first.grad is shared
+    assert second.grad is shared
+
+
+def test_overlapping_gradient_views_are_rejected_before_write():
+    first = _tensor([1.0, 2.0])
+    second = _tensor([3.0, 4.0])
+    storage = np.array([7.0, -8.0, 9.0])
+    first.grad = storage[:2]
+    second.grad = storage[1:]
+    before = storage.copy()
+
+    with pytest.raises(ValueError, match=r"parameters\[1\].*share storage"):
+        clip_grad_value_([first, second], 1.0)
+
+    np.testing.assert_array_equal(storage, before)
+
+
+def test_disjoint_gradient_views_of_one_base_are_allowed():
+    first = _tensor([1.0, 2.0])
+    second = _tensor([3.0, 4.0])
+    storage = np.array([7.0, -8.0, 9.0, -10.0])
+    first.grad = storage[:2]
+    second.grad = storage[2:]
+
+    assert clip_grad_value_([first, second], 2.0) == 2
+    np.testing.assert_array_equal(storage, np.array([2.0, -2.0, 2.0, -2.0]))
+
+
 def test_commit_failure_rolls_back_every_attempted_gradient():
     first = _tensor([1.0, 2.0])
     second = _tensor([3.0, 4.0])
