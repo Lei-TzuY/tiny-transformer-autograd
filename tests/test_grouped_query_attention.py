@@ -189,9 +189,12 @@ def test_grouped_attention_can_participate_in_larger_graph():
 
     assert x.grad.shape == x.shape
     assert np.isfinite(x.grad).all()
-    assert np.any(grouped_grad != 0.0 for grouped_grad in [
+    for gradient in (
         attention.W_q.weight.grad,
         attention.W_k.weight.grad,
         attention.W_v.weight.grad,
         attention.out_proj.weight.grad,
-    ])
+    ):
+        assert gradient is not None
+        assert np.isfinite(gradient).all()
+        assert np.any(gradient != 0.0)
