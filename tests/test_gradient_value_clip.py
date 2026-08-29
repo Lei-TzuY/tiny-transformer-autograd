@@ -65,6 +65,48 @@ def test_noop_preserves_gradient_values_identity_and_read_only_storage():
         parameter.grad.flags.writeable = True
 
 
+def test_shared_noop_gradient_object_is_allowed_without_write():
+    first = _tensor([1.0, 2.0])
+    second = _tensor([3.0, 4.0])
+    shared = np.array([0.25, -0.5])
+    first.grad = shared
+    second.grad = shared
+    before = shared.copy()
+
+    assert clip_grad_value_([first, second], 1.0) == 0
+
+    assert first.grad is shared
+    assert second.grad is shared
+    np.testing.assert_array_equal(shared, before)
+
+
+def test_overlapping_noop_gradient_views_are_allowed_without_write():
+    first = _tensor([1.0, 2.0])
+    second = _tensor([3.0, 4.0])
+    storage = np.array([0.25, -0.5, 0.75])
+    first.grad = storage[:2]
+    second.grad = storage[1:]
+    before = storage.copy()
+
+    assert clip_grad_value_([first, second], 1.0) == 0
+
+    np.testing.assert_array_equal(storage, before)
+
+
+def test_overlap_is_rejected_when_only_one_gradient_needs_a_write():
+    first = _tensor([1.0, 2.0])
+    second = _tensor([3.0, 4.0])
+    storage = np.array([0.25, 2.0, 0.5])
+    first.grad = storage[:2]
+    second.grad = storage[1:]
+    before = storage.copy()
+
+    with pytest.raises(ValueError, match=r"parameters\[1\].*share storage"):
+        clip_grad_value_([first, second], 1.0)
+
+    np.testing.assert_array_equal(storage, before)
+
+
 def test_late_read_only_gradient_is_rejected_before_any_write():
     first = _tensor([1.0])
     second = _tensor([1.0])
