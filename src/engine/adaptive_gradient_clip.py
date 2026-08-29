@@ -256,6 +256,10 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
         total_clipped_units = 0
 
         for index, parameter in enumerate(parameters):
+            requires_grad = parameter.requires_grad
+            if not isinstance(requires_grad, bool):
+                raise TypeError(f"parameter {index} requires_grad must be a bool")
+
             data = parameter.data
             if not isinstance(data, np.ndarray):
                 raise TypeError(f"parameter {index} data must be a NumPy array")
@@ -267,7 +271,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 originals.append(None)
                 candidates.append(None)
                 continue
-            if not parameter.requires_grad:
+            if not requires_grad:
                 raise ValueError(f"parameter {index} is frozen but still has a gradient")
 
             data_snapshot = _float64_copy(
