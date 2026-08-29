@@ -70,6 +70,11 @@ def _materialize_parameters(parameters):
     return materialized
 
 
+def _independent_array(value):
+    """Return an ordinary float64 ndarray, preserving scalar shape ``()``."""
+    return np.array(value, dtype=np.float64, copy=True, subok=False)
+
+
 def _float64_array_copy(array, *, name, shape):
     if not isinstance(array, np.ndarray):
         raise TypeError(f"{name} must be a NumPy array")
@@ -89,7 +94,7 @@ def _float64_array_copy(array, *, name, shape):
                 raise ValueError(f"{name} must fit float64")
     try:
         with np.errstate(over="raise", invalid="raise", under="ignore"):
-            result = np.asarray(array, dtype=np.float64).copy()
+            result = _independent_array(np.asarray(array, dtype=np.float64))
     except (FloatingPointError, OverflowError) as exc:
         raise ValueError(f"{name} must fit float64") from exc
     if not np.all(np.isfinite(result)):
@@ -104,6 +109,7 @@ def _max_abs(array):
 
 
 def _canonicalize(scale, diagonal):
+    diagonal = _independent_array(diagonal)
     if diagonal.size == 0:
         return 0.0, np.zeros_like(diagonal)
     peak = float(np.max(diagonal))
@@ -115,13 +121,14 @@ def _canonicalize(scale, diagonal):
     root = float(np.sqrt(peak))
     with np.errstate(over="raise", invalid="raise", under="ignore"):
         candidate_scale = scale * root
-        normalized = diagonal / peak
+        normalized = _independent_array(diagonal / peak)
     if not np.isfinite(candidate_scale):
         raise ValueError("diagonal Fisher root scale is not representable")
     if candidate_scale == 0.0 and scale > 0.0:
-        # Preserve a positive physical diagonal that is below binary64 after
-        # root rescaling instead of erasing it through scale underflow.
-        return scale, diagonal.copy()
+        # The physical Fisher entry is smaller than the least representable root
+        # scale. Keep the old scale plus the tiny normalized diagonal instead of
+        # erasing a positive value through canonicalization underflow.
+        return scale, diagonal
     if not np.all(np.isfinite(normalized)) or np.any(normalized < 0.0):
         raise ValueError("diagonal Fisher normalized state is invalid")
     return candidate_scale, normalized
@@ -131,12 +138,12 @@ def _combine_states(left, left_weight, right, right_weight):
     if left_weight == 0.0:
         return {
             "scale": right["scale"],
-            "diagonal": right["diagonal"].copy(),
+            "diagonal": _independent_array(right["diagonal"]),
         }
     if right_weight == 0.0:
         return {
             "scale": left["scale"],
-            "diagonal": left["diagonal"].copy(),
+            "diagonal": _independent_array(left["diagonal"]),
         }
 
     total = left_weight + right_weight
@@ -328,7 +335,10 @@ class DiagonalFisherEstimator:
             if self._observation_count == 0:
                 raise RuntimeError("diagonal Fisher has no observations")
             return tuple(
-                {"scale": state["scale"], "diagonal": state["diagonal"].copy()}
+                {
+                    "scale": state["scale"],
+                    "diagonal": _independent_array(state["diagonal"]),
+                }
                 for state in self._states
             )
 
@@ -351,7 +361,7 @@ class DiagonalFisherEstimator:
                     raise OverflowError(
                         f"diagonal Fisher parameter {index} is not representable in float64"
                     )
-                result.append(np.array(values, dtype=np.float64, copy=True))
+                result.append(_independent_array(values))
             return tuple(result)
 
     def trace_report(self):
@@ -404,7 +414,10 @@ class DiagonalFisherEstimator:
             if not np.isfinite(total_weight):
                 raise OverflowError("diagonal Fisher total weight overflow")
             source_states = tuple(
-                {"scale": state["scale"], "diagonal": state["diagonal"].copy()}
+                {
+                    "scale": state["scale"],
+                    "diagonal": _independent_array(state["diagonal"]),
+                }
                 for state in other._states
             )
             source_weight = other._total_weight
@@ -439,7 +452,10 @@ class DiagonalFisherEstimator:
                 "total_weight": self._total_weight,
                 "observation_count": self._observation_count,
                 "states": [
-                    {"scale": state["scale"], "diagonal": state["diagonal"].copy()}
+                    {
+                        "scale": state["scale"],
+                        "diagonal": _independent_array(state["diagonal"]),
+                    }
                     for state in self._states
                 ],
             }
