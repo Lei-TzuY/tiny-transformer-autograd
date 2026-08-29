@@ -103,6 +103,19 @@ def test_copy_to_parameters_uses_tracked_writes_and_skips_equal_values():
     assert p._version == version_after
 
 
+def test_copy_to_parameters_invalidates_graph_built_from_live_weights():
+    p = Tensor(1.0, requires_grad=True)
+    swa = StochasticWeightAverage(p)
+    swa.update()
+    p.data[...] = 2.0
+    loss = p * p
+
+    swa.copy_to_parameters()
+
+    with pytest.raises(RuntimeError, match="tensor data was modified after forward"):
+        loss.backward()
+
+
 def test_average_parameters_restores_entry_values_after_body_and_exception():
     p = Tensor([1.0, 2.0], requires_grad=True)
     swa = StochasticWeightAverage(p)
