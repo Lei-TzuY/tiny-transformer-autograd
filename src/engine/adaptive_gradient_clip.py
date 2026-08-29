@@ -312,6 +312,8 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             rollback_error = None
             for index in reversed(attempted):
                 try:
+                    if np.array_equal(destinations[index], originals[index]):
+                        continue
                     destinations[index][...] = originals[index]
                     if not np.array_equal(destinations[index], originals[index]):
                         raise RuntimeError("rollback postcondition failed")
