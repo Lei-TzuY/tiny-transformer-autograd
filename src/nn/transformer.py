@@ -8,6 +8,7 @@ from engine.recompute import recompute
 from .module import Module
 from .layers import Linear, Embedding, LayerNorm, RMSNorm, Dropout
 from .attention import MultiHeadAttention, RotaryEmbedding
+from .grouped_attention import GroupedQueryAttention
 
 
 class FeedForward(Module):
@@ -74,6 +75,7 @@ class TransformerBlock(Module):
         norm: str = "layernorm",
         ffn: str = "gelu",
         rope: RotaryEmbedding = None,
+        num_kv_heads: int = None,
     ):
         d_model = _validate_positive_int(d_model, "d_model")
         num_heads = _validate_positive_int(num_heads, "num_heads")
@@ -83,9 +85,26 @@ class TransformerBlock(Module):
         ffn = _validate_choice(ffn, "ffn", tuple(_FFNS))
         if d_model % num_heads != 0:
             raise ValueError("d_model must be divisible by num_heads")
+        if num_kv_heads is None:
+            num_kv_heads = num_heads
+        else:
+            num_kv_heads = _validate_positive_int(num_kv_heads, "num_kv_heads")
+        if num_heads % num_kv_heads != 0:
+            raise ValueError("num_heads must be divisible by num_kv_heads")
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
         norm_cls = _NORMS[norm]
         self.ln1 = norm_cls(d_model)
-        self.attn = MultiHeadAttention(d_model, num_heads, dropout, rope=rope)
+        if num_kv_heads == num_heads:
+            self.attn = MultiHeadAttention(d_model, num_heads, dropout, rope=rope)
+        else:
+            self.attn = GroupedQueryAttention(
+                d_model,
+                num_heads,
+                num_kv_heads=num_kv_heads,
+                dropout=dropout,
+                rope=rope,
+            )
         self.ln2 = norm_cls(d_model)
         self.ff = _FFNS[ffn](d_model, d_ff, dropout)
 
@@ -110,6 +129,7 @@ class GPT(Module):
       norm         : "layernorm" | "rmsnorm"
       pos_encoding : "learned"   | "rope"
       ffn          : "gelu"      | "swiglu"
+      num_kv_heads : shared K/V head count; None means ordinary MHA
     """
 
     def __init__(
@@ -127,6 +147,7 @@ class GPT(Module):
         pos_encoding: str = "learned",
         ffn: str = "gelu",
         grad_checkpoint: bool = False,
+        num_kv_heads: int = None,
     ):
         vocab_size = _validate_positive_int(vocab_size, "vocab_size")
         context_len = _validate_positive_int(context_len, "context_len")
@@ -145,12 +166,19 @@ class GPT(Module):
         grad_checkpoint = _validate_bool_flag(grad_checkpoint, "grad_checkpoint")
         if d_model % num_heads != 0:
             raise ValueError("d_model must be divisible by num_heads")
+        if num_kv_heads is None:
+            num_kv_heads = num_heads
+        else:
+            num_kv_heads = _validate_positive_int(num_kv_heads, "num_kv_heads")
+        if num_heads % num_kv_heads != 0:
+            raise ValueError("num_heads must be divisible by num_kv_heads")
         if pos_encoding == "rope" and (d_model // num_heads) % 2 != 0:
             raise ValueError("RoPE requires an even head dimension")
         self.vocab_size = vocab_size
         self.context_len = context_len
         self.d_model = d_model
         self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
         self.d_ff = d_ff
         self.num_layers = num_layers
         self.dropout = dropout
@@ -176,7 +204,14 @@ class GPT(Module):
         self.emb_drop = Dropout(dropout)
         self.blocks = [
             TransformerBlock(
-                d_model, num_heads, d_ff, dropout, norm=norm, ffn=ffn, rope=rope
+                d_model,
+                num_heads,
+                d_ff,
+                dropout,
+                norm=norm,
+                ffn=ffn,
+                rope=rope,
+                num_kv_heads=num_kv_heads,
             )
             for _ in range(num_layers)
         ]
@@ -316,7 +351,7 @@ class GPT(Module):
             rope_positions = None
         else:
             positions = self._validate_position_ids(position_ids, (batch, time))
-            # (batch, 1, time) broadcasts over the (batch, heads, time, d_k) heads.
+            # (batch, 1, time) broadcasts over the query/KV head axes.
             rope_positions = positions[:, np.newaxis, :]
 
         x = self.token_emb.infer(idx)
@@ -360,9 +395,9 @@ class GPT(Module):
                     f"kv_cache[{layer}] batch dimension must be {batch}, "
                     f"got {key.shape[0]}"
                 )
-            if key.shape[1] != self.num_heads:
+            if key.shape[1] != self.num_kv_heads:
                 raise ValueError(
-                    f"kv_cache[{layer}] head count must be {self.num_heads}, "
+                    f"kv_cache[{layer}] head count must be {self.num_kv_heads}, "
                     f"got {key.shape[1]}"
                 )
             if key.shape[3] != head_dim:
@@ -594,7 +629,7 @@ class GPT(Module):
 
     def config(self):
         """Return constructor arguments needed to recreate this model."""
-        return {
+        config = {
             "vocab_size": self.vocab_size,
             "context_len": self.context_len,
             "d_model": self.d_model,
@@ -608,6 +643,9 @@ class GPT(Module):
             "pos_encoding": self.pos_encoding,
             "ffn": self.ffn,
         }
+        if self.num_kv_heads != self.num_heads:
+            config["num_kv_heads"] = self.num_kv_heads
+        return config
 
     def _validate_token_batch(self, idx, max_time=None):
         idx = np.asarray(idx)
@@ -632,11 +670,16 @@ class GPT(Module):
         arch = ""
         if (self.norm, self.pos_encoding, self.ffn) != ("layernorm", "learned", "gelu"):
             arch = f", {self.norm}+{self.pos_encoding}+{self.ffn}"
+        grouped = (
+            f", kv_heads={self.num_kv_heads}"
+            if self.num_kv_heads != self.num_heads
+            else ""
+        )
         recomputing = ", grad_checkpoint" if self.grad_checkpoint else ""
         return (
             f"GPT(vocab={self.vocab_size}, ctx={self.context_len}, "
             f"d={self.d_model}, trainable_params={self.param_count():,}"
-            f"{tied}{arch}{recomputing})"
+            f"{tied}{arch}{grouped}{recomputing})"
         )
 
 
