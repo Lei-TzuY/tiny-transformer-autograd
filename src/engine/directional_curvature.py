@@ -131,14 +131,11 @@ def _snapshot_entries(parameters):
     entries = []
     for parameter in parameters:
         grad = parameter.grad
-        grad_copy = None
-        if isinstance(grad, np.ndarray):
-            grad_copy = np.array(grad, copy=True, subok=False)
-        elif grad is not None:
-            try:
-                grad_copy = np.array(grad, copy=True, subok=False)
-            except Exception:
-                grad_copy = None
+        grad_copy = (
+            np.array(grad, copy=True, subok=False)
+            if isinstance(grad, np.ndarray)
+            else None
+        )
         entries.append(
             {
                 "data_ref": parameter.data,
@@ -259,8 +256,6 @@ def _install(parameters, targets):
 def _restore_entries(parameters, entries):
     first_error = None
 
-    # If a callback introduced overlapping live storage, rebuilding each affected
-    # destination prevents a later sequential restore from corrupting an earlier one.
     rebuild = set()
     for left_index in range(len(parameters)):
         for right_index in range(left_index + 1, len(parameters)):
@@ -277,6 +272,21 @@ def _restore_entries(parameters, entries):
     for index, (parameter, entry) in enumerate(zip(parameters, entries)):
         try:
             current = parameter.data
+            original = entry["data_ref"]
+            if current is not original and index not in rebuild:
+                if (
+                    isinstance(original, np.ndarray)
+                    and original.shape == entry["shape"]
+                    and (
+                        np.array_equal(original, entry["data"])
+                        or original.flags.writeable
+                    )
+                ):
+                    if not np.array_equal(original, entry["data"]):
+                        original[...] = entry["data"]
+                    parameter._data = original
+                    parameter._version += 1
+                    current = original
             if (
                 index in rebuild
                 or not isinstance(current, np.ndarray)
@@ -294,9 +304,12 @@ def _restore_entries(parameters, entries):
             if first_error is None:
                 first_error = exc
 
-    for index, (parameter, entry) in enumerate(zip(parameters, entries)):
+    for parameter, entry in zip(parameters, entries):
         try:
-            if bool(parameter.requires_grad) != entry["requires_grad"]:
+            if (
+                not isinstance(parameter.requires_grad, (bool, np.bool_))
+                or bool(parameter.requires_grad) != entry["requires_grad"]
+            ):
                 parameter.requires_grad = entry["requires_grad"]
                 parameter._version += 1
             parameter._grad_shape = entry["grad_shape"]
@@ -304,13 +317,11 @@ def _restore_entries(parameters, entries):
             if original_grad is None:
                 parameter.grad = None
             else:
-                if entry["grad"] is not None:
-                    try:
-                        if isinstance(original_grad, np.ndarray) and original_grad.flags.writeable:
-                            original_grad[...] = entry["grad"]
-                    except BaseException as exc:
-                        if first_error is None:
-                            first_error = exc
+                if entry["grad"] is not None and isinstance(original_grad, np.ndarray):
+                    if not np.array_equal(original_grad, entry["grad"]):
+                        if not original_grad.flags.writeable:
+                            raise RuntimeError("original gradient buffer became read-only")
+                        original_grad[...] = entry["grad"]
                 parameter.grad = original_grad
         except BaseException as exc:
             if first_error is None:
@@ -407,9 +418,9 @@ def directional_curvature(loss_fn, parameters, direction, *, step=1e-3):
 
     The probe evaluates ``loss_fn`` at ``theta``, ``theta + step * direction`` and
     ``theta - step * direction`` under ``no_grad()``. All three evaluations replay
-    the same NumPy global RNG state. Parameter values and caller RNG state are
-    restored before returning, while Tensor mutation versions are intentionally
-    left monotonic so graphs built before a nonzero probe remain stale.
+    the same NumPy global RNG state. Parameter values, bindings, gradients, and
+    caller RNG state are restored before returning. Tensor mutation versions are
+    intentionally left monotonic so graphs built before a nonzero probe remain stale.
     """
     if not callable(loss_fn):
         raise TypeError("loss_fn must be callable")
@@ -421,9 +432,6 @@ def directional_curvature(loss_fn, parameters, direction, *, step=1e-3):
         entries = _snapshot_entries(parameters)
         plus_values, minus_values = _candidate_values(entries, directions, step)
 
-        # Validate writeability/alias constraints for both perturbations before
-        # running the callback even once, so a structurally impossible probe is
-        # rejected without side effects.
         _preflight_install(parameters, plus_values)
         _preflight_install(parameters, minus_values)
 
