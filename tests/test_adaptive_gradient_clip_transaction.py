@@ -22,6 +22,23 @@ class MutateThenRaise(np.ndarray):
             raise RuntimeError("injected gradient write failure")
 
 
+class MutateThenInterrupt(np.ndarray):
+    def __new__(cls, values):
+        obj = np.asarray(values, dtype=np.float64).view(cls)
+        obj.interruptions = 1
+        return obj
+
+    def __array_finalize__(self, source):
+        if source is not None:
+            self.interruptions = getattr(source, "interruptions", 0)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if self.interruptions > 0:
+            self.interruptions -= 1
+            raise KeyboardInterrupt("injected gradient interrupt")
+
+
 class RejectWrites(np.ndarray):
     def __new__(cls, values):
         return np.asarray(values, dtype=np.float64).view(cls)
@@ -68,6 +85,25 @@ def test_late_mutate_then_raise_rolls_back_every_attempted_gradient():
     np.testing.assert_array_equal(second.grad, second_before)
     assert first._version == first_version
     assert second._version == second_version
+
+
+def test_baseexception_commit_failure_rolls_back_every_attempted_gradient():
+    first = Tensor([3.0, 4.0], requires_grad=True)
+    second = Tensor([3.0, 4.0], requires_grad=True)
+    first.grad = np.array([6.0, 8.0])
+    second.grad = MutateThenInterrupt([6.0, 8.0])
+    first_ref = first.grad
+    second_ref = second.grad
+    first_before = first.grad.copy()
+    second_before = second.grad.copy()
+
+    with pytest.raises(KeyboardInterrupt, match="injected gradient interrupt"):
+        adaptive_clip_grad_([first, second], clip_factor=0.1)
+
+    assert first.grad is first_ref
+    assert second.grad is second_ref
+    np.testing.assert_array_equal(first.grad, first_before)
+    np.testing.assert_array_equal(second.grad, second_before)
 
 
 def test_rejected_unmodified_commit_re_raises_original_failure_without_rollback_write():
