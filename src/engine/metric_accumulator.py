@@ -121,35 +121,45 @@ class WeightedMetricAccumulator:
             return self._mean
 
     def merge(self, other):
-        """Merge another accumulator snapshot into this instance."""
+        """Atomically merge another accumulator's current state into this one."""
         if not isinstance(other, WeightedMetricAccumulator):
             raise TypeError("other must be a WeightedMetricAccumulator")
 
-        other_state = other.state_dict()
-        other_count = other_state["observation_count"]
-        if other_count == 0:
+        if other is self:
             with self._lock:
-                return self._mean
+                return self._merge_locked(self)
 
-        with self._lock:
-            if self._observation_count == 0:
-                self._mean = other_state["mean"]
-                self._total_weight = other_state["total_weight"]
-                self._observation_count = other_count
-                return self._mean
+        # A merge reads one accumulator and writes another. Holding both locks
+        # makes that pair one atomic operation. Identity order gives every
+        # thread the same acquisition order, so reciprocal merges cannot deadlock.
+        first, second = sorted((self, other), key=id)
+        with first._lock:
+            with second._lock:
+                return self._merge_locked(other)
 
-            candidate_mean, candidate_weight = _combine_means(
-                self._mean,
-                self._total_weight,
-                other_state["mean"],
-                other_state["total_weight"],
-            )
-            candidate_count = self._observation_count + other_count
-
-            self._mean = candidate_mean
-            self._total_weight = candidate_weight
-            self._observation_count = candidate_count
+    def _merge_locked(self, other):
+        other_count = other._observation_count
+        if other_count == 0:
             return self._mean
+
+        if self._observation_count == 0:
+            self._mean = other._mean
+            self._total_weight = other._total_weight
+            self._observation_count = other_count
+            return self._mean
+
+        candidate_mean, candidate_weight = _combine_means(
+            self._mean,
+            self._total_weight,
+            other._mean,
+            other._total_weight,
+        )
+        candidate_count = self._observation_count + other_count
+
+        self._mean = candidate_mean
+        self._total_weight = candidate_weight
+        self._observation_count = candidate_count
+        return self._mean
 
     def reset(self):
         """Discard all accumulated observations."""
