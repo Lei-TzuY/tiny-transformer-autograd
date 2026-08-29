@@ -123,6 +123,25 @@ def test_installed_exit_restoration_is_best_effort_across_parameters():
     np.testing.assert_array_equal(second.data, [2.0])
 
 
+def test_installed_exit_rebuilds_storage_when_body_introduces_overlap():
+    first = Tensor([1.0, 2.0], requires_grad=True)
+    second = Tensor([3.0, 4.0], requires_grad=True)
+    snapshot = ParameterSnapshot(
+        [first, second],
+        values=[np.array([10.0, 20.0]), np.array([30.0, 40.0])],
+    )
+
+    with snapshot.installed():
+        backing = np.array([100.0, 200.0, 300.0])
+        first._data = backing[:2]
+        second._data = backing[1:]
+        assert np.shares_memory(first.data, second.data)
+
+    np.testing.assert_array_equal(first.data, [1.0, 2.0])
+    np.testing.assert_array_equal(second.data, [3.0, 4.0])
+    assert not np.shares_memory(first.data, second.data)
+
+
 def test_body_exception_survives_when_restoration_succeeds():
     p = Tensor([1.0], requires_grad=True)
     snapshot = ParameterSnapshot(p, values=np.array([2.0]))
