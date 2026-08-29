@@ -311,12 +311,18 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 raise TypeError(f"parameter {index} requires_grad must be a bool")
             trainability.append(requires_grad)
 
+            version = parameter._version
+            if isinstance(version, bool) or not isinstance(version, int):
+                raise TypeError(f"parameter {index} version must be an int")
+            if version < 0:
+                raise ValueError(f"parameter {index} version must be non-negative")
+
             data = parameter.data
             if not isinstance(data, np.ndarray):
                 raise TypeError(f"parameter {index} data must be a NumPy array")
             parameter_data.append(data)
             data_values.append(np.array(data, copy=True))
-            data_versions.append(parameter._version)
+            data_versions.append(version)
 
             gradient = parameter.grad
             if gradient is None:
