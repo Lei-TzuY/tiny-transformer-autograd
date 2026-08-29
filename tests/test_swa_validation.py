@@ -23,6 +23,22 @@ class _FailOnceArray(np.ndarray):
             raise RuntimeError("injected write failure")
 
 
+class _FailOnSecondWriteArray(np.ndarray):
+    def __new__(cls, values):
+        obj = np.asarray(values, dtype=np.float64).copy().view(cls)
+        obj.write_count = 0
+        return obj
+
+    def __array_finalize__(self, source):
+        self.write_count = getattr(source, "write_count", 0)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        self.write_count += 1
+        if self.write_count == 2:
+            raise RuntimeError("injected restoration failure")
+
+
 def test_constructor_rejects_invalid_collection_and_duplicates():
     with pytest.raises(TypeError, match="Tensor or iterable"):
         StochasticWeightAverage(123)
@@ -141,6 +157,26 @@ def test_average_context_entry_failure_leaves_parameters_unchanged():
     with pytest.raises(ValueError, match="must be writable"):
         with swa.average_parameters():
             pass
+
+    np.testing.assert_array_equal(p1.data, before1)
+    np.testing.assert_array_equal(p2.data, before2)
+
+
+def test_average_context_restoration_failure_still_restores_later_parameters():
+    p1 = Tensor([1.0])
+    p2 = Tensor([2.0])
+    swa = StochasticWeightAverage([p1, p2])
+    swa.update()
+
+    p1._data = _FailOnSecondWriteArray([10.0])
+    p2.data[...] = [20.0]
+    before1 = np.array(p1.data, copy=True)
+    before2 = p2.data.copy()
+
+    with pytest.raises(RuntimeError, match="SWA parameter restoration failed"):
+        with swa.average_parameters():
+            np.testing.assert_array_equal(p1.data, [1.0])
+            np.testing.assert_array_equal(p2.data, [2.0])
 
     np.testing.assert_array_equal(p1.data, before1)
     np.testing.assert_array_equal(p2.data, before2)
