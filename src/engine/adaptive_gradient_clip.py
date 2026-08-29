@@ -235,6 +235,14 @@ def _preflight(destinations, candidates, parameter_data):
     return changed
 
 
+def _validate_gradient_bindings(parameters, destinations):
+    for index, (parameter, destination) in enumerate(zip(parameters, destinations)):
+        if parameter.grad is not destination:
+            raise RuntimeError(
+                f"adaptive gradient clipping gradient binding changed for parameter {index}"
+            )
+
+
 def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
     """Clip live gradients relative to unitwise parameter norms.
 
@@ -308,6 +316,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     raise RuntimeError(
                         f"adaptive gradient clipping write failed for parameter {index}"
                     )
+                _validate_gradient_bindings(parameters, destinations)
         except BaseException:
             rollback_error = None
             for index in reversed(attempted):
@@ -320,8 +329,20 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 except BaseException as exc:  # best-effort cleanup across every attempt
                     if rollback_error is None:
                         rollback_error = exc
+
+            for parameter, destination in zip(parameters, destinations):
+                try:
+                    if parameter.grad is not destination:
+                        parameter.grad = destination
+                    if parameter.grad is not destination:
+                        raise RuntimeError("gradient binding rollback postcondition failed")
+                except BaseException as exc:
+                    if rollback_error is None:
+                        rollback_error = exc
+
             if rollback_error is not None:
                 raise RuntimeError("adaptive gradient clipping rollback failed") from rollback_error
             raise
 
+        _validate_gradient_bindings(parameters, destinations)
         return total_clipped_units
