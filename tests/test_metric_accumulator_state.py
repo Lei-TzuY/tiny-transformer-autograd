@@ -115,7 +115,7 @@ def test_nonempty_state_requires_positive_weight_and_finite_mean():
 
     with pytest.raises(ValueError, match="positive total_weight"):
         meter.load_state_dict(dict(state, total_weight=0.0))
-    with pytest.raises(ValueError, match="positive total_weight"):
+    with pytest.raises(ValueError, match="total_weight must be non-negative"):
         meter.load_state_dict(dict(state, total_weight=-1.0))
     with pytest.raises(ValueError, match="metric accumulator mean must be finite"):
         meter.load_state_dict(dict(state, mean=np.nan))
