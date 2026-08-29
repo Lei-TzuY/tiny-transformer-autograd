@@ -246,9 +246,12 @@ class StochasticWeightAverage:
                             parameter.data = entry
                         if not np.array_equal(parameter.data, entry):
                             raise RuntimeError("restoration postcondition failed")
-                    except Exception as exc:  # pragma: no cover - defensive failure path
-                        restoration_error = exc
-                        break
+                    except Exception as exc:  # pragma: no cover - injected-failure path
+                        if restoration_error is None:
+                            restoration_error = exc
+                        # A broken destination must not prevent independent later
+                        # parameters from getting their entry values back.
+                        continue
                 if restoration_error is not None:
                     raise RuntimeError("SWA parameter restoration failed") from restoration_error
 
