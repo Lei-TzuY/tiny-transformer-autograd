@@ -46,22 +46,33 @@ def _materialize_parameters(parameters):
     return items
 
 
+def _reject_overlapping_gradient_storage(gradient, previous_gradients, index):
+    for previous in previous_gradients:
+        if gradient is previous or np.shares_memory(gradient, previous):
+            raise ValueError(
+                f"gradient for parameters[{index}] must not share storage with another gradient"
+            )
+
+
 def clip_grad_value_(parameters, clip_value):
     """Clamp present gradients to ``[-clip_value, clip_value]`` transactionally.
 
     Parameters with ``grad is None`` are ignored. Present gradients must be floating
-    NumPy arrays with exactly the parameter shape and only finite values. The function
-    returns the number of gradient buffers whose values changed.
+    NumPy arrays with exactly the parameter shape and only finite values. Gradient
+    buffers for distinct parameters must not overlap in storage. The function returns
+    the number of gradient buffers whose values changed.
 
-    Validation is all-or-nothing: malformed or read-only buffers are rejected before
-    any gradient changes. If a later in-place assignment unexpectedly raises after
-    mutating its destination, every attempted buffer is restored before re-raising.
+    Validation is all-or-nothing: malformed, aliased, or required read-only buffers are
+    rejected before any gradient changes. If a later in-place assignment unexpectedly
+    raises after mutating its destination, every attempted buffer is restored before
+    re-raising.
     """
 
     limit = _positive_finite_real(clip_value, "clip_value")
     items = _materialize_parameters(parameters)
 
     active = []
+    previous_gradients = []
     for index, parameter in enumerate(items):
         gradient = parameter.grad
         if gradient is None:
@@ -74,6 +85,9 @@ def clip_grad_value_(parameters, clip_value):
             raise ValueError(f"gradient for parameters[{index}] must match parameter shape")
         if not np.all(np.isfinite(gradient)):
             raise ValueError(f"gradient for parameters[{index}] must contain only finite values")
+
+        _reject_overlapping_gradient_storage(gradient, previous_gradients, index)
+        previous_gradients.append(gradient)
 
         candidate = np.clip(np.asarray(gradient), -limit, limit)
         changed = not np.array_equal(candidate, np.asarray(gradient))
