@@ -112,7 +112,6 @@ def _cosine(left, right, left_scale, right_scale, left_sq, right_sq):
     value = inner / denominator
     if not math.isfinite(value):
         raise ValueError("gradient cosine must remain finite")
-    # Roundoff can move an exact endpoint a few ulps outside the mathematical range.
     return float(max(-1.0, min(1.0, value)))
 
 
@@ -159,25 +158,27 @@ class GradientConflictAnalyzer:
                 raise ValueError("task name must not be empty")
             if name in self._names:
                 raise ValueError(f"duplicate task name: {name}")
-            return name
+            return name, self._next_auto_index
 
+        index = self._next_auto_index
         while True:
-            candidate = f"task_{self._next_auto_index}"
-            self._next_auto_index += 1
+            candidate = f"task_{index}"
+            index += 1
             if candidate not in self._names:
-                return candidate
+                return candidate, index
 
     def capture(self, name=None):
         """Snapshot current live gradients as one task and return its name."""
         with self._lock:
             self._validate_binding()
-            resolved_name = self._resolve_name(name)
+            resolved_name, next_auto_index = self._resolve_name(name)
             task = tuple(
                 _gradient_snapshot(parameter, index)
                 for index, parameter in enumerate(self._parameters)
             )
             self._tasks.append(task)
             self._names.append(resolved_name)
+            self._next_auto_index = next_auto_index
             return resolved_name
 
     def task_gradients(self):
