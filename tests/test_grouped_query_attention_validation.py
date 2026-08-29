@@ -10,8 +10,10 @@ from nn import GroupedQueryAttention, RotaryEmbedding
     "args, error",
     [
         ((True, 4), TypeError),
+        ((np.bool_(True), 4), TypeError),
         ((0, 4), ValueError),
         ((8, True), TypeError),
+        ((8, np.bool_(True)), TypeError),
         ((8, 0), ValueError),
     ],
 )
@@ -20,9 +22,9 @@ def test_required_dimensions_are_positive_integers(args, error):
         GroupedQueryAttention(*args)
 
 
-@pytest.mark.parametrize("value", [True, 0, -1, 1.5])
+@pytest.mark.parametrize("value", [True, np.bool_(True), 0, -1, 1.5])
 def test_num_kv_heads_validation(value):
-    error = TypeError if isinstance(value, (bool, float)) else ValueError
+    error = TypeError if isinstance(value, (bool, np.bool_, float)) else ValueError
     with pytest.raises(error):
         GroupedQueryAttention(8, 4, num_kv_heads=value)
 
@@ -44,9 +46,18 @@ def test_query_heads_must_be_divisible_by_kv_heads():
         GroupedQueryAttention(12, 6, num_kv_heads=4)
 
 
-@pytest.mark.parametrize("value", [True, np.nan, np.inf, -0.1, 1.0])
-def test_dropout_validation(value):
-    error = TypeError if isinstance(value, bool) else ValueError
+@pytest.mark.parametrize(
+    "value, error",
+    [
+        (True, TypeError),
+        (np.bool_(True), TypeError),
+        (np.nan, ValueError),
+        (np.inf, ValueError),
+        (-0.1, ValueError),
+        (1.0, ValueError),
+    ],
+)
+def test_dropout_validation(value, error):
     with pytest.raises(error):
         GroupedQueryAttention(8, 4, 2, dropout=value)
 
@@ -75,7 +86,7 @@ def test_forward_rejects_invalid_masks_before_attention_output():
         attention(x, np.zeros((3, 3)))
     bad = np.zeros((2, 2), dtype=np.float64)
     bad[0, 0] = np.nan
-    with pytest.raises(ValueError, match="NaN and \+inf"):
+    with pytest.raises(ValueError, match=r"NaN and \+inf"):
         attention(x, bad)
 
 
@@ -116,7 +127,7 @@ def test_infer_rejects_invalid_key_bias():
     x = np.zeros((1, 2, 8))
     bias = np.zeros((1, 1, 1, 2))
     bias[..., 0] = np.inf
-    with pytest.raises(ValueError, match="NaN and \+inf"):
+    with pytest.raises(ValueError, match=r"NaN and \+inf"):
         attention.infer(x, key_bias=bias)
 
 
