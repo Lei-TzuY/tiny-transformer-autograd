@@ -308,7 +308,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     raise RuntimeError(
                         f"adaptive gradient clipping write failed for parameter {index}"
                     )
-        except Exception:
+        except BaseException:
             rollback_error = None
             for index in reversed(attempted):
                 try:
@@ -317,7 +317,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     destinations[index][...] = originals[index]
                     if not np.array_equal(destinations[index], originals[index]):
                         raise RuntimeError("rollback postcondition failed")
-                except Exception as exc:  # best-effort cleanup across every attempt
+                except BaseException as exc:  # best-effort cleanup across every attempt
                     if rollback_error is None:
                         rollback_error = exc
             if rollback_error is not None:
