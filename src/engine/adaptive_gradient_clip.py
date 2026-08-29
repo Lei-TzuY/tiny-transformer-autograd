@@ -320,6 +320,12 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             data = parameter.data
             if not isinstance(data, np.ndarray):
                 raise TypeError(f"parameter {index} data must be a NumPy array")
+            data_snapshot = _float64_copy(
+                data,
+                name=f"parameter {index} data",
+                shape=parameter.shape,
+                floating_only=False,
+            )
             parameter_data.append(data)
             data_values.append(np.array(data, copy=True))
             data_versions.append(version)
@@ -333,12 +339,6 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             if not requires_grad:
                 raise ValueError(f"parameter {index} is frozen but still has a gradient")
 
-            data_snapshot = _float64_copy(
-                data,
-                name=f"parameter {index} data",
-                shape=parameter.shape,
-                floating_only=False,
-            )
             gradient_snapshot = _float64_copy(
                 gradient,
                 name=f"gradient for parameter {index}",
