@@ -209,8 +209,11 @@ class StochasticWeightAverage:
                     if not np.array_equal(self._parameters[index].data, originals[index]):
                         raise RuntimeError("rollback postcondition failed")
                 except Exception as exc:  # pragma: no cover - injected-failure path
-                    rollback_error = exc
-                    break
+                    if rollback_error is None:
+                        rollback_error = exc
+                    # One broken destination must not strand independent earlier
+                    # parameters at their temporary SWA values.
+                    continue
             if rollback_error is not None:
                 raise RuntimeError("SWA parameter rollback failed") from rollback_error
             raise
