@@ -54,12 +54,21 @@ def _reject_overlapping_gradient_storage(gradient, previous_gradients, index):
             )
 
 
+def _reject_parameter_storage_alias(gradient, parameters, index):
+    for parameter in parameters:
+        if np.shares_memory(gradient, parameter.data):
+            raise ValueError(
+                f"gradient for parameters[{index}] must not share storage with parameter data"
+            )
+
+
 def clip_grad_value_(parameters, clip_value):
     """Clamp present gradients to ``[-clip_value, clip_value]`` transactionally.
 
     Parameters with ``grad is None`` are ignored. Present gradients must be floating
     NumPy arrays with exactly the parameter shape and only finite values. Gradient
-    buffers for distinct parameters must not overlap in storage. The function returns
+    buffers for distinct parameters must not overlap in storage. A gradient that needs
+    clipping must not overlap any bound parameter's data storage. The function returns
     the number of gradient buffers whose values changed.
 
     Validation is all-or-nothing: malformed, aliased, or required read-only buffers are
@@ -91,8 +100,10 @@ def clip_grad_value_(parameters, clip_value):
 
         candidate = np.clip(np.asarray(gradient), -limit, limit)
         changed = not np.array_equal(candidate, np.asarray(gradient))
-        if changed and not gradient.flags.writeable:
-            raise ValueError(f"gradient for parameters[{index}] must be writeable")
+        if changed:
+            _reject_parameter_storage_alias(gradient, items, index)
+            if not gradient.flags.writeable:
+                raise ValueError(f"gradient for parameters[{index}] must be writeable")
         active.append((gradient, candidate, changed))
 
     originals = [np.array(gradient, copy=True) for gradient, _, _ in active]
