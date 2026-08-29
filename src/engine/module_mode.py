@@ -42,6 +42,10 @@ def _tree_is_available(markers, owner):
     )
 
 
+def _owner_has_reservation(owner):
+    return any(active_owner == owner for active_owner, _ in _ACTIVE_MODE_MODULES.values())
+
+
 @contextmanager
 def _reserve_mode_tree(modules):
     """Reserve one entry module tree while allowing disjoint trees to proceed."""
@@ -49,7 +53,17 @@ def _reserve_mode_tree(modules):
     markers = tuple(id(module) for module in modules)
 
     with _MODE_CONTEXT_CONDITION:
-        _MODE_CONTEXT_CONDITION.wait_for(lambda: _tree_is_available(markers, owner))
+        while not _tree_is_available(markers, owner):
+            # Waiting while already holding another tree permits the classic AB/BA
+            # deadlock: two threads can each hold one tree and nest into the other.
+            # Top-level callers may wait, but nested cross-owner acquisition fails
+            # explicitly so the outer reservation can unwind and release its tree.
+            if _owner_has_reservation(owner):
+                raise RuntimeError(
+                    "nested module mode context cannot wait for another thread"
+                )
+            _MODE_CONTEXT_CONDITION.wait()
+
         for marker in markers:
             active = _ACTIVE_MODE_MODULES.get(marker)
             if active is None:
