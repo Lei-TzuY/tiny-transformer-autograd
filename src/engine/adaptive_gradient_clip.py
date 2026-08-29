@@ -235,9 +235,30 @@ def _preflight(destinations, candidates, parameter_data):
     return changed
 
 
-def _validate_transaction_metadata(parameters, destinations, trainability):
-    for index, (parameter, destination, expected_trainable) in enumerate(
-        zip(parameters, destinations, trainability)
+def _validate_transaction_metadata(
+    parameters,
+    destinations,
+    trainability,
+    data_bindings,
+    data_values,
+    data_versions,
+):
+    for index, (
+        parameter,
+        destination,
+        expected_trainable,
+        expected_data,
+        expected_values,
+        expected_version,
+    ) in enumerate(
+        zip(
+            parameters,
+            destinations,
+            trainability,
+            data_bindings,
+            data_values,
+            data_versions,
+        )
     ):
         if parameter.grad is not destination:
             raise RuntimeError(
@@ -246,6 +267,18 @@ def _validate_transaction_metadata(parameters, destinations, trainability):
         if parameter.requires_grad is not expected_trainable:
             raise RuntimeError(
                 f"adaptive gradient clipping trainability changed for parameter {index}"
+            )
+        if parameter.data is not expected_data:
+            raise RuntimeError(
+                f"adaptive gradient clipping parameter data binding changed for parameter {index}"
+            )
+        if not np.array_equal(parameter.data, expected_values):
+            raise RuntimeError(
+                f"adaptive gradient clipping parameter data changed for parameter {index}"
+            )
+        if parameter._version != expected_version:
+            raise RuntimeError(
+                f"adaptive gradient clipping parameter version changed for parameter {index}"
             )
 
 
@@ -264,6 +297,8 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
     with _AGC_LOCK:
         parameters = _materialize_parameters(parameters)
         parameter_data = []
+        data_values = []
+        data_versions = []
         destinations = []
         originals = []
         candidates = []
@@ -280,6 +315,8 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             if not isinstance(data, np.ndarray):
                 raise TypeError(f"parameter {index} data must be a NumPy array")
             parameter_data.append(data)
+            data_values.append(np.array(data, copy=True))
+            data_versions.append(parameter._version)
 
             gradient = parameter.grad
             if gradient is None:
@@ -324,7 +361,14 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     raise RuntimeError(
                         f"adaptive gradient clipping write failed for parameter {index}"
                     )
-                _validate_transaction_metadata(parameters, destinations, trainability)
+                _validate_transaction_metadata(
+                    parameters,
+                    destinations,
+                    trainability,
+                    parameter_data,
+                    data_values,
+                    data_versions,
+                )
         except BaseException:
             rollback_error = None
             for index in reversed(attempted):
@@ -358,9 +402,32 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     if rollback_error is None:
                         rollback_error = exc
 
+            for parameter, expected_data, expected_values in zip(
+                parameters, parameter_data, data_values
+            ):
+                try:
+                    if parameter.data is not expected_data:
+                        parameter._data = expected_data
+                    if not np.array_equal(expected_data, expected_values):
+                        expected_data[...] = expected_values
+                    if parameter.data is not expected_data:
+                        raise RuntimeError("parameter data binding rollback failed")
+                    if not np.array_equal(parameter.data, expected_values):
+                        raise RuntimeError("parameter data rollback postcondition failed")
+                except BaseException as exc:
+                    if rollback_error is None:
+                        rollback_error = exc
+
             if rollback_error is not None:
                 raise RuntimeError("adaptive gradient clipping rollback failed") from rollback_error
             raise
 
-        _validate_transaction_metadata(parameters, destinations, trainability)
+        _validate_transaction_metadata(
+            parameters,
+            destinations,
+            trainability,
+            parameter_data,
+            data_values,
+            data_versions,
+        )
         return total_clipped_units
