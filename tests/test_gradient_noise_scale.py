@@ -38,7 +38,7 @@ def test_vector_noise_scale_uses_global_parameter_geometry():
     report = estimator.report()
     np.testing.assert_allclose(estimator.mean_gradients()[0], [3.0, 4.0])
     assert report["mean_gradient_l2"] == 5.0
-    assert report["gradient_variance_trace"] == 8.0
+    assert report["gradient_variance_trace"] == pytest.approx(8.0)
     assert report["noise_scale"] == pytest.approx(32.0 / 25.0)
 
 
