@@ -138,21 +138,25 @@ def _convex_update(old, new, new_weight):
         return old.copy()
     if new_weight == 1.0:
         return new.copy()
+    if old.size == 0:
+        return old.copy()
 
-    same_sign = np.signbit(old) == np.signbit(new)
-    result = np.empty_like(old, dtype=np.float64)
+    old_flat = old.reshape(-1)
+    new_flat = new.reshape(-1)
+    result = np.empty_like(old_flat, dtype=np.float64)
+    same_sign = np.signbit(old_flat) == np.signbit(new_flat)
     with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
         if np.any(same_sign):
-            left = old[same_sign]
-            right = new[same_sign]
+            left = old_flat[same_sign]
+            right = new_flat[same_sign]
             result[same_sign] = left + new_weight * (right - left)
         if np.any(~same_sign):
-            left = old[~same_sign]
-            right = new[~same_sign]
+            left = old_flat[~same_sign]
+            right = new_flat[~same_sign]
             result[~same_sign] = (1.0 - new_weight) * left + new_weight * right
     if not np.all(np.isfinite(result)):
         raise ValueError("LAMB first moment is not representable")
-    return result
+    return result.reshape(old.shape)
 
 
 def _corrected_ema_new_weight(beta, step):
@@ -269,8 +273,7 @@ def _descriptor_ratio(smaller, larger):
     if smaller == larger:
         return 1.0
     ratio = math.ldexp(
-        smaller[0] / larger[0],
-        smaller[1] - larger[1],
+        smaller[0] / larger[0], smaller[1] - larger[1]
     )
     return min(1.0, max(0.0, ratio))
 
@@ -283,8 +286,7 @@ def _norm_descriptor(array):
         normalized = array / scale
         root = float(np.sqrt(np.sum(normalized * normalized)))
     return _descriptor_multiply(
-        _descriptor_from_float(scale),
-        _descriptor_from_float(root),
+        _descriptor_from_float(scale), _descriptor_from_float(root)
     )
 
 
@@ -340,19 +342,19 @@ def _normalized_lamb_update(adam_direction, data, weight_decay):
     if common[0] == 0.0:
         return np.zeros_like(adam_direction)
 
-    normalized_adam = (
-        np.zeros_like(adam_direction)
-        if adam_scale == 0.0
-        else (adam_direction / adam_scale)
-        * _descriptor_ratio(adam_descriptor, common)
-    )
-    normalized_decay = (
-        np.zeros_like(data, dtype=np.float64)
-        if parameter_scale == 0.0
-        else (np.asarray(data, dtype=np.float64) / parameter_scale)
-        * _descriptor_ratio(decay_descriptor, common)
-    )
-    with np.errstate(over="raise", invalid="raise", under="ignore"):
+    with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
+        normalized_adam = (
+            np.zeros_like(adam_direction)
+            if adam_scale == 0.0
+            else (adam_direction / adam_scale)
+            * _descriptor_ratio(adam_descriptor, common)
+        )
+        normalized_decay = (
+            np.zeros_like(data, dtype=np.float64)
+            if parameter_scale == 0.0
+            else (np.asarray(data, dtype=np.float64) / parameter_scale)
+            * _descriptor_ratio(decay_descriptor, common)
+        )
         combined = normalized_adam + normalized_decay
     if not np.all(np.isfinite(combined)):
         raise ValueError("LAMB update is not representable")
@@ -390,6 +392,11 @@ def _validate_live_binding(parameter, expected_shape, index):
         )
     if not isinstance(parameter.requires_grad, (bool, np.bool_)):
         raise TypeError(f"parameter {index} requires_grad must be boolean")
+    version = getattr(parameter, "_version", None)
+    if type(version) is not int:
+        raise TypeError(f"parameter {index} version must be a non-negative integer")
+    if version < 0:
+        raise ValueError(f"parameter {index} version must be a non-negative integer")
     data = parameter.data
     if not isinstance(data, np.ndarray):
         raise TypeError(f"parameter {index} data must be a NumPy array")
@@ -417,12 +424,17 @@ def _validate_write_storage(destinations, candidates, active_indexes):
         if not destinations[index].flags.writeable:
             raise ValueError(f"parameter {index} data must be writable")
 
-    for right_position, right_index in enumerate(write_indexes):
-        for left_index in write_indexes[:right_position]:
+    checked = set()
+    for write_index in write_indexes:
+        for other_index, other in enumerate(destinations):
+            if other_index == write_index:
+                continue
+            pair = tuple(sorted((write_index, other_index)))
+            if pair in checked:
+                continue
+            checked.add(pair)
             try:
-                overlaps = np.shares_memory(
-                    destinations[left_index], destinations[right_index]
-                )
+                overlaps = np.shares_memory(destinations[write_index], other)
             except ValueError as exc:
                 raise ValueError(
                     "LAMB parameter storage overlap could not be determined"
@@ -430,7 +442,7 @@ def _validate_write_storage(destinations, candidates, active_indexes):
             if overlaps:
                 raise ValueError(
                     "LAMB parameter data storage must not overlap between "
-                    f"parameters {left_index} and {right_index}"
+                    f"parameters {pair[0]} and {pair[1]}"
                 )
 
 
