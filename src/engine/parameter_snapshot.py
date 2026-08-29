@@ -166,6 +166,49 @@ def _restore_one(parameter, entry):
         raise RuntimeError("parameter restoration postcondition failed")
 
 
+def _overlapping_live_indexes(parameters):
+    live = tuple(parameter.data for parameter in parameters)
+    overlapping = set()
+    for right_index, right in enumerate(live):
+        if not isinstance(right, np.ndarray):
+            continue
+        for left_index in range(right_index):
+            left = live[left_index]
+            if not isinstance(left, np.ndarray):
+                continue
+            try:
+                shares = np.shares_memory(left, right)
+            except ValueError:
+                # Restoration must fail closed: replacing both storages is safer than
+                # sequentially writing arrays whose independence cannot be proven.
+                shares = True
+            if shares:
+                overlapping.update((left_index, right_index))
+    return overlapping
+
+
+def _restore_entries(parameters, entries):
+    overlapping = _overlapping_live_indexes(parameters)
+    restoration_error = None
+    for index, (parameter, entry) in enumerate(zip(parameters, entries)):
+        try:
+            if index in overlapping:
+                # A context body may have made distinct parameters share storage.
+                # Rebuild those destinations so a later restore cannot overwrite an
+                # earlier parameter after its immediate postcondition already passed.
+                parameter.data = entry.copy()
+                if not _arrays_equal(np.asarray(parameter.data), entry):
+                    raise RuntimeError("parameter restoration postcondition failed")
+            else:
+                _restore_one(parameter, entry)
+        except Exception as exc:  # pragma: no cover - injected failure path
+            if restoration_error is None:
+                restoration_error = exc
+            continue
+    if restoration_error is not None:
+        raise RuntimeError("parameter snapshot restoration failed") from restoration_error
+
+
 def _install_locked(parameters, shapes, targets):
     destinations = _preflight_destinations(parameters, shapes, targets)
     originals = tuple(np.array(data, dtype=np.float64, copy=True, subok=False) for data in destinations)
@@ -243,18 +286,7 @@ class ParameterSnapshot:
             try:
                 yield self
             finally:
-                restoration_error = None
-                for parameter, entry in zip(self._parameters, entry_values):
-                    try:
-                        _restore_one(parameter, entry)
-                    except Exception as exc:  # pragma: no cover - injected failure path
-                        if restoration_error is None:
-                            restoration_error = exc
-                        continue
-                if restoration_error is not None:
-                    raise RuntimeError(
-                        "parameter snapshot restoration failed"
-                    ) from restoration_error
+                _restore_entries(self._parameters, entry_values)
 
     def state_dict(self):
         """Return independent checkpoint state for the stored snapshot."""
