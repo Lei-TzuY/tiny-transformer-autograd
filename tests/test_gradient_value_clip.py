@@ -122,6 +122,50 @@ def test_disjoint_gradient_views_of_one_base_are_allowed():
     np.testing.assert_array_equal(storage, np.array([2.0, -2.0, 2.0, -2.0]))
 
 
+def test_gradient_aliasing_own_parameter_data_is_rejected_before_write():
+    parameter = _tensor([7.0, -8.0])
+    parameter.grad = parameter.data
+    data_before = parameter.data.copy()
+    version_before = parameter._version
+
+    with pytest.raises(ValueError, match=r"parameters\[0\].*parameter data"):
+        clip_grad_value_([parameter], 1.0)
+
+    np.testing.assert_array_equal(parameter.data, data_before)
+    assert parameter.grad is parameter.data
+    assert parameter._version == version_before
+
+
+def test_gradient_aliasing_other_parameter_data_is_rejected_before_any_write():
+    first = _tensor([1.0, 2.0])
+    second = _tensor([7.0, -8.0])
+    first.grad[...] = np.array([9.0, -10.0])
+    second.grad = first.data.view()
+    first_grad_before = first.grad.copy()
+    first_data_before = first.data.copy()
+    second_data_before = second.data.copy()
+    versions_before = (first._version, second._version)
+
+    with pytest.raises(ValueError, match=r"parameters\[1\].*parameter data"):
+        clip_grad_value_([first, second], 1.0)
+
+    np.testing.assert_array_equal(first.grad, first_grad_before)
+    np.testing.assert_array_equal(first.data, first_data_before)
+    np.testing.assert_array_equal(second.data, second_data_before)
+    assert (first._version, second._version) == versions_before
+
+
+def test_noop_gradient_parameter_alias_remains_valid_and_version_neutral():
+    parameter = _tensor([0.25, -0.5])
+    parameter.grad = parameter.data
+    version_before = parameter._version
+
+    assert clip_grad_value_([parameter], 1.0) == 0
+    np.testing.assert_array_equal(parameter.data, np.array([0.25, -0.5]))
+    assert parameter.grad is parameter.data
+    assert parameter._version == version_before
+
+
 def test_commit_failure_rolls_back_every_attempted_gradient():
     first = _tensor([1.0, 2.0])
     second = _tensor([3.0, 4.0])
