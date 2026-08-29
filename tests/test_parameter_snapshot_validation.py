@@ -40,7 +40,7 @@ def test_explicit_values_validate_count_type_shape_dtype_and_finiteness():
     with pytest.raises(ValueError, match="count"):
         ParameterSnapshot([p], values=[])
     with pytest.raises(TypeError, match="NumPy array"):
-        ParameterSnapshot(p, values=[1.0, 2.0])
+        ParameterSnapshot(p, values=[[1.0, 2.0]])
     with pytest.raises(ValueError, match="shape"):
         ParameterSnapshot(p, values=np.array([[1.0, 2.0]]))
     with pytest.raises(TypeError, match="floating dtype"):
