@@ -120,6 +120,8 @@ class GroupedQueryAttention(Module):
             )
 
         B, T, C = x.shape
+        if B == 0 or T == 0:
+            raise ValueError("grouped-query attention batch and time must be non-empty")
         Hq, Hkv, d_k = self.num_query_heads, self.num_kv_heads, self.d_k
 
         Q = self.W_q(x)
@@ -152,7 +154,7 @@ class GroupedQueryAttention(Module):
         return self.out_proj(attn)
 
     def infer(self, x, cache=None, key_bias=None, positions=None):
-        """NumPy inference returning logits features and a compact KV cache."""
+        """NumPy inference returning output features and a compact KV cache."""
         x = np.asarray(x)
         if x.ndim != 3 or x.shape[-1] != self.d_model:
             raise ValueError(
@@ -167,6 +169,8 @@ class GroupedQueryAttention(Module):
             raise ValueError("grouped-query attention input must contain only finite values")
 
         B, T, C = x.shape
+        if B == 0 or T == 0:
+            raise ValueError("grouped-query attention batch and time must be non-empty")
         Hq, Hkv, d_k = self.num_query_heads, self.num_kv_heads, self.d_k
         cache = _prepare_cache(cache, batch=B, width=d_k, heads=Hkv)
 
