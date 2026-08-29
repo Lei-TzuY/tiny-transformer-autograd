@@ -183,8 +183,8 @@ def test_per_parameter_scaling_keeps_unrelated_extreme_tensor_warning_free():
         estimator.capture()
         report = estimator.report()
 
-    assert report["mean_gradient_l2"] is None
-    assert report["mean_gradient_l2_overflow"] is True
+    assert report["mean_gradient_l2"] == limit
+    assert report["mean_gradient_l2_overflow"] is False
     assert report["gradient_variance_trace"] == 2.0
     assert report["noise_scale"] == 0.0
     assert report["noise_scale_underflow"] is True
