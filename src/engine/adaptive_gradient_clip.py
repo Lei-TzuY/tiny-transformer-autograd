@@ -235,11 +235,17 @@ def _preflight(destinations, candidates, parameter_data):
     return changed
 
 
-def _validate_gradient_bindings(parameters, destinations):
-    for index, (parameter, destination) in enumerate(zip(parameters, destinations)):
+def _validate_transaction_metadata(parameters, destinations, trainability):
+    for index, (parameter, destination, expected_trainable) in enumerate(
+        zip(parameters, destinations, trainability)
+    ):
         if parameter.grad is not destination:
             raise RuntimeError(
                 f"adaptive gradient clipping gradient binding changed for parameter {index}"
+            )
+        if parameter.requires_grad is not expected_trainable:
+            raise RuntimeError(
+                f"adaptive gradient clipping trainability changed for parameter {index}"
             )
 
 
@@ -261,12 +267,14 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
         destinations = []
         originals = []
         candidates = []
+        trainability = []
         total_clipped_units = 0
 
         for index, parameter in enumerate(parameters):
             requires_grad = parameter.requires_grad
             if not isinstance(requires_grad, bool):
                 raise TypeError(f"parameter {index} requires_grad must be a bool")
+            trainability.append(requires_grad)
 
             data = parameter.data
             if not isinstance(data, np.ndarray):
@@ -316,7 +324,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     raise RuntimeError(
                         f"adaptive gradient clipping write failed for parameter {index}"
                     )
-                _validate_gradient_bindings(parameters, destinations)
+                _validate_transaction_metadata(parameters, destinations, trainability)
         except BaseException:
             rollback_error = None
             for index in reversed(attempted):
@@ -340,9 +348,19 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     if rollback_error is None:
                         rollback_error = exc
 
+            for parameter, expected_trainable in zip(parameters, trainability):
+                try:
+                    if parameter.requires_grad is not expected_trainable:
+                        parameter.requires_grad = expected_trainable
+                    if parameter.requires_grad is not expected_trainable:
+                        raise RuntimeError("trainability rollback postcondition failed")
+                except BaseException as exc:
+                    if rollback_error is None:
+                        rollback_error = exc
+
             if rollback_error is not None:
                 raise RuntimeError("adaptive gradient clipping rollback failed") from rollback_error
             raise
 
-        _validate_gradient_bindings(parameters, destinations)
+        _validate_transaction_metadata(parameters, destinations, trainability)
         return total_clipped_units
