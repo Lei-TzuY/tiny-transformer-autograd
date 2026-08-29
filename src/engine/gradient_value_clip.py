@@ -46,6 +46,22 @@ def _materialize_parameters(parameters):
     return items
 
 
+def _clipped_candidate(gradient, limit):
+    dtype = gradient.dtype
+    float64_size = np.dtype(np.float64).itemsize
+    if dtype.itemsize < float64_size and limit > float(np.finfo(dtype).max):
+        return np.array(gradient, copy=True), False
+
+    # A positive binary64 limit can be smaller than a narrow dtype's least subnormal.
+    # Rounding that endpoint to zero is the only representable in-place result, so the
+    # narrowing underflow is intentional rather than a numerical failure.
+    with np.errstate(under="ignore"):
+        typed_limit = dtype.type(limit)
+    candidate = np.clip(np.asarray(gradient), -typed_limit, typed_limit)
+    changed = not np.array_equal(candidate, np.asarray(gradient))
+    return candidate, changed
+
+
 def _reject_overlapping_gradient_storage(gradient, changed, previous_gradients, index):
     for previous, previous_changed in previous_gradients:
         if not (changed or previous_changed):
@@ -97,8 +113,7 @@ def clip_grad_value_(parameters, clip_value):
         if not np.all(np.isfinite(gradient)):
             raise ValueError(f"gradient for parameters[{index}] must contain only finite values")
 
-        candidate = np.clip(np.asarray(gradient), -limit, limit)
-        changed = not np.array_equal(candidate, np.asarray(gradient))
+        candidate, changed = _clipped_candidate(gradient, limit)
         _reject_overlapping_gradient_storage(
             gradient, changed, previous_gradients, index
         )
