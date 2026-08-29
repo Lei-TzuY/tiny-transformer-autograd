@@ -153,8 +153,7 @@ class GradientAccumulator:
                 _gradient_snapshot(parameter, index)
                 for index, parameter in enumerate(self._parameters)
             )
-            with np.errstate(over="ignore", invalid="ignore"):
-                total_weight = self._total_weight + weight
+            total_weight = self._total_weight + weight
             if not np.isfinite(total_weight):
                 raise ValueError("total accumulated weight must remain finite")
             candidates = tuple(
@@ -187,15 +186,20 @@ class GradientAccumulator:
             self._validate_binding()
             candidates = tuple(np.array(value, copy=True) for value in self._averages)
             previous = tuple(parameter.grad for parameter in self._parameters)
-            written = 0
             try:
                 for parameter, candidate in zip(self._parameters, candidates):
                     parameter.grad = candidate
-                    written += 1
-            except BaseException:
-                for parameter, old in zip(self._parameters[:written], previous[:written]):
-                    parameter.grad = old
-                raise
+            except BaseException as original:
+                rollback_error = None
+                for parameter, old in zip(self._parameters, previous):
+                    try:
+                        parameter.grad = old
+                    except BaseException as exc:
+                        if rollback_error is None:
+                            rollback_error = exc
+                if rollback_error is not None:
+                    raise RuntimeError("gradient copy rollback failed") from rollback_error
+                raise original
 
     def reset(self):
         """Discard all accumulated micro-batches without touching live gradients."""
