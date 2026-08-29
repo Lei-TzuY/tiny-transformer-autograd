@@ -238,6 +238,7 @@ def _preflight(destinations, candidates, parameter_data):
 def _validate_transaction_metadata(
     parameters,
     destinations,
+    expected_gradients,
     trainability,
     data_bindings,
     data_values,
@@ -263,6 +264,11 @@ def _validate_transaction_metadata(
         if parameter.grad is not destination:
             raise RuntimeError(
                 f"adaptive gradient clipping gradient binding changed for parameter {index}"
+            )
+        expected_gradient = expected_gradients[index]
+        if destination is not None and not np.array_equal(destination, expected_gradient):
+            raise RuntimeError(
+                f"adaptive gradient clipping gradient value changed for parameter {index}"
             )
         if parameter.requires_grad is not expected_trainable:
             raise RuntimeError(
@@ -359,6 +365,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
 
         changed = _preflight(destinations, candidates, parameter_data)
         attempted = []
+        expected_gradients = list(originals)
         try:
             for index in changed:
                 attempted.append(index)
@@ -367,9 +374,11 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     raise RuntimeError(
                         f"adaptive gradient clipping write failed for parameter {index}"
                     )
+                expected_gradients[index] = candidates[index]
                 _validate_transaction_metadata(
                     parameters,
                     destinations,
+                    expected_gradients,
                     trainability,
                     parameter_data,
                     data_values,
@@ -377,14 +386,18 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 )
         except BaseException:
             rollback_error = None
-            for index in reversed(attempted):
+            for index in reversed(range(len(destinations))):
+                destination = destinations[index]
+                original = originals[index]
+                if destination is None:
+                    continue
                 try:
-                    if np.array_equal(destinations[index], originals[index]):
+                    if np.array_equal(destination, original):
                         continue
-                    destinations[index][...] = originals[index]
-                    if not np.array_equal(destinations[index], originals[index]):
+                    destination[...] = original
+                    if not np.array_equal(destination, original):
                         raise RuntimeError("rollback postcondition failed")
-                except BaseException as exc:  # best-effort cleanup across every attempt
+                except BaseException as exc:  # best-effort cleanup across every gradient
                     if rollback_error is None:
                         rollback_error = exc
 
@@ -431,6 +444,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
         _validate_transaction_metadata(
             parameters,
             destinations,
+            candidates,
             trainability,
             parameter_data,
             data_values,
