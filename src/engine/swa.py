@@ -3,6 +3,7 @@
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from numbers import Integral
+import sys
 import threading
 
 import numpy as np
@@ -12,6 +13,7 @@ from .tensor import Tensor
 
 _STATE_VERSION = 1
 _STATE_TYPE = "StochasticWeightAverage"
+_MAX_AVERAGED = sys.maxsize
 
 
 def _materialize_parameters(parameters):
@@ -34,13 +36,39 @@ def _materialize_parameters(parameters):
     return materialized
 
 
-def _nonnegative_int(name, value):
+def _nonnegative_int(name, value, *, maximum=None):
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
         raise TypeError(f"{name} must be a non-negative integer")
     normalized = int(value)
     if normalized < 0:
         raise ValueError(f"{name} must be a non-negative integer")
+    if maximum is not None and normalized > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
     return normalized
+
+
+def _float64_array_copy(array, *, name):
+    if not isinstance(array, np.ndarray):
+        raise TypeError(f"{name} must be a NumPy array")
+    if not np.issubdtype(array.dtype, np.floating):
+        raise TypeError(f"{name} must have floating dtype")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must be finite")
+
+    if array.dtype.itemsize > np.dtype(np.float64).itemsize:
+        limit = np.array(np.finfo(np.float64).max, dtype=array.dtype)
+        with np.errstate(over="ignore", invalid="raise", under="ignore"):
+            if np.any(np.abs(array) > limit):
+                raise ValueError(f"{name} must fit float64")
+
+    try:
+        with np.errstate(over="raise", invalid="raise", under="ignore"):
+            result = np.asarray(array, dtype=np.float64).copy()
+    except (FloatingPointError, OverflowError) as exc:
+        raise ValueError(f"{name} must fit float64") from exc
+    if not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must fit float64")
+    return result
 
 
 def _snapshot_parameter(parameter, expected_shape, index):
@@ -48,21 +76,7 @@ def _snapshot_parameter(parameter, expected_shape, index):
         raise ValueError(
             f"parameter {index} shape changed from {expected_shape} to {parameter.shape}"
         )
-    data = parameter.data
-    if not isinstance(data, np.ndarray):
-        raise TypeError(f"parameter {index} data must be a NumPy array")
-    if not np.issubdtype(data.dtype, np.floating):
-        raise TypeError(f"parameter {index} data must have floating dtype")
-    if not np.all(np.isfinite(data)):
-        raise ValueError(f"parameter {index} data must be finite")
-    try:
-        with np.errstate(over="raise", invalid="raise", under="ignore"):
-            snapshot = np.asarray(data, dtype=np.float64).copy()
-    except (FloatingPointError, OverflowError) as exc:
-        raise ValueError(f"parameter {index} data must fit float64") from exc
-    if not np.all(np.isfinite(snapshot)):
-        raise ValueError(f"parameter {index} data must fit float64")
-    return snapshot
+    return _float64_array_copy(parameter.data, name=f"parameter {index} data")
 
 
 def _stable_equal_weight_average(previous, current, previous_count):
@@ -121,6 +135,9 @@ class StochasticWeightAverage:
     def update(self):
         """Capture the current parameter values as one equally weighted checkpoint."""
         with self._lock:
+            if self._num_averaged >= _MAX_AVERAGED:
+                raise OverflowError("SWA num_averaged reached the supported maximum")
+
             snapshots = tuple(
                 _snapshot_parameter(parameter, shape, index)
                 for index, (parameter, shape) in enumerate(
@@ -191,7 +208,7 @@ class StochasticWeightAverage:
                         live[...] = originals[index]
                     if not np.array_equal(self._parameters[index].data, originals[index]):
                         raise RuntimeError("rollback postcondition failed")
-                except Exception as exc:  # pragma: no cover - exercised by injected failures
+                except Exception as exc:  # pragma: no cover - injected-failure path
                     rollback_error = exc
                     break
             if rollback_error is not None:
@@ -264,7 +281,11 @@ class StochasticWeightAverage:
             raise ValueError(f"unsupported SWA version: {version}")
         if state.get("type") != _STATE_TYPE:
             raise ValueError(f"SWA type must be {_STATE_TYPE!r}")
-        num_averaged = _nonnegative_int("SWA num_averaged", state.get("num_averaged"))
+        num_averaged = _nonnegative_int(
+            "SWA num_averaged",
+            state.get("num_averaged"),
+            maximum=_MAX_AVERAGED,
+        )
 
         raw_averages = state.get("averages")
         if isinstance(raw_averages, (str, bytes)) or not isinstance(raw_averages, Iterable):
@@ -286,18 +307,9 @@ class StochasticWeightAverage:
                     raise ValueError(
                         f"SWA average {index} shape must be {shape}, got {raw.shape}"
                     )
-                if not np.issubdtype(raw.dtype, np.floating):
-                    raise TypeError(f"SWA average {index} must have floating dtype")
-                if not np.all(np.isfinite(raw)):
-                    raise ValueError(f"SWA average {index} must be finite")
-                try:
-                    with np.errstate(over="raise", invalid="raise", under="ignore"):
-                        candidate = np.asarray(raw, dtype=np.float64).copy()
-                except (FloatingPointError, OverflowError) as exc:
-                    raise ValueError(f"SWA average {index} must fit float64") from exc
-                if not np.all(np.isfinite(candidate)):
-                    raise ValueError(f"SWA average {index} must fit float64")
-                normalized.append(candidate)
+                normalized.append(
+                    _float64_array_copy(raw, name=f"SWA average {index}")
+                )
             candidates = tuple(normalized)
 
         with self._lock:
