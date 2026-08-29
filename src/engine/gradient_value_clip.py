@@ -86,6 +86,10 @@ def _reject_parameter_storage_alias(gradient, parameters, index):
             )
 
 
+def _matches_snapshot(gradient, expected):
+    return np.array_equal(np.asarray(gradient), np.asarray(expected))
+
+
 def _clip_grad_value_transaction(parameters, clip_value):
     limit = _positive_finite_real(clip_value, "clip_value")
     items = _materialize_parameters(parameters)
@@ -125,11 +129,19 @@ def _clip_grad_value_transaction(parameters, clip_value):
                 continue
             attempted.append(position)
             gradient[...] = candidate
+            if not _matches_snapshot(gradient, candidate):
+                raise RuntimeError(
+                    "gradient value clipping commit did not store requested values"
+                )
     except BaseException:
         try:
             for position in reversed(attempted):
                 gradient = active[position][0]
                 gradient[...] = originals[position]
+                if not _matches_snapshot(gradient, originals[position]):
+                    raise RuntimeError(
+                        "gradient value clipping rollback did not restore original values"
+                    )
         except BaseException as rollback_error:
             raise RuntimeError("gradient value clipping rollback failed") from rollback_error
         raise
@@ -147,9 +159,10 @@ def clip_grad_value_(parameters, clip_value):
     function returns the number of gradient buffers whose values changed.
 
     Validation is all-or-nothing: malformed, aliased, or required read-only buffers are
-    rejected before any gradient changes. If a later in-place assignment unexpectedly
-    raises after mutating its destination, every attempted buffer is restored before
-    re-raising.
+    rejected before any gradient changes. Each in-place commit is verified against its
+    precomputed candidate so an ndarray subclass cannot silently drop or distort a
+    write. If a later write fails or violates that postcondition, every attempted
+    buffer is restored and the restoration is verified before the failure is re-raised.
 
     Complete helper calls are serialized with a reentrant process-local lock. This
     keeps validation, commit, and rollback one linearizable transaction: another thread
