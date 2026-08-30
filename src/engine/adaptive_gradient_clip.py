@@ -38,7 +38,7 @@ def _materialize_parameters(parameters):
 
     seen = set()
     for index, parameter in enumerate(materialized):
-        if not isinstance(parameter, Tensor):
+        if type(parameter) is not Tensor:
             raise TypeError(f"parameter {index} must be a Tensor")
         marker = id(parameter)
         if marker in seen:
