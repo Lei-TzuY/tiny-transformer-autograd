@@ -121,6 +121,25 @@ def _is_tensor_managed_storage(array, parameter):
     return owner_ref() is parameter
 
 
+def _storage_owner_ref(array):
+    """Snapshot validated Tensor-storage ownership metadata without dereferencing it."""
+
+    if type(array) is not _VersionedArray:
+        return None
+    return array._owner_ref
+
+
+def _has_expected_storage_owner(array, parameter, expected_owner_ref):
+    """Check storage ownership identity without trusting mutable callable metadata."""
+
+    if type(array) is not _VersionedArray:
+        return expected_owner_ref is None
+    owner_ref = array._owner_ref
+    if type(owner_ref) is not weakref.ReferenceType or owner_ref is not expected_owner_ref:
+        return False
+    return owner_ref() is parameter
+
+
 def _is_plain_shape(shape):
     """Recognize shape metadata without invoking integer-subclass comparisons."""
 
@@ -317,6 +336,7 @@ def _validate_transaction_metadata(
     data_bindings,
     data_values,
     data_versions,
+    data_owner_refs,
 ):
     for index, (
         parameter,
@@ -326,6 +346,7 @@ def _validate_transaction_metadata(
         expected_data,
         expected_values,
         expected_version,
+        expected_owner_ref,
     ) in enumerate(
         zip(
             parameters,
@@ -335,6 +356,7 @@ def _validate_transaction_metadata(
             data_bindings,
             data_values,
             data_versions,
+            data_owner_refs,
         )
     ):
         if parameter.grad is not destination:
@@ -365,6 +387,13 @@ def _validate_transaction_metadata(
             raise RuntimeError(
                 f"adaptive gradient clipping parameter data binding changed for parameter {index}"
             )
+        if not _has_expected_storage_owner(
+            parameter.data, parameter, expected_owner_ref
+        ):
+            raise RuntimeError(
+                "adaptive gradient clipping parameter storage ownership changed for parameter "
+                f"{index}"
+            )
         if not _array_equal(parameter.data, expected_values):
             raise RuntimeError(
                 f"adaptive gradient clipping parameter data changed for parameter {index}"
@@ -393,6 +422,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
         parameter_data = []
         data_values = []
         data_versions = []
+        data_owner_refs = []
         destinations = []
         originals = []
         candidates = []
@@ -417,6 +447,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 raise TypeError(f"parameter {index} data must be a NumPy array")
             if not _is_tensor_managed_storage(data, parameter):
                 raise TypeError(f"parameter {index} data must be Tensor-managed storage")
+            data_owner_refs.append(_storage_owner_ref(data))
             data_shape = np.asarray(data).shape
             grad_shape = parameter._grad_shape
             if type(grad_shape) is not tuple:
@@ -489,6 +520,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     parameter_data,
                     data_values,
                     data_versions,
+                    data_owner_refs,
                 )
         except BaseException:
             rollback_error = None
@@ -557,12 +589,21 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     if rollback_error is None:
                         rollback_error = exc
 
-            for parameter, expected_data, expected_values in zip(
-                parameters, parameter_data, data_values
+            for parameter, expected_data, expected_values, expected_owner_ref in zip(
+                parameters, parameter_data, data_values, data_owner_refs
             ):
                 try:
                     if parameter.data is not expected_data:
                         parameter._data = expected_data
+                    if type(expected_data) is _VersionedArray:
+                        if expected_data._owner_ref is not expected_owner_ref:
+                            expected_data._owner_ref = expected_owner_ref
+                        if not _has_expected_storage_owner(
+                            expected_data, parameter, expected_owner_ref
+                        ):
+                            raise RuntimeError(
+                                "parameter storage ownership rollback postcondition failed"
+                            )
                     if not _array_equal(expected_data, expected_values):
                         expected_data[...] = expected_values
                     if parameter.data is not expected_data:
@@ -586,5 +627,6 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             parameter_data,
             data_values,
             data_versions,
+            data_owner_refs,
         )
         return total_clipped_units
