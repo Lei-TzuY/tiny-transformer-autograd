@@ -87,6 +87,12 @@ def _array_equal(left, right):
     return bool(np.array_equal(left_base, right_base))
 
 
+def _is_writable(array):
+    """Read storage metadata without trusting ndarray subclass attribute overrides."""
+
+    return bool(np.asarray(array).flags.writeable)
+
+
 def _scaled_from_float(value):
     if value == 0.0:
         return _ZERO_SCALED
@@ -219,7 +225,7 @@ def _preflight(destinations, candidates, parameter_data):
     ]
 
     for index in changed:
-        if not destinations[index].flags.writeable:
+        if not _is_writable(destinations[index]):
             raise ValueError(f"gradient for parameter {index} must be writable")
 
     active = [index for index, destination in enumerate(destinations) if destination is not None]
