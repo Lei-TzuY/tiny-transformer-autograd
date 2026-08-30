@@ -6,7 +6,7 @@ import threading
 
 import numpy as np
 
-from .tensor import Tensor
+from .tensor import Tensor, _VersionedArray
 
 
 _AGC_LOCK = threading.RLock()
@@ -107,6 +107,15 @@ def _is_writable(array):
     """Read storage metadata without trusting ndarray subclass attribute overrides."""
 
     return bool(np.asarray(array).flags.writeable)
+
+
+def _is_tensor_managed_storage(array, parameter):
+    """Require the exact version-tracked ndarray owned by this Tensor."""
+
+    if type(array) is not _VersionedArray:
+        return False
+    owner_ref = array._owner_ref
+    return owner_ref is not None and owner_ref() is parameter
 
 
 def _is_plain_shape(shape):
@@ -403,6 +412,8 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             data = parameter.data
             if not isinstance(data, np.ndarray):
                 raise TypeError(f"parameter {index} data must be a NumPy array")
+            if not _is_tensor_managed_storage(data, parameter):
+                raise TypeError(f"parameter {index} data must be Tensor-managed storage")
             data_shape = np.asarray(data).shape
             grad_shape = parameter._grad_shape
             if type(grad_shape) is not tuple:
