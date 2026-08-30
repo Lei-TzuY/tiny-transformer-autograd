@@ -73,7 +73,6 @@ def beam_generate_gpt_with_kv_cache(
     beam_width=3,
     temperature=1.0,
     attention_mask=None,
-    cache=None,
 ):
     """Generate one best beam using independently forked preallocated KV caches.
 
@@ -97,20 +96,13 @@ def beam_generate_gpt_with_kv_cache(
     if idx.shape[0] != 1:
         raise ValueError("buffered beam search currently supports batch size 1")
 
-    if cache is None:
-        cache = GPTKVCache(model)
-    elif not isinstance(cache, GPTKVCache):
-        raise TypeError("cache must be a GPTKVCache or None")
-    cache._assert_model(model)
-    if cache.length != 0:
-        raise ValueError("beam generation cache must be empty at entry")
-
     mask = None
     if attention_mask is not None:
         mask = model._validate_generation_mask(attention_mask, idx.shape).copy()
 
-    logits = _prefill(model, idx, mask, cache)
-    beams = [(idx, 0.0, logits, cache, mask)]
+    root_cache = GPTKVCache(model)
+    logits = _prefill(model, idx, mask, root_cache)
+    beams = [(idx, 0.0, logits, root_cache, mask)]
 
     for _ in range(max_new_tokens):
         candidates = []
