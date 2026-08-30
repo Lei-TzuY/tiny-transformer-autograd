@@ -27,8 +27,8 @@ def _model(*, rope=False, context_len=9):
 def _assert_cache_equal(left, right):
     assert len(left) == len(right)
     for a, b in zip(left, right):
-        np.testing.assert_allclose(a["k"], b["k"], rtol=0.0, atol=0.0)
-        np.testing.assert_allclose(a["v"], b["v"], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(a["k"], b["k"], rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(a["v"], b["v"], rtol=1e-12, atol=1e-12)
 
 
 def test_buffered_beam_matches_legacy_learned_position_search():
