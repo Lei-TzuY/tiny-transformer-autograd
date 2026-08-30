@@ -13,8 +13,8 @@ dependencies = ["numpy>=1.24"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
-tiny-train = "train:main"
-tiny-train-safe = "safe_train_cli:main"
+tiny-train = "training_cli:main"
+tiny-train-safe = "training_cli:safe_main"
 tiny-stream = "streaming_cli:main"
 tiny-stream-benchmark = "streaming_benchmark:main"
 tiny-gqa-convert = "gqa_convert_cli:main"
@@ -25,6 +25,7 @@ package-dir = {"" = "src"}
 py-modules = [
     "train",
     "safe_train_cli",
+    "training_cli",
     "tokenizer",
     "benchmark",
     "streaming_cli",
