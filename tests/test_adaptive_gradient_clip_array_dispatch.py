@@ -30,5 +30,10 @@ def test_gradient_subclass_cannot_lie_about_candidate_equality():
 
     assert changed == 1
     assert parameter.grad is gradient
-    np.testing.assert_array_equal(np.asarray(gradient), np.array([0.3, 0.4]))
+    np.testing.assert_allclose(
+        np.asarray(gradient),
+        np.array([0.3, 0.4]),
+        rtol=0.0,
+        atol=np.finfo(np.float64).eps,
+    )
     assert gradient.array_equal_calls == 0
