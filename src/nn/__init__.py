@@ -3,5 +3,6 @@ from .layers import Linear, Embedding, LayerNorm, RMSNorm, Dropout
 from .attention import SelfAttention, MultiHeadAttention, RotaryEmbedding
 from .grouped_attention import GroupedQueryAttention
 from .transformer import FeedForward, SwiGLU, TransformerBlock, GPT
+from .attention_conversion import convert_gpt_kv_heads
 from .beam import beam_generate
 from .streaming import stream_generate
