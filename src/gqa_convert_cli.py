@@ -106,13 +106,6 @@ def convert_from_args(args):
     model_config = metadata.get("model_config", {})
     query_heads = int(model_config["num_heads"])
     target_kv_heads = int(model_config.get("num_kv_heads", query_heads))
-    history = metadata.get("_tiny_transformer_migrations", [])
-    latest = history[-1] if history else None
-    migration_applied = bool(
-        latest
-        and latest.get("kind") == "gpt_kv_heads"
-        and latest.get("target_num_kv_heads") == target_kv_heads
-    )
 
     return {
         "source_format": source_format,
@@ -124,10 +117,6 @@ def convert_from_args(args):
         "query_heads": query_heads,
         "kv_heads": target_kv_heads,
         "kv_cache_head_ratio": target_kv_heads / query_heads,
-        "migration_applied": migration_applied,
-        "optimizer_state_reset": (
-            latest.get("optimizer_state") == "reset" if migration_applied else False
-        ),
     }
 
 
@@ -143,12 +132,10 @@ def main(argv=None):
         print(json.dumps(report, sort_keys=True, allow_nan=False))
     else:
         mode = "in-place" if report["in_place"] else "copy"
-        reset = "yes" if report["optimizer_state_reset"] else "no"
         print(
             "converted GPT checkpoint: "
             f"query_heads={report['query_heads']}  kv_heads={report['kv_heads']}  "
-            f"cache_head_ratio={report['kv_cache_head_ratio']:.4g}  "
-            f"optimizer_reset={reset}  mode={mode}"
+            f"cache_head_ratio={report['kv_cache_head_ratio']:.4g}  mode={mode}"
         )
     return report
 
