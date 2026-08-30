@@ -1,7 +1,7 @@
 """Unitwise adaptive gradient clipping with overflow-stable norm comparisons."""
 
+from fractions import Fraction
 import math
-from numbers import Real
 import threading
 import weakref
 
@@ -15,7 +15,7 @@ _ZERO_SCALED = (0.0, 0)
 
 
 def _positive_real(name, value):
-    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+    if isinstance(value, (bool, np.bool_)):
         raise TypeError(f"{name} must be a real number")
     if isinstance(value, np.floating):
         source = np.asarray(value)
@@ -34,6 +34,8 @@ def _positive_real(name, value):
         value = float.real.__get__(value, float)
     elif isinstance(value, int):
         value = int.real.__get__(value, int)
+    elif type(value) is not Fraction:
+        raise TypeError(f"{name} must be a real number")
     try:
         normalized = float(value)
     except OverflowError as exc:
