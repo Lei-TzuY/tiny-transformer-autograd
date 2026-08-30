@@ -72,7 +72,7 @@ def test_fork_waits_for_inflight_inference_and_sees_committed_prefix(monkeypatch
     assert child_holder[0].length == 2
 
 
-def test_independent_forks_can_advance_concurrently(monkeypatch):
+def test_independent_forks_do_not_share_a_decode_lock(monkeypatch):
     model = _model()
     parent = GPTKVCache(model)
     infer_gpt_with_kv_cache(model, np.array([[1, 2]], dtype=np.int64), parent)
@@ -81,21 +81,27 @@ def test_independent_forks_can_advance_concurrently(monkeypatch):
 
     left_entered = threading.Event()
     left_release = threading.Event()
-    right_done = threading.Event()
+    right_entered = threading.Event()
     errors = []
     original = model.token_emb.infer
 
-    def selective_block(ids):
+    class RightProbe(Exception):
+        pass
+
+    def selective_probe(ids):
         token = int(np.asarray(ids)[0, 0])
         if token == 3:
             left_entered.set()
             if not left_release.wait(timeout=5):
                 raise RuntimeError("test timed out waiting to release left branch")
+        elif token == 4:
+            right_entered.set()
+            raise RightProbe("right branch entered model inference")
         return original(ids)
 
-    monkeypatch.setattr(model.token_emb, "infer", selective_block)
+    monkeypatch.setattr(model.token_emb, "infer", selective_probe)
 
-    def advance(cache, token, done=None):
+    def advance(cache, token):
         try:
             infer_gpt_with_kv_cache(
                 model,
@@ -104,23 +110,31 @@ def test_independent_forks_can_advance_concurrently(monkeypatch):
             )
         except BaseException as exc:
             errors.append(exc)
-        finally:
-            if done is not None:
-                done.set()
 
     thread_left = threading.Thread(target=advance, args=(left, 3))
     thread_left.start()
     assert left_entered.wait(timeout=5)
 
-    thread_right = threading.Thread(target=advance, args=(right, 4, right_done))
+    thread_right = threading.Thread(target=advance, args=(right, 4))
     thread_right.start()
-    assert right_done.wait(timeout=5)
-    assert right.length == 3
+    # Reaching token embedding while the left decode still owns its cache lock is the
+    # precise contract: sibling caches do not impose one global decode lock.  The
+    # sentinel avoids making this test depend on concurrent BLAS scheduling speed.
+    assert right_entered.wait(timeout=2)
+    thread_right.join(timeout=2)
+    assert not thread_right.is_alive()
+    assert right.length == 2
     assert left.length == 2
 
     left_release.set()
     thread_left.join(timeout=5)
-    thread_right.join(timeout=5)
-    assert errors == []
-    assert left.length == right.length == 3
+    assert not thread_left.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], RightProbe)
+    assert left.length == 3
     assert parent.length == 2
+
+    # The right cache rolled back after the sentinel and remains independently usable.
+    monkeypatch.setattr(model.token_emb, "infer", original)
+    infer_gpt_with_kv_cache(model, np.array([[4]], dtype=np.int64), right)
+    assert right.length == 3
