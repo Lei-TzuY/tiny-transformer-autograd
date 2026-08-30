@@ -78,6 +78,14 @@ def _float64_copy(array, *, name, shape, floating_only):
     return result
 
 
+def _array_equal(left, right):
+    """Compare ndarray storage without trusting subclass NumPy dispatch hooks."""
+
+    left_base = np.asarray(left)
+    right_base = np.asarray(right)
+    return bool(np.array_equal(left_base, right_base))
+
+
 def _scaled_from_float(value):
     if value == 0.0:
         return _ZERO_SCALED
@@ -184,7 +192,7 @@ def _candidate_gradient(parameter_data, gradient_data, gradient_dtype, clip_fact
                 native = np.asarray(clipped, dtype=gradient_dtype)
         except (FloatingPointError, OverflowError) as exc:
             raise ValueError("adaptive clipping candidate must fit gradient dtype") from exc
-        if not np.array_equal(candidate_rows[index], native):
+        if not _array_equal(candidate_rows[index], native):
             candidate_rows[index][...] = native
             clipped_units += 1
 
@@ -202,7 +210,7 @@ def _preflight(destinations, candidates, parameter_data):
     changed = [
         index
         for index, (destination, candidate) in enumerate(zip(destinations, candidates))
-        if destination is not None and not np.array_equal(destination, candidate)
+        if destination is not None and not _array_equal(destination, candidate)
     ]
 
     for index in changed:
@@ -266,7 +274,7 @@ def _validate_transaction_metadata(
                 f"adaptive gradient clipping gradient binding changed for parameter {index}"
             )
         expected_gradient = expected_gradients[index]
-        if destination is not None and not np.array_equal(destination, expected_gradient):
+        if destination is not None and not _array_equal(destination, expected_gradient):
             raise RuntimeError(
                 f"adaptive gradient clipping gradient value changed for parameter {index}"
             )
@@ -278,7 +286,7 @@ def _validate_transaction_metadata(
             raise RuntimeError(
                 f"adaptive gradient clipping parameter data binding changed for parameter {index}"
             )
-        if not np.array_equal(parameter.data, expected_values):
+        if not _array_equal(parameter.data, expected_values):
             raise RuntimeError(
                 f"adaptive gradient clipping parameter data changed for parameter {index}"
             )
@@ -364,13 +372,11 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             total_clipped_units += clipped_units
 
         changed = _preflight(destinations, candidates, parameter_data)
-        attempted = []
         expected_gradients = list(originals)
         try:
             for index in changed:
-                attempted.append(index)
                 destinations[index][...] = candidates[index]
-                if not np.array_equal(destinations[index], candidates[index]):
+                if not _array_equal(destinations[index], candidates[index]):
                     raise RuntimeError(
                         f"adaptive gradient clipping write failed for parameter {index}"
                     )
@@ -392,10 +398,10 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 if destination is None:
                     continue
                 try:
-                    if np.array_equal(destination, original):
+                    if _array_equal(destination, original):
                         continue
                     destination[...] = original
-                    if not np.array_equal(destination, original):
+                    if not _array_equal(destination, original):
                         raise RuntimeError("rollback postcondition failed")
                 except BaseException as exc:  # best-effort cleanup across every gradient
                     if rollback_error is None:
@@ -427,11 +433,11 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 try:
                     if parameter.data is not expected_data:
                         parameter._data = expected_data
-                    if not np.array_equal(expected_data, expected_values):
+                    if not _array_equal(expected_data, expected_values):
                         expected_data[...] = expected_values
                     if parameter.data is not expected_data:
                         raise RuntimeError("parameter data binding rollback failed")
-                    if not np.array_equal(parameter.data, expected_values):
+                    if not _array_equal(parameter.data, expected_values):
                         raise RuntimeError("parameter data rollback postcondition failed")
                 except BaseException as exc:
                     if rollback_error is None:
