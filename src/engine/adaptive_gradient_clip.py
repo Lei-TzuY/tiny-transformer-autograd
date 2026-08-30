@@ -49,7 +49,10 @@ def _materialize_parameters(parameters):
     for index, parameter in enumerate(materialized):
         if type(parameter) is not Tensor:
             raise TypeError(f"parameter {index} must be a Tensor")
-        if parameter._children:
+        children = parameter._children
+        if type(children) is not tuple:
+            raise TypeError(f"parameter {index} graph metadata must be a plain tuple")
+        if children != ():
             raise ValueError(f"parameter {index} must be a leaf Tensor")
         marker = id(parameter)
         if marker in seen:
