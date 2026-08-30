@@ -60,19 +60,25 @@ def test_fork_waits_for_source_inference_and_observes_committed_head(monkeypatch
             fork_done.set()
 
     thread_a = threading.Thread(target=run_infer)
+    thread_b = None
     thread_a.start()
-    assert entered.wait(timeout=5)
+    try:
+        assert entered.wait(timeout=5)
 
-    thread_b = threading.Thread(target=run_fork)
-    thread_b.start()
-    time.sleep(0.05)
-    assert not fork_done.is_set()
+        thread_b = threading.Thread(target=run_fork)
+        thread_b.start()
+        time.sleep(0.05)
+        assert not fork_done.is_set()
+    finally:
+        # Always unblock the worker before allowing an assertion failure to escape;
+        # otherwise pytest can hang forever waiting for a live non-daemon thread.
+        release.set()
+        thread_a.join(timeout=5)
+        if thread_b is not None:
+            thread_b.join(timeout=5)
 
-    release.set()
-    thread_a.join(timeout=5)
-    thread_b.join(timeout=5)
     assert not thread_a.is_alive()
-    assert not thread_b.is_alive()
+    assert thread_b is not None and not thread_b.is_alive()
     assert errors == []
     assert cache.length == 2
     assert len(children) == 1
@@ -121,20 +127,28 @@ def test_sibling_forks_do_not_share_one_decode_lock(monkeypatch):
             errors.append(exc)
 
     thread_left = threading.Thread(target=advance, args=(left, 3))
+    thread_right = None
     thread_left.start()
-    assert left_entered.wait(timeout=5)
+    try:
+        assert left_entered.wait(timeout=5)
 
-    thread_right = threading.Thread(target=advance, args=(right, 4))
-    thread_right.start()
-    assert right_entered.wait(timeout=5)
-    thread_right.join(timeout=5)
-    assert not thread_right.is_alive()
-    assert right.length == 2
-    assert left.length == 2
+        thread_right = threading.Thread(target=advance, args=(right, 4))
+        thread_right.start()
+        assert right_entered.wait(timeout=5)
+        thread_right.join(timeout=5)
+        assert not thread_right.is_alive()
+        assert right.length == 2
+        assert left.length == 2
+    finally:
+        # A failed right-entry assertion must still release the intentionally blocked
+        # left branch so the test process can terminate and report the real failure.
+        left_release.set()
+        thread_left.join(timeout=5)
+        if thread_right is not None:
+            thread_right.join(timeout=5)
 
-    left_release.set()
-    thread_left.join(timeout=5)
     assert not thread_left.is_alive()
+    assert thread_right is not None and not thread_right.is_alive()
     assert len(errors) == 1
     assert isinstance(errors[0], RightProbe)
     assert left.length == 3
