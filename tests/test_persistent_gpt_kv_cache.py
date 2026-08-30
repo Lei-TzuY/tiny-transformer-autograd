@@ -1,6 +1,14 @@
+import faulthandler
+
 import numpy as np
 
 from nn import GPT, PersistentGPTKVCache, infer_gpt_with_persistent_kv_cache
+
+
+# Temporary CI diagnostic: the normal complete suite finishes in seconds. If a
+# persistent-cache regression deadlocks, dump every Python thread and terminate
+# instead of consuming the workflow's six-hour timeout.
+faulthandler.dump_traceback_later(30, exit=True)
 
 
 def _model(*, rope=False, context_len=10):
