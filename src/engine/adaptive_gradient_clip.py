@@ -200,8 +200,12 @@ def _candidate_gradient(parameter_data, gradient_data, gradient_dtype, clip_fact
 
 
 def _shares_memory(left, right, label):
+    """Check exact overlap without trusting ndarray subclass dispatch hooks."""
+
+    left_base = np.asarray(left)
+    right_base = np.asarray(right)
     try:
-        return bool(np.shares_memory(left, right))
+        return bool(np.shares_memory(left_base, right_base))
     except ValueError as exc:
         raise ValueError(f"{label} storage overlap could not be determined") from exc
 
