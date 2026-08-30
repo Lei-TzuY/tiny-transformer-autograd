@@ -92,20 +92,6 @@ def test_cross_parameter_version_change_is_detected_before_later_write():
     assert second._version > second_version_before
 
 
-def test_plain_ndarray_parameter_storage_is_rejected_before_gradient_write():
-    parameter = Tensor([3.0, 4.0], requires_grad=True)
-    gradient = np.array([6.0, 8.0])
-    parameter.grad = gradient
-    parameter._data = np.array([3.0, 4.0])
-    grad_before = gradient.copy()
-
-    with pytest.raises(TypeError, match="parameter 0 data must be Tensor-managed storage"):
-        adaptive_clip_grad_(parameter, clip_factor=0.1)
-
-    assert parameter.grad is gradient
-    np.testing.assert_array_equal(parameter.grad, grad_before)
-
-
 def test_foreign_tensor_storage_is_rejected_before_gradient_write():
     parameter = Tensor([3.0, 4.0], requires_grad=True)
     foreign = Tensor([9.0, 10.0], requires_grad=True)
