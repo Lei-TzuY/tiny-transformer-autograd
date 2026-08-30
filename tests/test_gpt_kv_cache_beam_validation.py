@@ -77,10 +77,13 @@ def test_buffered_beam_does_not_use_attention_cache_concatenate(monkeypatch):
     model = _model()
     prompt = np.array([[1, 2]], dtype=np.int64)
 
-    def forbidden(*args, **kwargs):
-        raise AssertionError("legacy attention concatenate reached")
+    class AttentionNumpyProxy:
+        def __getattr__(self, name):
+            if name == "concatenate":
+                raise AssertionError("legacy attention concatenate reached")
+            return getattr(np, name)
 
-    monkeypatch.setattr(attention_module.np, "concatenate", forbidden)
+    monkeypatch.setattr(attention_module, "np", AttentionNumpyProxy())
     tokens, cache = beam_generate_gpt_with_kv_cache(
         model,
         prompt,
