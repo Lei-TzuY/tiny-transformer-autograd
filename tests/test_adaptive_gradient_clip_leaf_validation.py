@@ -5,6 +5,15 @@ from engine.adaptive_gradient_clip import adaptive_clip_grad_
 from engine.tensor import Tensor
 
 
+class ExplodingChildren:
+    def __init__(self):
+        self.bool_calls = 0
+
+    def __bool__(self):
+        self.bool_calls += 1
+        raise RuntimeError("hostile graph metadata truthiness executed")
+
+
 def test_adaptive_clip_rejects_non_leaf_tensor_before_gradient_write():
     leaf = Tensor(np.array([1.0, 2.0]), requires_grad=True)
     result = leaf * 2.0
@@ -18,6 +27,20 @@ def test_adaptive_clip_rejects_non_leaf_tensor_before_gradient_write():
 
     np.testing.assert_array_equal(result.grad, result_gradient)
     np.testing.assert_array_equal(leaf.grad, leaf_gradient)
+
+
+def test_adaptive_clip_rejects_corrupted_children_without_truthiness_dispatch():
+    parameter = Tensor(np.array([3.0, 4.0]), requires_grad=True)
+    parameter.grad[...] = np.array([6.0, 8.0])
+    hostile_children = ExplodingChildren()
+    parameter._children = hostile_children
+    gradient_before = parameter.grad.copy()
+
+    with pytest.raises(TypeError, match="parameter 0 graph metadata must be a plain tuple"):
+        adaptive_clip_grad_(parameter, clip_factor=0.1, eps=1e-3)
+
+    assert hostile_children.bool_calls == 0
+    np.testing.assert_array_equal(parameter.grad, gradient_before)
 
 
 def test_adaptive_clip_still_accepts_explicit_leaf_tensor():
