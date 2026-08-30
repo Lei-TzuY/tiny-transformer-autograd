@@ -168,6 +168,30 @@ def _norm_descriptor(vector):
     return _scaled_product(scale, root), scale, root
 
 
+def _native_candidate(clipped, gradient_dtype, target_norm):
+    """Round to the live dtype without letting rounding exceed the AGC bound."""
+
+    try:
+        with np.errstate(over="raise", invalid="raise", under="ignore"):
+            native = np.asarray(clipped, dtype=gradient_dtype)
+    except (FloatingPointError, OverflowError) as exc:
+        raise ValueError("adaptive clipping candidate must fit gradient dtype") from exc
+
+    native_norm, _, _ = _norm_descriptor(np.asarray(native, dtype=np.float64))
+    if _scaled_compare(native_norm, target_norm) <= 0:
+        return native
+
+    # Nearest rounding can move a low-precision component away from zero. One
+    # representable step toward zero puts every component at or inside the exact
+    # float64 candidate, so the stored vector cannot remain outside its norm bound.
+    with np.errstate(over="raise", invalid="raise", under="ignore"):
+        native = np.nextafter(native, np.zeros((), dtype=gradient_dtype))
+    native_norm, _, _ = _norm_descriptor(np.asarray(native, dtype=np.float64))
+    if _scaled_compare(native_norm, target_norm) > 0:
+        raise ValueError("adaptive clipping candidate cannot satisfy gradient dtype bound")
+    return native
+
+
 def _candidate_gradient(parameter_data, gradient_data, gradient_dtype, clip_factor, eps):
     parameter_rows = _unit_rows(parameter_data)
     gradient_rows = _unit_rows(gradient_data)
@@ -194,11 +218,7 @@ def _candidate_gradient(parameter_data, gradient_data, gradient_dtype, clip_fact
             clipped = (gradient_row / gradient_scale) * candidate_peak
         if not np.all(np.isfinite(clipped)):
             raise ValueError("adaptive clipping candidate must contain only finite values")
-        try:
-            with np.errstate(over="raise", invalid="raise", under="ignore"):
-                native = np.asarray(clipped, dtype=gradient_dtype)
-        except (FloatingPointError, OverflowError) as exc:
-            raise ValueError("adaptive clipping candidate must fit gradient dtype") from exc
+        native = _native_candidate(clipped, gradient_dtype, target_norm)
         if not _array_equal(candidate_rows[index], native):
             candidate_rows[index][...] = native
             clipped_units += 1
