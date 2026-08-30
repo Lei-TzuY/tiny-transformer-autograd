@@ -595,6 +595,18 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     if rollback_error is None:
                         rollback_error = exc
 
+            for parameter, expected_version in zip(parameters, data_versions):
+                try:
+                    current_version = parameter._version
+                    if type(current_version) is not int or current_version < expected_version:
+                        parameter._version = expected_version
+                        current_version = parameter._version
+                    if type(current_version) is not int or current_version < expected_version:
+                        raise RuntimeError("parameter version rollback postcondition failed")
+                except BaseException as exc:
+                    if rollback_error is None:
+                        rollback_error = exc
+
             for parameter, expected_data, expected_values, expected_owner_ref in zip(
                 parameters, parameter_data, data_values, data_owner_refs
             ):
