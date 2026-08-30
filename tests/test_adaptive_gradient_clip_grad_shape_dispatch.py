@@ -18,6 +18,22 @@ class LyingGradShape(tuple):
         return False
 
 
+class LyingShapeDimension(int):
+    """Integer subclass that lies when an exact tuple compares shape entries."""
+
+    comparisons = 0
+
+    def __new__(cls, value):
+        return super().__new__(cls, value)
+
+    def __eq__(self, other):
+        type(self).comparisons += 1
+        return True
+
+    def __ne__(self, other):
+        type(self).comparisons += 1
+        return False
+
 
 def test_grad_shape_tuple_subclass_is_rejected_without_dispatching_comparison():
     parameter = Tensor([3.0, 4.0], requires_grad=True)
@@ -30,6 +46,20 @@ def test_grad_shape_tuple_subclass_is_rejected_without_dispatching_comparison():
         adaptive_clip_grad_(parameter, clip_factor=0.1, eps=1e-3)
 
     assert LyingGradShape.comparisons == 0
+    np.testing.assert_array_equal(gradient, np.array([6.0, 8.0]))
+
+
+def test_grad_shape_dimension_subclass_is_rejected_without_comparison_dispatch():
+    parameter = Tensor([3.0, 4.0], requires_grad=True)
+    gradient = np.array([6.0, 8.0], dtype=np.float64)
+    parameter.grad = gradient
+    parameter._grad_shape = (LyingShapeDimension(999),)
+    LyingShapeDimension.comparisons = 0
+
+    with pytest.raises(TypeError, match="gradient shape metadata dimensions must be plain ints"):
+        adaptive_clip_grad_(parameter, clip_factor=0.1, eps=1e-3)
+
+    assert LyingShapeDimension.comparisons == 0
     np.testing.assert_array_equal(gradient, np.array([6.0, 8.0]))
 
 
