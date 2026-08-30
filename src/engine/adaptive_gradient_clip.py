@@ -3,6 +3,7 @@
 import math
 from numbers import Real
 import threading
+import weakref
 
 import numpy as np
 
@@ -110,12 +111,14 @@ def _is_writable(array):
 
 
 def _is_tensor_managed_storage(array, parameter):
-    """Reject version-tracked storage owned by a different Tensor."""
+    """Reject malformed or foreign Tensor storage ownership metadata."""
 
     if type(array) is not _VersionedArray:
         return True
     owner_ref = array._owner_ref
-    return owner_ref is not None and owner_ref() is parameter
+    if type(owner_ref) is not weakref.ReferenceType:
+        return False
+    return owner_ref() is parameter
 
 
 def _is_plain_shape(shape):
