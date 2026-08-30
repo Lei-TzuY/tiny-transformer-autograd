@@ -28,6 +28,8 @@ def _positive_real(name, value):
                 if bool(np.abs(source) > limit):
                     raise ValueError(f"{name} must fit float64")
         value = source[()]
+    elif isinstance(value, np.integer):
+        value = np.asarray(value)[()]
     elif isinstance(value, float):
         value = float.real.__get__(value, float)
     elif isinstance(value, int):
