@@ -136,10 +136,8 @@ def test_sibling_forks_do_not_share_one_decode_lock(monkeypatch):
         thread_right.join(timeout=5)
         assert not thread_right.is_alive()
         assert right.length == 2
-        # Do not call left.length while the left worker is intentionally blocked:
-        # infer_gpt_with_persistent_kv_cache owns left._lock for the complete call.
-        # Reading the public property here would wait for that same lock while the
-        # release event is only set in finally, creating a test-induced deadlock.
+        # The left worker intentionally owns left._lock until left_release is set.
+        # Its public cache state is therefore checked only after the worker commits.
     finally:
         left_release.set()
         thread_left.join(timeout=5)
