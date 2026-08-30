@@ -1,6 +1,7 @@
 """Benchmark GPT MHA/GQA/MQA parameter and KV-cache tradeoffs."""
 
 import argparse
+from collections.abc import Mapping
 import json
 import statistics
 import time
@@ -60,6 +61,8 @@ def _normalise_kv_heads(heads, kv_heads):
 def _cache_bytes(cache):
     if isinstance(cache, np.ndarray):
         return int(cache.nbytes)
+    if isinstance(cache, Mapping):
+        return sum(_cache_bytes(value) for value in cache.values())
     if isinstance(cache, (list, tuple)):
         return sum(_cache_bytes(value) for value in cache)
     raise TypeError(f"unexpected KV-cache value type: {type(cache).__name__}")
