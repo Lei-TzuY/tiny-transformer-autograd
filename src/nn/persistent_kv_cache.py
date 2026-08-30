@@ -2,20 +2,20 @@
 
 ``GPTKVCache`` provides excellent single-path decoding by appending into one fixed
 capacity allocation, while ``fork_gpt_kv_cache()`` deliberately makes an eager copy
-so every mutable branch owns independent storage.  Beam search can create many sibling
+so every mutable branch owns independent storage. Beam search can create many sibling
 branches, however, and copying the complete historical K/V prefix for every selected
 child makes branching O(prefix_bytes).
 
-This module provides a complementary persistent representation.  Every layer stores an
-immutable linked chain of K/V segments.  Forking a cache copies only small per-layer
+This module provides a complementary persistent representation. Every layer stores an
+immutable linked chain of K/V segments. Forking a cache copies only small per-layer
 metadata and shares the immutable segment heads; appending a child token allocates only
-that new K/V segment.  Attention scores are computed directly against each segment and
-placed into one ordinary score tensor before the existing softmax is applied.  Historical
+that new K/V segment. Attention scores are computed directly against each segment and
+placed into one ordinary score tensor before the existing softmax is applied. Historical
 K/V arrays are therefore never concatenated or copied during normal fork/decode/beam
-operations.  ``snapshot()`` is the explicit ownership boundary that materializes legacy
+operations. ``snapshot()`` is the explicit ownership boundary that materializes legacy
 contiguous per-layer K/V arrays.
 
-The representation is optimized for branching rather than single-path decode.  Each
+The representation is optimized for branching rather than single-path decode. Each
 appended segment is a separate immutable allocation and inference walks the live segment
 chain, so callers that do not need branching should continue to prefer ``GPTKVCache``.
 """
@@ -144,12 +144,25 @@ class _PersistentLayerCache:
         return node
 
     def segments_oldest(self):
+        """Return the live segment chain oldest-first with O(segment_count) checks."""
         self._validate_internal_state()
         nodes = []
         node = self.head
+        expected_total = self.length
         while node is not None:
+            if not isinstance(node, _KVSegment):
+                raise RuntimeError("persistent cache chain contains an invalid segment")
+            if node.total_length != expected_total:
+                raise RuntimeError("persistent cache segment total-length metadata is inconsistent")
+            if node.length <= 0:
+                raise RuntimeError("persistent cache segment length metadata is inconsistent")
             nodes.append(node)
+            expected_total -= node.length
+            if len(nodes) > self.segment_count:
+                raise RuntimeError("persistent cache segment chain contains a cycle")
             node = node.prev
+        if len(nodes) != self.segment_count or expected_total != 0:
+            raise RuntimeError("persistent cache segment chain metadata is inconsistent")
         nodes.reverse()
         return nodes
 
@@ -157,6 +170,7 @@ class _PersistentLayerCache:
         nodes = self.segments_oldest()
         if not nodes:
             raise RuntimeError("persistent cache layer is empty")
+        self._validate_all_segment_arrays(nodes)
         if len(nodes) == 1:
             return {
                 "k": np.array(nodes[0].key, copy=True, order="C", subok=False),
@@ -168,18 +182,9 @@ class _PersistentLayerCache:
         }
 
     def live_nbytes(self):
-        total = 0
-        node = self.head
-        seen = 0
-        while node is not None:
-            total += int(node.key.nbytes + node.value.nbytes)
-            seen += 1
-            if seen > self.segment_count:
-                raise RuntimeError("persistent cache segment chain contains a cycle")
-            node = node.prev
-        if seen != self.segment_count:
-            raise RuntimeError("persistent cache segment count metadata is inconsistent")
-        return total
+        nodes = self.segments_oldest()
+        self._validate_all_segment_arrays(nodes, check_finite=False)
+        return sum(int(node.key.nbytes + node.value.nbytes) for node in nodes)
 
     def _snapshot_candidate(self, key, value):
         key = _validate_kv_array("key", key)
@@ -198,6 +203,14 @@ class _PersistentLayerCache:
         )
 
     def _validate_internal_state(self):
+        """Validate only O(1) metadata needed by length/state/fork operations.
+
+        Segment arrays are validated fully when they are created. They are private,
+        ordinary read-only ndarrays after publication, so walking and rescanning every
+        ancestor during a fork would turn metadata-only branching back into O(prefix).
+        Operations that already need the chain call ``segments_oldest()`` and validate
+        the traversed nodes there.
+        """
         if not isinstance(self.capacity, int) or isinstance(self.capacity, bool):
             raise RuntimeError("persistent cache capacity metadata is invalid")
         if self.capacity <= 0:
@@ -232,44 +245,37 @@ class _PersistentLayerCache:
             raise RuntimeError("persistent cache layer is missing layout metadata")
         if self.key_dtype is None or self.value_dtype is None:
             raise RuntimeError("persistent cache layer is missing dtype metadata")
+        if not isinstance(self.head, _KVSegment):
+            raise RuntimeError("persistent cache chain contains an invalid head segment")
+        if self.head.total_length != self.length:
+            raise RuntimeError("persistent cache head total-length metadata is inconsistent")
+        self._validate_segment_arrays(self.head, check_finite=False)
 
-        node = self.head
-        seen = 0
-        expected_total = self.length
-        while node is not None:
-            if not isinstance(node, _KVSegment):
-                raise RuntimeError("persistent cache chain contains an invalid segment")
-            key = node.key
-            value = node.value
-            if type(key) is not np.ndarray or type(value) is not np.ndarray:
-                raise RuntimeError("persistent cache segments must use ordinary NumPy arrays")
-            if key.flags.writeable or value.flags.writeable:
-                raise RuntimeError("persistent cache segment storage must remain read-only")
-            if key.ndim < 2 or value.ndim < 2 or key.ndim != value.ndim:
-                raise RuntimeError("persistent cache segment rank metadata is inconsistent")
-            if key.shape[:-2] != value.shape[:-2] or key.shape[-2] != value.shape[-2]:
-                raise RuntimeError("persistent cache segment K/V shapes are inconsistent")
-            if _layout_without_time(key.shape) != self.key_layout:
-                raise RuntimeError("persistent key segment layout metadata is inconsistent")
-            if _layout_without_time(value.shape) != self.value_layout:
-                raise RuntimeError("persistent value segment layout metadata is inconsistent")
-            if key.dtype != self.key_dtype or value.dtype != self.value_dtype:
-                raise RuntimeError("persistent cache segment dtype metadata is inconsistent")
-            if node.length != key.shape[-2] or node.length <= 0:
-                raise RuntimeError("persistent cache segment length metadata is inconsistent")
-            if node.total_length != expected_total:
-                raise RuntimeError("persistent cache segment total-length metadata is inconsistent")
-            if not np.isfinite(key).all() or not np.isfinite(value).all():
-                raise RuntimeError("persistent cache segment contains non-finite values")
+    def _validate_all_segment_arrays(self, nodes, *, check_finite=True):
+        for node in nodes:
+            self._validate_segment_arrays(node, check_finite=check_finite)
 
-            expected_total -= node.length
-            seen += 1
-            if seen > self.segment_count:
-                raise RuntimeError("persistent cache segment chain contains a cycle")
-            node = node.prev
-
-        if seen != self.segment_count or expected_total != 0:
-            raise RuntimeError("persistent cache segment chain metadata is inconsistent")
+    def _validate_segment_arrays(self, node, *, check_finite):
+        key = node.key
+        value = node.value
+        if type(key) is not np.ndarray or type(value) is not np.ndarray:
+            raise RuntimeError("persistent cache segments must use ordinary NumPy arrays")
+        if key.flags.writeable or value.flags.writeable:
+            raise RuntimeError("persistent cache segment storage must remain read-only")
+        if key.ndim < 2 or value.ndim < 2 or key.ndim != value.ndim:
+            raise RuntimeError("persistent cache segment rank metadata is inconsistent")
+        if key.shape[:-2] != value.shape[:-2] or key.shape[-2] != value.shape[-2]:
+            raise RuntimeError("persistent cache segment K/V shapes are inconsistent")
+        if _layout_without_time(key.shape) != self.key_layout:
+            raise RuntimeError("persistent key segment layout metadata is inconsistent")
+        if _layout_without_time(value.shape) != self.value_layout:
+            raise RuntimeError("persistent value segment layout metadata is inconsistent")
+        if key.dtype != self.key_dtype or value.dtype != self.value_dtype:
+            raise RuntimeError("persistent cache segment dtype metadata is inconsistent")
+        if node.length != key.shape[-2] or node.length <= 0:
+            raise RuntimeError("persistent cache segment length metadata is inconsistent")
+        if check_finite and (not np.isfinite(key).all() or not np.isfinite(value).all()):
+            raise RuntimeError("persistent cache segment contains non-finite values")
 
 
 class PersistentGPTKVCache:
@@ -322,7 +328,7 @@ class PersistentGPTKVCache:
 
     @property
     def storage_nbytes(self):
-        # Persistent segments have no spare capacity.  For one logical branch, every
+        # Persistent segments have no spare capacity. For one logical branch, every
         # reachable byte is live; across siblings, shared ancestors are intentionally
         # counted once per branch by this per-cache property.
         return self.live_nbytes
@@ -413,11 +419,12 @@ class PersistentGPTKVCache:
 
 
 def fork_persistent_gpt_kv_cache(cache):
-    """Fork ``cache`` without copying historical K/V arrays.
+    """Fork ``cache`` without copying or scanning historical K/V arrays.
 
     The returned cache owns new mutable layer metadata and a new outer lock, but each
-    layer initially points at the same immutable segment head as the source.  Future
-    appends add new child-owned nodes and never modify shared ancestors.
+    layer initially points at the same immutable segment head as the source. Future
+    appends add new child-owned nodes and never modify shared ancestors. Fork cost is
+    O(number_of_layers), independent of prefix length and K/V byte size.
     """
     if not isinstance(cache, PersistentGPTKVCache):
         raise TypeError("cache must be a PersistentGPTKVCache")
@@ -663,7 +670,7 @@ def _infer_segmented_attention(attention, x, layer, *, key_bias, positions):
     output = attention.out_proj.infer(attended)
 
     # Publish the immutable node only after projection, attention, softmax, value
-    # reduction and output projection all succeeded.  A later GPT-layer failure can
+    # reduction and output projection all succeeded. A later GPT-layer failure can
     # roll back by restoring only the layer head/metadata tuple.
     layer.append(K_new, V_new)
     return output
