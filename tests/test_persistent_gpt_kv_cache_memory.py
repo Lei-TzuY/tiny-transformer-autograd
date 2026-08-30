@@ -38,10 +38,11 @@ def test_forks_add_no_physical_kv_storage_before_divergence():
 
     children = [root.fork() for _ in range(5)]
     unique_bytes, node_count, array_count = _unique_storage_bytes([root] + children)
+    layers = len(model.blocks)
 
     assert unique_bytes == root.live_nbytes
-    assert node_count == model.num_layers
-    assert array_count == 2 * model.num_layers
+    assert node_count == layers
+    assert array_count == 2 * layers
     for child in children:
         assert child.live_nbytes == root.live_nbytes
 
@@ -64,8 +65,9 @@ def test_diverged_children_allocate_only_their_new_token_segments():
         )
 
     unique_bytes, node_count, array_count = _unique_storage_bytes([root] + children)
+    layers = len(model.blocks)
     assert unique_bytes == prefix_bytes + 3 * bytes_per_token
-    assert node_count == model.num_layers * 4
+    assert node_count == layers * 4
     assert array_count == node_count * 2
     assert root.segment_count == 1
     assert all(child.segment_count == 2 for child in children)
