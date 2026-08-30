@@ -50,27 +50,28 @@ def _materialize_parameters(parameters):
 def _float64_copy(array, *, name, shape, floating_only):
     if not isinstance(array, np.ndarray):
         raise TypeError(f"{name} must be a NumPy array")
-    if array.shape != shape:
-        raise ValueError(f"{name} shape mismatch: expected {shape}, got {array.shape}")
+    base = np.asarray(array)
+    if base.shape != shape:
+        raise ValueError(f"{name} shape mismatch: expected {shape}, got {base.shape}")
     if floating_only:
-        if not np.issubdtype(array.dtype, np.floating):
+        if not np.issubdtype(base.dtype, np.floating):
             raise TypeError(f"{name} must have a floating dtype")
     elif (
-        not np.issubdtype(array.dtype, np.number)
-        or np.issubdtype(array.dtype, np.complexfloating)
+        not np.issubdtype(base.dtype, np.number)
+        or np.issubdtype(base.dtype, np.complexfloating)
     ):
         raise TypeError(f"{name} must have a real numeric dtype")
-    if not np.all(np.isfinite(array)):
+    if not np.all(np.isfinite(base)):
         raise ValueError(f"{name} must contain only finite values")
 
-    if array.dtype.itemsize > np.dtype(np.float64).itemsize:
-        limit = np.array(np.finfo(np.float64).max, dtype=array.dtype)
+    if base.dtype.itemsize > np.dtype(np.float64).itemsize:
+        limit = np.array(np.finfo(np.float64).max, dtype=base.dtype)
         with np.errstate(over="ignore", invalid="raise", under="ignore"):
-            if np.any(np.abs(array) > limit):
+            if np.any(np.abs(base) > limit):
                 raise ValueError(f"{name} must fit float64")
     try:
         with np.errstate(over="raise", invalid="raise", under="ignore"):
-            result = np.asarray(array, dtype=np.float64).copy()
+            result = np.asarray(base, dtype=np.float64).copy()
     except (FloatingPointError, OverflowError) as exc:
         raise ValueError(f"{name} must fit float64") from exc
     if not np.all(np.isfinite(result)):
