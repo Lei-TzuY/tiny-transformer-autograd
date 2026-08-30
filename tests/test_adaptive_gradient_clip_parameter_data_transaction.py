@@ -32,6 +32,15 @@ class ChangeParameterDataOnWrite(np.ndarray):
             self.target.data[...] = self.target.data + 7.0
 
 
+class ExplodingOwnerRef:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        raise RuntimeError("owner metadata callable must not run")
+
+
 def test_commit_detects_and_restores_parameter_data_mutation():
     parameter = Tensor([3.0, 4.0], requires_grad=True)
     gradient = ChangeParameterDataOnWrite([6.0, 8.0])
@@ -107,3 +116,19 @@ def test_foreign_tensor_storage_is_rejected_before_gradient_write():
     assert parameter.grad is gradient
     np.testing.assert_array_equal(parameter.grad, grad_before)
     assert foreign._version == foreign_version_before
+
+
+def test_corrupt_owner_metadata_is_rejected_without_callable_dispatch():
+    parameter = Tensor([3.0, 4.0], requires_grad=True)
+    gradient = np.array([6.0, 8.0])
+    parameter.grad = gradient
+    owner_ref = ExplodingOwnerRef()
+    parameter.data._owner_ref = owner_ref
+    grad_before = gradient.copy()
+
+    with pytest.raises(TypeError, match="parameter 0 data must be Tensor-managed storage"):
+        adaptive_clip_grad_(parameter, clip_factor=0.1)
+
+    assert owner_ref.calls == 0
+    assert parameter.grad is gradient
+    np.testing.assert_array_equal(parameter.grad, grad_before)
