@@ -17,6 +17,8 @@ tiny-train = "train:main"
 tiny-train-safe = "safe_train_cli:main"
 tiny-stream = "streaming_cli:main"
 tiny-stream-benchmark = "streaming_benchmark:main"
+tiny-gqa-convert = "gqa_convert_cli:main"
+tiny-gqa-benchmark = "gqa_benchmark:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -27,6 +29,8 @@ py-modules = [
     "benchmark",
     "streaming_cli",
     "streaming_benchmark",
+    "gqa_convert_cli",
+    "gqa_benchmark",
 ]
 
 [tool.setuptools.packages.find]
