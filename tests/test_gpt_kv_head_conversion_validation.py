@@ -86,7 +86,7 @@ def test_nonfinite_source_kv_projection_fails_without_mutation_or_rng_drift():
 
 
 def test_nonfinite_unrelated_source_tensor_fails_transactionally():
-    source = _model( )
+    source = _model()
     source.token_emb.weight.data[0, 0] = np.nan
     state_before = source.state_dict()
     np.random.seed(54321)
@@ -97,16 +97,13 @@ def test_nonfinite_unrelated_source_tensor_fails_transactionally():
 
     _rng_state_equal(np.random.get_state(), rng_before)
     assert np.isnan(source.token_emb.weight.data[0, 0])
+    current = dict(source.named_tensors())
     for name, value in state_before.items():
-        np.testing.assert_array_equal(
-            dict(source.named_tensors())[name].data,
-            value,
-            equal_nan=True,
-        )
+        assert np.array_equal(current[name].data, value, equal_nan=True)
 
 
 def test_conversion_is_globally_rng_neutral_on_success():
-    source = _model(2)
+    source = _model(kv_heads=2)
     np.random.seed(24680)
     rng_before = np.random.get_state()
 
