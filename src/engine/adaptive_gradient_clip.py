@@ -545,6 +545,47 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     if rollback_error is None:
                         rollback_error = exc
 
+            # Parameter-data restoration may execute ndarray-subclass __setitem__.
+            # Do it before metadata repair so no caller hook runs after the final
+            # transaction metadata postconditions have been re-established.
+            for parameter, expected_data, expected_values, expected_owner_ref in zip(
+                parameters, parameter_data, data_values, data_owner_refs
+            ):
+                try:
+                    if parameter.data is not expected_data:
+                        parameter._data = expected_data
+                    if type(expected_data) is _VersionedArray:
+                        if expected_data._owner_ref is not expected_owner_ref:
+                            expected_data._owner_ref = expected_owner_ref
+                        if not _has_expected_storage_owner(
+                            expected_data, parameter, expected_owner_ref
+                        ):
+                            raise RuntimeError(
+                                "parameter storage ownership rollback postcondition failed"
+                            )
+                    if not _array_equal(expected_data, expected_values):
+                        expected_data[...] = expected_values
+                    # A hostile ndarray write may also rebind storage or corrupt
+                    # Tensor-managed ownership, so repair those after the write.
+                    if parameter.data is not expected_data:
+                        parameter._data = expected_data
+                    if type(expected_data) is _VersionedArray:
+                        if expected_data._owner_ref is not expected_owner_ref:
+                            expected_data._owner_ref = expected_owner_ref
+                        if not _has_expected_storage_owner(
+                            expected_data, parameter, expected_owner_ref
+                        ):
+                            raise RuntimeError(
+                                "parameter storage ownership rollback postcondition failed"
+                            )
+                    if parameter.data is not expected_data:
+                        raise RuntimeError("parameter data binding rollback failed")
+                    if not _array_equal(parameter.data, expected_values):
+                        raise RuntimeError("parameter data rollback postcondition failed")
+                except BaseException as exc:
+                    if rollback_error is None:
+                        rollback_error = exc
+
             for parameter, destination in zip(parameters, destinations):
                 try:
                     if parameter.grad is not destination:
@@ -603,31 +644,6 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                         current_version = parameter._version
                     if type(current_version) is not int or current_version < expected_version:
                         raise RuntimeError("parameter version rollback postcondition failed")
-                except BaseException as exc:
-                    if rollback_error is None:
-                        rollback_error = exc
-
-            for parameter, expected_data, expected_values, expected_owner_ref in zip(
-                parameters, parameter_data, data_values, data_owner_refs
-            ):
-                try:
-                    if parameter.data is not expected_data:
-                        parameter._data = expected_data
-                    if type(expected_data) is _VersionedArray:
-                        if expected_data._owner_ref is not expected_owner_ref:
-                            expected_data._owner_ref = expected_owner_ref
-                        if not _has_expected_storage_owner(
-                            expected_data, parameter, expected_owner_ref
-                        ):
-                            raise RuntimeError(
-                                "parameter storage ownership rollback postcondition failed"
-                            )
-                    if not _array_equal(expected_data, expected_values):
-                        expected_data[...] = expected_values
-                    if parameter.data is not expected_data:
-                        raise RuntimeError("parameter data binding rollback failed")
-                    if not _array_equal(parameter.data, expected_values):
-                        raise RuntimeError("parameter data rollback postcondition failed")
                 except BaseException as exc:
                     if rollback_error is None:
                         rollback_error = exc
