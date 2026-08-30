@@ -29,7 +29,7 @@ def test_version_int_subclass_is_rejected_without_dispatching_comparison():
     parameter._version = LyingVersion(0)
     LyingVersion.comparisons = 0
 
-    with pytest.raises(TypeError, match="version must be a plain int"):
+    with pytest.raises(TypeError, match="version must be an int"):
         adaptive_clip_grad_(parameter, clip_factor=0.1, eps=1e-3)
 
     assert LyingVersion.comparisons == 0
