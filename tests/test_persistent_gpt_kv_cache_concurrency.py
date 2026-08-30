@@ -1,5 +1,7 @@
+import sys
 import threading
 import time
+import traceback
 
 import numpy as np
 
@@ -70,8 +72,6 @@ def test_fork_waits_for_source_inference_and_observes_committed_head(monkeypatch
         time.sleep(0.05)
         assert not fork_done.is_set()
     finally:
-        # Always unblock the worker before allowing an assertion failure to escape;
-        # otherwise pytest can hang forever waiting for a live non-daemon thread.
         release.set()
         thread_a.join(timeout=5)
         if thread_b is not None:
@@ -134,14 +134,20 @@ def test_sibling_forks_do_not_share_one_decode_lock(monkeypatch):
 
         thread_right = threading.Thread(target=advance, args=(right, 4), daemon=True)
         thread_right.start()
-        assert right_entered.wait(timeout=5)
+        if not right_entered.wait(timeout=1):
+            frame = sys._current_frames().get(thread_right.ident)
+            stack = "<thread frame unavailable>"
+            if frame is not None:
+                stack = "".join(traceback.format_stack(frame))
+            raise AssertionError(
+                "right sibling did not enter token embedding while left cache was blocked; "
+                f"right thread stack:\n{stack}"
+            )
         thread_right.join(timeout=5)
         assert not thread_right.is_alive()
         assert right.length == 2
         assert left.length == 2
     finally:
-        # A failed right-entry assertion must still release the intentionally blocked
-        # left branch so the test process can terminate and report the real failure.
         left_release.set()
         thread_left.join(timeout=5)
         if thread_right is not None:
