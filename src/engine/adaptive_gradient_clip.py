@@ -310,7 +310,8 @@ def _validate_transaction_metadata(
             raise RuntimeError(
                 f"adaptive gradient clipping parameter data changed for parameter {index}"
             )
-        if parameter._version != expected_version:
+        current_version = parameter._version
+        if type(current_version) is not int or current_version != expected_version:
             raise RuntimeError(
                 f"adaptive gradient clipping parameter version changed for parameter {index}"
             )
@@ -347,8 +348,8 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             trainability.append(requires_grad)
 
             version = parameter._version
-            if isinstance(version, bool) or not isinstance(version, int):
-                raise TypeError(f"parameter {index} version must be an int")
+            if type(version) is not int:
+                raise TypeError(f"parameter {index} version must be a plain int")
             if version < 0:
                 raise ValueError(f"parameter {index} version must be non-negative")
 
