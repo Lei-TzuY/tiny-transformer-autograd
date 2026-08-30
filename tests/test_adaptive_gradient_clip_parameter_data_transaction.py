@@ -1,3 +1,5 @@
+import weakref
+
 import numpy as np
 import pytest
 
@@ -30,6 +32,28 @@ class ChangeParameterDataOnWrite(np.ndarray):
             self.target.data[...] = self.target.data
         else:
             self.target.data[...] = self.target.data + 7.0
+
+
+class CorruptOwnerMetadataOnWrite(np.ndarray):
+    def __new__(cls, values):
+        obj = np.asarray(values, dtype=np.float64).view(cls)
+        obj.target = None
+        obj.foreign = None
+        obj.changes_remaining = 1
+        return obj
+
+    def __array_finalize__(self, source):
+        if source is not None:
+            self.target = getattr(source, "target", None)
+            self.foreign = getattr(source, "foreign", None)
+            self.changes_remaining = getattr(source, "changes_remaining", 0)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        if self.changes_remaining <= 0:
+            return
+        self.changes_remaining -= 1
+        self.target.data._owner_ref = weakref.ref(self.foreign)
 
 
 class ExplodingOwnerRef:
@@ -99,6 +123,25 @@ def test_cross_parameter_version_change_is_detected_before_later_write():
     np.testing.assert_array_equal(second.grad, second_grad_before)
     np.testing.assert_array_equal(second.data, second_data_before)
     assert second._version > second_version_before
+
+
+def test_commit_detects_and_restores_parameter_storage_owner_metadata():
+    parameter = Tensor([3.0, 4.0], requires_grad=True)
+    foreign = Tensor([9.0, 10.0], requires_grad=True)
+    original_owner_ref = parameter.data._owner_ref
+    gradient = CorruptOwnerMetadataOnWrite([6.0, 8.0])
+    gradient.target = parameter
+    gradient.foreign = foreign
+    parameter.grad = gradient
+    grad_before = gradient.copy()
+
+    with pytest.raises(RuntimeError, match="storage ownership changed for parameter 0"):
+        adaptive_clip_grad_(parameter, clip_factor=0.1)
+
+    assert parameter.data._owner_ref is original_owner_ref
+    assert parameter.data._owner_ref() is parameter
+    assert parameter.grad is gradient
+    np.testing.assert_array_equal(parameter.grad, grad_before)
 
 
 def test_foreign_tensor_storage_is_rejected_before_gradient_write():
