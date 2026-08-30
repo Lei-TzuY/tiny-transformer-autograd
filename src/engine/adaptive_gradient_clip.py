@@ -349,7 +349,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
 
             version = parameter._version
             if type(version) is not int:
-                raise TypeError(f"parameter {index} version must be a plain int")
+                raise TypeError(f"parameter {index} version must be an int")
             if version < 0:
                 raise ValueError(f"parameter {index} version must be non-negative")
 
