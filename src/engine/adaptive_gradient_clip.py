@@ -259,6 +259,7 @@ def _validate_transaction_metadata(
     destinations,
     expected_gradients,
     trainability,
+    grad_shapes,
     data_bindings,
     data_values,
     data_versions,
@@ -267,6 +268,7 @@ def _validate_transaction_metadata(
         parameter,
         destination,
         expected_trainable,
+        expected_grad_shape,
         expected_data,
         expected_values,
         expected_version,
@@ -275,6 +277,7 @@ def _validate_transaction_metadata(
             parameters,
             destinations,
             trainability,
+            grad_shapes,
             data_bindings,
             data_values,
             data_versions,
@@ -288,6 +291,12 @@ def _validate_transaction_metadata(
         if destination is not None and not _array_equal(destination, expected_gradient):
             raise RuntimeError(
                 f"adaptive gradient clipping gradient value changed for parameter {index}"
+            )
+        current_grad_shape = parameter._grad_shape
+        if not isinstance(current_grad_shape, tuple) or current_grad_shape != expected_grad_shape:
+            raise RuntimeError(
+                "adaptive gradient clipping gradient shape metadata changed for parameter "
+                f"{index}"
             )
         if parameter.requires_grad is not expected_trainable:
             raise RuntimeError(
@@ -328,6 +337,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
         originals = []
         candidates = []
         trainability = []
+        grad_shapes = []
         total_clipped_units = 0
 
         for index, parameter in enumerate(parameters):
@@ -346,6 +356,17 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             if not isinstance(data, np.ndarray):
                 raise TypeError(f"parameter {index} data must be a NumPy array")
             data_shape = np.asarray(data).shape
+            grad_shape = parameter._grad_shape
+            if not isinstance(grad_shape, tuple):
+                raise TypeError(
+                    f"parameter {index} gradient shape metadata must be a tuple"
+                )
+            if grad_shape != data_shape:
+                raise ValueError(
+                    f"parameter {index} gradient shape metadata must match data shape"
+                )
+            grad_shapes.append(grad_shape)
+
             data_snapshot = _float64_copy(
                 data,
                 name=f"parameter {index} data",
@@ -398,6 +419,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     destinations,
                     expected_gradients,
                     trainability,
+                    grad_shapes,
                     parameter_data,
                     data_values,
                     data_versions,
@@ -425,6 +447,21 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                         parameter.grad = destination
                     if parameter.grad is not destination:
                         raise RuntimeError("gradient binding rollback postcondition failed")
+                except BaseException as exc:
+                    if rollback_error is None:
+                        rollback_error = exc
+
+            for parameter, expected_grad_shape in zip(parameters, grad_shapes):
+                try:
+                    if (
+                        not isinstance(parameter._grad_shape, tuple)
+                        or parameter._grad_shape != expected_grad_shape
+                    ):
+                        parameter._grad_shape = expected_grad_shape
+                    if parameter._grad_shape != expected_grad_shape:
+                        raise RuntimeError(
+                            "gradient shape metadata rollback postcondition failed"
+                        )
                 except BaseException as exc:
                     if rollback_error is None:
                         rollback_error = exc
@@ -464,6 +501,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             destinations,
             candidates,
             trainability,
+            grad_shapes,
             parameter_data,
             data_values,
             data_versions,
