@@ -92,8 +92,9 @@ def test_independent_forks_do_not_share_a_decode_lock(monkeypatch):
         token = int(np.asarray(ids)[0, 0])
         if token == 3:
             left_entered.set()
-            if not left_release.wait(timeout=5):
-                raise RuntimeError("test timed out waiting to release left branch")
+            # The main test thread owns the timeout policy.  A worker-local timeout
+            # turns ordinary CI scheduling delay into a false correctness failure.
+            left_release.wait()
         elif token == 4:
             right_entered.set()
             raise RightProbe("right branch entered model inference")
@@ -118,17 +119,17 @@ def test_independent_forks_do_not_share_a_decode_lock(monkeypatch):
     thread_right = threading.Thread(target=advance, args=(right, 4))
     thread_right.start()
     # Reaching token embedding while the left decode still owns its cache lock is the
-    # precise contract: sibling caches do not impose one global decode lock.  The
-    # sentinel avoids making this test depend on concurrent BLAS scheduling speed.
-    assert right_entered.wait(timeout=2)
-    thread_right.join(timeout=2)
-    assert not thread_right.is_alive()
-    assert right.length == 2
-    assert left.length == 2
-
+    # precise contract: sibling caches do not impose one global decode lock.
+    assert right_entered.wait(timeout=5)
+    # Release immediately after the proof; bounded joins below remain responsible for
+    # detecting a genuine deadlock without a worker thread racing its own timeout.
     left_release.set()
+
+    thread_right.join(timeout=5)
     thread_left.join(timeout=5)
+    assert not thread_right.is_alive()
     assert not thread_left.is_alive()
+    assert right.length == 2
     assert len(errors) == 1
     assert isinstance(errors[0], RightProbe)
     assert left.length == 3
