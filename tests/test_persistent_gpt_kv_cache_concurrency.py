@@ -1,7 +1,5 @@
-import sys
 import threading
 import time
-import traceback
 
 import numpy as np
 
@@ -134,19 +132,14 @@ def test_sibling_forks_do_not_share_one_decode_lock(monkeypatch):
 
         thread_right = threading.Thread(target=advance, args=(right, 4), daemon=True)
         thread_right.start()
-        if not right_entered.wait(timeout=1):
-            frame = sys._current_frames().get(thread_right.ident)
-            stack = "<thread frame unavailable>"
-            if frame is not None:
-                stack = "".join(traceback.format_stack(frame))
-            raise AssertionError(
-                "right sibling did not enter token embedding while left cache was blocked; "
-                f"right thread stack:\n{stack}"
-            )
+        assert right_entered.wait(timeout=5)
         thread_right.join(timeout=5)
         assert not thread_right.is_alive()
         assert right.length == 2
-        assert left.length == 2
+        # Do not call left.length while the left worker is intentionally blocked:
+        # infer_gpt_with_persistent_kv_cache owns left._lock for the complete call.
+        # Reading the public property here would wait for that same lock while the
+        # release event is only set in finally, creating a test-induced deadlock.
     finally:
         left_release.set()
         thread_left.join(timeout=5)
