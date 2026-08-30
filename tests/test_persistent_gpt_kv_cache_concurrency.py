@@ -59,13 +59,13 @@ def test_fork_waits_for_source_inference_and_observes_committed_head(monkeypatch
         finally:
             fork_done.set()
 
-    thread_a = threading.Thread(target=run_infer)
+    thread_a = threading.Thread(target=run_infer, daemon=True)
     thread_b = None
     thread_a.start()
     try:
         assert entered.wait(timeout=5)
 
-        thread_b = threading.Thread(target=run_fork)
+        thread_b = threading.Thread(target=run_fork, daemon=True)
         thread_b.start()
         time.sleep(0.05)
         assert not fork_done.is_set()
@@ -126,13 +126,13 @@ def test_sibling_forks_do_not_share_one_decode_lock(monkeypatch):
         except BaseException as exc:
             errors.append(exc)
 
-    thread_left = threading.Thread(target=advance, args=(left, 3))
+    thread_left = threading.Thread(target=advance, args=(left, 3), daemon=True)
     thread_right = None
     thread_left.start()
     try:
         assert left_entered.wait(timeout=5)
 
-        thread_right = threading.Thread(target=advance, args=(right, 4))
+        thread_right = threading.Thread(target=advance, args=(right, 4), daemon=True)
         thread_right.start()
         assert right_entered.wait(timeout=5)
         thread_right.join(timeout=5)
@@ -179,8 +179,8 @@ def test_concurrent_sibling_successes_keep_shared_ancestor_immutable():
         except BaseException as exc:
             errors.append(exc)
 
-    thread_a = threading.Thread(target=advance, args=(left, 3))
-    thread_b = threading.Thread(target=advance, args=(right, 4))
+    thread_a = threading.Thread(target=advance, args=(left, 3), daemon=True)
+    thread_b = threading.Thread(target=advance, args=(right, 4), daemon=True)
     thread_a.start()
     thread_b.start()
     thread_a.join(timeout=10)
