@@ -16,6 +16,15 @@ _ZERO_SCALED = (0.0, 0)
 def _positive_real(name, value):
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
         raise TypeError(f"{name} must be a real number")
+    if isinstance(value, np.floating):
+        dtype = np.asarray(value).dtype
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+        if dtype.itemsize > np.dtype(np.float64).itemsize:
+            limit = np.array(np.finfo(np.float64).max, dtype=dtype)[()]
+            with np.errstate(over="ignore", invalid="raise", under="ignore"):
+                if np.abs(value) > limit:
+                    raise ValueError(f"{name} must fit float64")
     try:
         normalized = float(value)
     except OverflowError as exc:
