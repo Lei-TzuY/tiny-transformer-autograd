@@ -338,6 +338,11 @@ def _validate_transaction_metadata(
                 "adaptive gradient clipping gradient shape metadata changed for parameter "
                 f"{index}"
             )
+        children = parameter._children
+        if type(children) is not tuple or children != ():
+            raise RuntimeError(
+                f"adaptive gradient clipping graph metadata changed for parameter {index}"
+            )
         if parameter.requires_grad is not expected_trainable:
             raise RuntimeError(
                 f"adaptive gradient clipping trainability changed for parameter {index}"
@@ -510,6 +515,18 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                         raise RuntimeError(
                             "gradient shape metadata rollback postcondition failed"
                         )
+                except BaseException as exc:
+                    if rollback_error is None:
+                        rollback_error = exc
+
+            for parameter in parameters:
+                try:
+                    children = parameter._children
+                    if type(children) is not tuple or children != ():
+                        parameter._children = ()
+                    children = parameter._children
+                    if type(children) is not tuple or children != ():
+                        raise RuntimeError("graph metadata rollback postcondition failed")
                 except BaseException as exc:
                     if rollback_error is None:
                         rollback_error = exc
