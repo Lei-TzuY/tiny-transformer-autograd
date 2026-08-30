@@ -107,6 +107,12 @@ def _is_writable(array):
     return bool(np.asarray(array).flags.writeable)
 
 
+def _is_plain_shape(shape):
+    """Recognize shape metadata without invoking integer-subclass comparisons."""
+
+    return type(shape) is tuple and all(type(dimension) is int for dimension in shape)
+
+
 def _scaled_from_float(value):
     if value == 0.0:
         return _ZERO_SCALED
@@ -327,7 +333,7 @@ def _validate_transaction_metadata(
                 f"adaptive gradient clipping gradient value changed for parameter {index}"
             )
         current_grad_shape = parameter._grad_shape
-        if type(current_grad_shape) is not tuple or current_grad_shape != expected_grad_shape:
+        if not _is_plain_shape(current_grad_shape) or current_grad_shape != expected_grad_shape:
             raise RuntimeError(
                 "adaptive gradient clipping gradient shape metadata changed for parameter "
                 f"{index}"
@@ -395,6 +401,10 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             if type(grad_shape) is not tuple:
                 raise TypeError(
                     f"parameter {index} gradient shape metadata must be a plain tuple"
+                )
+            if not _is_plain_shape(grad_shape):
+                raise TypeError(
+                    f"parameter {index} gradient shape metadata dimensions must be plain ints"
                 )
             if grad_shape != data_shape:
                 raise ValueError(
@@ -489,11 +499,14 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             for parameter, expected_grad_shape in zip(parameters, grad_shapes):
                 try:
                     if (
-                        type(parameter._grad_shape) is not tuple
+                        not _is_plain_shape(parameter._grad_shape)
                         or parameter._grad_shape != expected_grad_shape
                     ):
                         parameter._grad_shape = expected_grad_shape
-                    if parameter._grad_shape != expected_grad_shape:
+                    if (
+                        not _is_plain_shape(parameter._grad_shape)
+                        or parameter._grad_shape != expected_grad_shape
+                    ):
                         raise RuntimeError(
                             "gradient shape metadata rollback postcondition failed"
                         )
