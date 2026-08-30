@@ -293,7 +293,7 @@ def _validate_transaction_metadata(
                 f"adaptive gradient clipping gradient value changed for parameter {index}"
             )
         current_grad_shape = parameter._grad_shape
-        if not isinstance(current_grad_shape, tuple) or current_grad_shape != expected_grad_shape:
+        if type(current_grad_shape) is not tuple or current_grad_shape != expected_grad_shape:
             raise RuntimeError(
                 "adaptive gradient clipping gradient shape metadata changed for parameter "
                 f"{index}"
@@ -357,9 +357,9 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 raise TypeError(f"parameter {index} data must be a NumPy array")
             data_shape = np.asarray(data).shape
             grad_shape = parameter._grad_shape
-            if not isinstance(grad_shape, tuple):
+            if type(grad_shape) is not tuple:
                 raise TypeError(
-                    f"parameter {index} gradient shape metadata must be a tuple"
+                    f"parameter {index} gradient shape metadata must be a plain tuple"
                 )
             if grad_shape != data_shape:
                 raise ValueError(
@@ -454,7 +454,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             for parameter, expected_grad_shape in zip(parameters, grad_shapes):
                 try:
                     if (
-                        not isinstance(parameter._grad_shape, tuple)
+                        type(parameter._grad_shape) is not tuple
                         or parameter._grad_shape != expected_grad_shape
                     ):
                         parameter._grad_shape = expected_grad_shape
