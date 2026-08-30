@@ -110,10 +110,10 @@ def _is_writable(array):
 
 
 def _is_tensor_managed_storage(array, parameter):
-    """Require the exact version-tracked ndarray owned by this Tensor."""
+    """Reject version-tracked storage owned by a different Tensor."""
 
     if type(array) is not _VersionedArray:
-        return False
+        return True
     owner_ref = array._owner_ref
     return owner_ref is not None and owner_ref() is parameter
 
