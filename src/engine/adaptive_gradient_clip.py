@@ -367,7 +367,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             candidate, clipped_units = _candidate_gradient(
                 data_snapshot,
                 gradient_snapshot,
-                gradient.dtype,
+                np.asarray(gradient).dtype,
                 clip_factor,
                 eps,
             )
