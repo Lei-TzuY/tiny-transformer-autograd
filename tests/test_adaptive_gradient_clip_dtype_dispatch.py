@@ -31,5 +31,5 @@ def test_candidate_dtype_does_not_dispatch_ndarray_subclass_property():
 
     assert changed == 0
     assert parameter.grad is gradient
-    np.testing.assert_array_equal(gradient, np.array([0.25]))
     assert gradient.dtype_calls == 0
+    np.testing.assert_array_equal(np.asarray(gradient), np.array([0.25]))
