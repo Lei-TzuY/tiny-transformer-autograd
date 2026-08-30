@@ -13,6 +13,22 @@ class DispatchTrackingFloat(np.float64):
         raise RuntimeError("unexpected NumPy scalar subclass dispatch")
 
 
+class FloatSubclass(float):
+    float_calls = 0
+
+    def __float__(self):
+        type(self).float_calls += 1
+        raise RuntimeError("unexpected Python float subclass dispatch")
+
+
+class IntSubclass(int):
+    float_calls = 0
+
+    def __float__(self):
+        type(self).float_calls += 1
+        raise RuntimeError("unexpected Python int subclass dispatch")
+
+
 def test_wider_finite_options_outside_float64_are_range_errors():
     if np.finfo(np.longdouble).max <= np.finfo(np.float64).max:
         pytest.skip("platform longdouble is not wider than float64")
@@ -54,3 +70,17 @@ def test_numpy_float_subclass_options_do_not_dispatch_ufunc_hooks():
         assert adaptive_clip_grad_(parameter, eps=DispatchTrackingFloat(0.001)) == 0
 
     assert DispatchTrackingFloat.ufunc_calls == 0
+
+
+def test_python_numeric_subclass_options_do_not_dispatch_float_hooks():
+    parameter = Tensor([1.0], requires_grad=True)
+    parameter.grad = np.array([0.0])
+    FloatSubclass.float_calls = 0
+    IntSubclass.float_calls = 0
+
+    with np.errstate(all="raise"):
+        assert adaptive_clip_grad_(parameter, clip_factor=FloatSubclass(0.125)) == 0
+        assert adaptive_clip_grad_(parameter, eps=IntSubclass(1)) == 0
+
+    assert FloatSubclass.float_calls == 0
+    assert IntSubclass.float_calls == 0
