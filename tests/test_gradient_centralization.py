@@ -66,6 +66,26 @@ def test_min_rank_can_limit_centralization_to_higher_rank_gradients():
     np.testing.assert_array_equal(matrix.grad, before)
 
 
+@pytest.mark.parametrize(
+    ("shape", "gradient", "min_rank"),
+    [
+        ((2,), [1.0, 2.0], 2),
+        ((1, 2), [[1.0, 3.0]], 3),
+    ],
+)
+def test_ineligible_frozen_parameter_with_live_gradient_is_rejected(
+    shape, gradient, min_rank
+):
+    parameter = Tensor(np.zeros(shape, dtype=np.float64), requires_grad=False)
+    parameter.grad = np.asarray(gradient, dtype=np.float64).copy()
+    before = parameter.grad.copy()
+
+    with pytest.raises(ValueError, match="parameter 0 is frozen but still has a gradient"):
+        centralize_gradients_([parameter], min_rank=min_rank)
+
+    np.testing.assert_array_equal(parameter.grad, before)
+
+
 def test_zero_mean_gradient_is_not_rewritten():
     parameter = _parameter((2, 2), [[-1.0, 1.0], [-3.0, 3.0]])
     gradient = parameter.grad
