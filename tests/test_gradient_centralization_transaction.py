@@ -90,7 +90,9 @@ class _RetypeOnWrite(np.ndarray):
 
     def __setitem__(self, key, value):
         np.ndarray.__setitem__(self, key, value)
-        self.dtype = np.int64
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            self.dtype = np.int64
 
 
 class _ReadOnlyOnWrite(np.ndarray):
