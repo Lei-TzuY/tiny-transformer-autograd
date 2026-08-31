@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pytest
 
@@ -20,7 +22,9 @@ class ReshapeSelfOnWrite(np.ndarray):
         if self.reshape_remaining <= 0:
             return
         self.reshape_remaining -= 1
-        np.ndarray.shape.__set__(self, (1, self.size))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            np.ndarray.shape.__set__(self, (1, self.size))
 
 
 def test_failed_commit_restores_exact_gradient_shape_on_same_object():
