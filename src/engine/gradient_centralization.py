@@ -1,6 +1,7 @@
 """In-place gradient centralization with explicit transactional validation."""
 
 import numbers
+import warnings
 
 import numpy as np
 
@@ -42,6 +43,17 @@ def _shares_memory(left, right):
         return bool(np.shares_memory(np.asarray(left), np.asarray(right)))
     except ValueError as exc:
         raise ValueError("gradient storage overlap could not be determined") from exc
+
+
+def _restore_array_shape(array, expected_shape):
+    if np.asarray(array).shape == expected_shape:
+        return
+    # Exceptional rollback must preserve the exact caller-owned ndarray object.
+    # New NumPy versions deprecate direct shape assignment, so suppress only that
+    # deprecation at this narrow repair boundary rather than weakening -W error.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        np.ndarray.shape.__set__(array, expected_shape)
 
 
 def _centralized_candidate(gradient):
@@ -88,6 +100,10 @@ def _validate_transaction_state(parameters, gradients, originals, candidates, co
         if parameters[index].grad is not gradient:
             raise RuntimeError(
                 f"gradient binding changed for parameter {index} during centralization"
+            )
+        if np.asarray(gradient).shape != originals[index].shape:
+            raise RuntimeError(
+                f"gradient shape changed for parameter {index} during centralization"
             )
         expected = candidates[index] if index in committed else originals[index]
         if not np.array_equal(np.asarray(gradient), expected):
@@ -197,14 +213,15 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 if rollback_error is None:
                     rollback_error = exc
 
-        # A write hook can also mutate a different eligible gradient without
-        # rebinding it. Repair every drifted entry snapshot, not only destinations
-        # that this helper itself attempted to write.
+        # A write hook can also mutate another eligible gradient's metadata/value.
+        # Repair shape first so the original value can be written back to the exact
+        # caller-owned ndarray rather than replacing its public gradient binding.
         for index in reversed(range(len(gradients))):
             if originals[index] is None:
                 continue
             try:
                 destination = gradients[index]
+                _restore_array_shape(destination, originals[index].shape)
                 if np.array_equal(np.asarray(destination), originals[index]):
                     continue
                 if not bool(np.asarray(destination).flags.writeable):
@@ -228,9 +245,13 @@ def centralize_gradients_(parameters, *, min_rank=2):
                     raise RuntimeError(
                         "gradient centralization binding rollback postcondition failed"
                     )
-                if originals[index] is not None and not np.array_equal(
-                    np.asarray(gradient), originals[index]
-                ):
+                if originals[index] is None:
+                    continue
+                if np.asarray(gradient).shape != originals[index].shape:
+                    raise RuntimeError(
+                        "gradient centralization shape rollback postcondition failed"
+                    )
+                if not np.array_equal(np.asarray(gradient), originals[index]):
                     raise RuntimeError(
                         "gradient centralization value rollback postcondition failed"
                     )
