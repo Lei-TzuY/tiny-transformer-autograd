@@ -22,7 +22,9 @@ class ChangeParameterDtypeOnWrite(np.ndarray):
         if self.changes_remaining <= 0:
             return
         self.changes_remaining -= 1
-        self.target.data.dtype = np.int64
+        data = self.target.data
+        state = (1, data.shape, np.dtype(np.int64), False, data.tobytes())
+        data.__setstate__(state)
 
 
 def test_commit_detects_and_restores_parameter_data_dtype_change():
