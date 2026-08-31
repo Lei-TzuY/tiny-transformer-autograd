@@ -359,6 +359,7 @@ def _validate_transaction_metadata(
     parameters,
     destinations,
     expected_gradients,
+    gradient_writability,
     trainability,
     grad_shapes,
     data_bindings,
@@ -402,6 +403,11 @@ def _validate_transaction_metadata(
             if np.asarray(destination).dtype != np.asarray(expected_gradient).dtype:
                 raise RuntimeError(
                     f"adaptive gradient clipping gradient dtype changed for parameter {index}"
+                )
+            if _is_writable(destination) is not gradient_writability[index]:
+                raise RuntimeError(
+                    "adaptive gradient clipping gradient writability changed for parameter "
+                    f"{index}"
                 )
             if not _array_equal(destination, expected_gradient):
                 raise RuntimeError(
@@ -476,6 +482,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
         destinations = []
         originals = []
         candidates = []
+        gradient_writability = []
         trainability = []
         grad_shapes = []
         total_clipped_units = 0
@@ -532,6 +539,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 destinations.append(None)
                 originals.append(None)
                 candidates.append(None)
+                gradient_writability.append(None)
                 continue
             if not requires_grad:
                 raise ValueError(f"parameter {index} is frozen but still has a gradient")
@@ -553,6 +561,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             destinations.append(gradient)
             originals.append(np.array(gradient, copy=True))
             candidates.append(candidate)
+            gradient_writability.append(_is_writable(gradient))
             total_clipped_units += clipped_units
 
         changed = _preflight(destinations, candidates, parameter_data)
@@ -572,6 +581,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     parameters,
                     destinations,
                     expected_gradients,
+                    gradient_writability,
                     trainability,
                     grad_shapes,
                     parameter_data,
@@ -590,16 +600,27 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     continue
                 try:
                     original_dtype = np.asarray(original).dtype
+                    expected_writable = gradient_writability[index]
+                    needs_write = (
+                        np.asarray(destination).dtype != original_dtype
+                        or not _array_equal(destination, original)
+                    )
+                    if needs_write and not _is_writable(destination):
+                        _restore_array_writability(destination, True)
                     _restore_array_dtype(destination, original_dtype)
-                    if _array_equal(destination, original):
-                        continue
-                    # Keep the canonical entry snapshot private from caller-controlled
-                    # rollback writes, just as commit keeps its candidate private.
-                    write_original = np.array(original, copy=True)
-                    destination[...] = write_original
+                    if not _array_equal(destination, original):
+                        # Keep the canonical entry snapshot private from caller-controlled
+                        # rollback writes, just as commit keeps its candidate private.
+                        write_original = np.array(original, copy=True)
+                        destination[...] = write_original
                     _restore_array_dtype(destination, original_dtype)
+                    _restore_array_writability(destination, expected_writable)
                     if np.asarray(destination).dtype != original_dtype:
                         raise RuntimeError("gradient dtype rollback postcondition failed")
+                    if _is_writable(destination) is not expected_writable:
+                        raise RuntimeError(
+                            "gradient writability rollback postcondition failed"
+                        )
                     if not _array_equal(destination, original):
                         raise RuntimeError("rollback postcondition failed")
                 except BaseException as exc:  # best-effort cleanup across every gradient
@@ -747,6 +768,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             parameters,
             destinations,
             candidates,
+            gradient_writability,
             trainability,
             grad_shapes,
             parameter_data,
