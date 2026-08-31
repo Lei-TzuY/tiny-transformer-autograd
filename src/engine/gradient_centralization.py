@@ -361,3 +361,20 @@ def centralize_gradients_(parameters, *, min_rank=2):
         raise
 
     return len(changed)
+
+
+# A transaction can execute caller-controlled ndarray subclass hooks while its entry
+# snapshots are live. Serialize complete helper-managed calls so another transaction
+# cannot observe or mutate a half-committed collection. RLock keeps same-thread nested
+# diagnostics on disjoint parameters usable instead of introducing a self-deadlock.
+import threading as _threading
+
+_CENTRALIZATION_LOCK = _threading.RLock()
+_centralize_gradients_unlocked = centralize_gradients_
+
+
+def centralize_gradients_(parameters, *, min_rank=2):
+    """Center eligible gradients atomically across helper-managed concurrent calls."""
+
+    with _CENTRALIZATION_LOCK:
+        return _centralize_gradients_unlocked(parameters, min_rank=min_rank)
