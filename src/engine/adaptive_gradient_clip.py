@@ -513,7 +513,10 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
         expected_gradients = list(originals)
         try:
             for index in changed:
-                destinations[index][...] = candidates[index]
+                # Caller-controlled ndarray __setitem__ receives the assigned object and
+                # may mutate it. Keep the canonical candidate private for postvalidation.
+                write_candidate = np.array(candidates[index], copy=True)
+                destinations[index][...] = write_candidate
                 if not _array_equal(destinations[index], candidates[index]):
                     raise RuntimeError(
                         f"adaptive gradient clipping write failed for parameter {index}"
