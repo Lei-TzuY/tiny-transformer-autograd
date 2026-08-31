@@ -142,6 +142,13 @@ def _restore_array_shape(array, expected_shape):
         np.ndarray.shape.__set__(array, expected_shape)
 
 
+def _restore_array_strides(array, expected_strides):
+    """Restore strides on the exact ndarray without dispatching subclass overrides."""
+
+    if np.asarray(array).strides != expected_strides:
+        np.ndarray.strides.__set__(array, expected_strides)
+
+
 def _is_tensor_managed_storage(array, parameter):
     """Reject malformed or foreign Tensor storage ownership metadata."""
 
@@ -375,6 +382,7 @@ def _validate_transaction_metadata(
     parameters,
     destinations,
     expected_gradients,
+    gradient_strides,
     gradient_writability,
     trainability,
     grad_shapes,
@@ -382,6 +390,7 @@ def _validate_transaction_metadata(
     data_values,
     data_shapes,
     data_dtypes,
+    data_strides,
     data_writability,
     data_versions,
     data_owner_refs,
@@ -395,6 +404,7 @@ def _validate_transaction_metadata(
         expected_values,
         expected_data_shape,
         expected_dtype,
+        expected_data_strides,
         expected_writable,
         expected_version,
         expected_owner_ref,
@@ -408,6 +418,7 @@ def _validate_transaction_metadata(
             data_values,
             data_shapes,
             data_dtypes,
+            data_strides,
             data_writability,
             data_versions,
             data_owner_refs,
@@ -426,6 +437,10 @@ def _validate_transaction_metadata(
             if np.asarray(destination).dtype != np.asarray(expected_gradient).dtype:
                 raise RuntimeError(
                     f"adaptive gradient clipping gradient dtype changed for parameter {index}"
+                )
+            if np.asarray(destination).strides != gradient_strides[index]:
+                raise RuntimeError(
+                    f"adaptive gradient clipping gradient strides changed for parameter {index}"
                 )
             if _is_writable(destination) is not gradient_writability[index]:
                 raise RuntimeError(
@@ -474,6 +489,11 @@ def _validate_transaction_metadata(
             raise RuntimeError(
                 f"adaptive gradient clipping parameter data dtype changed for parameter {index}"
             )
+        if np.asarray(parameter.data).strides != expected_data_strides:
+            raise RuntimeError(
+                "adaptive gradient clipping parameter data strides changed for parameter "
+                f"{index}"
+            )
         if _is_writable(parameter.data) is not expected_writable:
             raise RuntimeError(
                 "adaptive gradient clipping parameter data writability changed for parameter "
@@ -508,12 +528,14 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
         data_values = []
         data_shapes = []
         data_dtypes = []
+        data_strides = []
         data_writability = []
         data_versions = []
         data_owner_refs = []
         destinations = []
         originals = []
         candidates = []
+        gradient_strides = []
         gradient_writability = []
         trainability = []
         grad_shapes = []
@@ -541,6 +563,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             data_shape = data_base.shape
             data_shapes.append(data_shape)
             data_dtypes.append(data_base.dtype)
+            data_strides.append(data_base.strides)
             data_writability.append(bool(data_base.flags.writeable))
             grad_shape = parameter._grad_shape
             if type(grad_shape) is not tuple:
@@ -572,6 +595,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 destinations.append(None)
                 originals.append(None)
                 candidates.append(None)
+                gradient_strides.append(None)
                 gradient_writability.append(None)
                 continue
             if not requires_grad:
@@ -583,7 +607,8 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 shape=data_shape,
                 floating_only=True,
             )
-            gradient_dtype = np.asarray(gradient).dtype
+            gradient_base = np.asarray(gradient)
+            gradient_dtype = gradient_base.dtype
             candidate, clipped_units = _candidate_gradient(
                 data_snapshot,
                 gradient_snapshot,
@@ -594,6 +619,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             destinations.append(gradient)
             originals.append(np.array(gradient, copy=True))
             candidates.append(candidate)
+            gradient_strides.append(gradient_base.strides)
             gradient_writability.append(_is_writable(gradient))
             total_clipped_units += clipped_units
 
@@ -614,6 +640,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     parameters,
                     destinations,
                     expected_gradients,
+                    gradient_strides,
                     gradient_writability,
                     trainability,
                     grad_shapes,
@@ -621,6 +648,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     data_values,
                     data_shapes,
                     data_dtypes,
+                    data_strides,
                     data_writability,
                     data_versions,
                     data_owner_refs,
@@ -635,16 +663,19 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 try:
                     original_dtype = np.asarray(original).dtype
                     expected_shape = grad_shapes[index]
+                    expected_strides = gradient_strides[index]
                     expected_writable = gradient_writability[index]
                     needs_write = (
                         np.asarray(destination).shape != expected_shape
                         or np.asarray(destination).dtype != original_dtype
+                        or np.asarray(destination).strides != expected_strides
                         or not _array_equal(destination, original)
                     )
                     if needs_write and not _is_writable(destination):
                         _restore_array_writability(destination, True)
                     _restore_array_dtype(destination, original_dtype)
                     _restore_array_shape(destination, expected_shape)
+                    _restore_array_strides(destination, expected_strides)
                     if not _array_equal(destination, original):
                         # Keep the canonical entry snapshot private from caller-controlled
                         # rollback writes, just as commit keeps its candidate private.
@@ -652,11 +683,14 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                         destination[...] = write_original
                     _restore_array_dtype(destination, original_dtype)
                     _restore_array_shape(destination, expected_shape)
+                    _restore_array_strides(destination, expected_strides)
                     _restore_array_writability(destination, expected_writable)
                     if np.asarray(destination).shape != expected_shape:
                         raise RuntimeError("gradient shape rollback postcondition failed")
                     if np.asarray(destination).dtype != original_dtype:
                         raise RuntimeError("gradient dtype rollback postcondition failed")
+                    if np.asarray(destination).strides != expected_strides:
+                        raise RuntimeError("gradient strides rollback postcondition failed")
                     if _is_writable(destination) is not expected_writable:
                         raise RuntimeError(
                             "gradient writability rollback postcondition failed"
@@ -676,6 +710,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 expected_values,
                 expected_shape,
                 expected_dtype,
+                expected_strides,
                 expected_writable,
                 expected_owner_ref,
             ) in zip(
@@ -684,6 +719,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 data_values,
                 data_shapes,
                 data_dtypes,
+                data_strides,
                 data_writability,
                 data_owner_refs,
             ):
@@ -702,23 +738,26 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     needs_write = (
                         np.asarray(expected_data).shape != expected_shape
                         or np.asarray(expected_data).dtype != expected_dtype
+                        or np.asarray(expected_data).strides != expected_strides
                         or not _array_equal(expected_data, expected_values)
                     )
                     if needs_write and not _is_writable(expected_data):
                         _restore_array_writability(expected_data, True)
                     _restore_array_dtype(expected_data, expected_dtype)
                     _restore_array_shape(expected_data, expected_shape)
+                    _restore_array_strides(expected_data, expected_strides)
                     if not _array_equal(expected_data, expected_values):
                         # Keep the canonical parameter entry snapshot private from
                         # caller-controlled storage assignment hooks.
                         write_values = np.array(expected_values, copy=True)
                         expected_data[...] = write_values
                     # A hostile ndarray write may also rebind storage or corrupt
-                    # shape/dtype/ownership metadata; repair those after the write.
+                    # shape/dtype/strides/ownership metadata; repair those after the write.
                     if parameter.data is not expected_data:
                         parameter._data = expected_data
                     _restore_array_dtype(expected_data, expected_dtype)
                     _restore_array_shape(expected_data, expected_shape)
+                    _restore_array_strides(expected_data, expected_strides)
                     _restore_array_writability(expected_data, expected_writable)
                     if type(expected_data) is _VersionedArray:
                         if expected_data._owner_ref is not expected_owner_ref:
@@ -735,6 +774,10 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                         raise RuntimeError("parameter data shape rollback postcondition failed")
                     if np.asarray(parameter.data).dtype != expected_dtype:
                         raise RuntimeError("parameter data dtype rollback postcondition failed")
+                    if np.asarray(parameter.data).strides != expected_strides:
+                        raise RuntimeError(
+                            "parameter data strides rollback postcondition failed"
+                        )
                     if _is_writable(parameter.data) is not expected_writable:
                         raise RuntimeError(
                             "parameter data writability rollback postcondition failed"
@@ -819,6 +862,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             parameters,
             destinations,
             candidates,
+            gradient_strides,
             gradient_writability,
             trainability,
             grad_shapes,
@@ -826,6 +870,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             data_values,
             data_shapes,
             data_dtypes,
+            data_strides,
             data_writability,
             data_versions,
             data_owner_refs,
