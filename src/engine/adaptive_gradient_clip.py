@@ -398,10 +398,15 @@ def _validate_transaction_metadata(
                 f"adaptive gradient clipping gradient binding changed for parameter {index}"
             )
         expected_gradient = expected_gradients[index]
-        if destination is not None and not _array_equal(destination, expected_gradient):
-            raise RuntimeError(
-                f"adaptive gradient clipping gradient value changed for parameter {index}"
-            )
+        if destination is not None:
+            if np.asarray(destination).dtype != np.asarray(expected_gradient).dtype:
+                raise RuntimeError(
+                    f"adaptive gradient clipping gradient dtype changed for parameter {index}"
+                )
+            if not _array_equal(destination, expected_gradient):
+                raise RuntimeError(
+                    f"adaptive gradient clipping gradient value changed for parameter {index}"
+                )
         current_grad_shape = parameter._grad_shape
         if not _is_plain_shape(current_grad_shape) or current_grad_shape != expected_grad_shape:
             raise RuntimeError(
@@ -537,10 +542,11 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 shape=data_shape,
                 floating_only=True,
             )
+            gradient_dtype = np.asarray(gradient).dtype
             candidate, clipped_units = _candidate_gradient(
                 data_snapshot,
                 gradient_snapshot,
-                np.asarray(gradient).dtype,
+                gradient_dtype,
                 clip_factor,
                 eps,
             )
@@ -583,12 +589,17 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 if destination is None:
                     continue
                 try:
+                    original_dtype = np.asarray(original).dtype
+                    _restore_array_dtype(destination, original_dtype)
                     if _array_equal(destination, original):
                         continue
                     # Keep the canonical entry snapshot private from caller-controlled
                     # rollback writes, just as commit keeps its candidate private.
                     write_original = np.array(original, copy=True)
                     destination[...] = write_original
+                    _restore_array_dtype(destination, original_dtype)
+                    if np.asarray(destination).dtype != original_dtype:
+                        raise RuntimeError("gradient dtype rollback postcondition failed")
                     if not _array_equal(destination, original):
                         raise RuntimeError("rollback postcondition failed")
                 except BaseException as exc:  # best-effort cleanup across every gradient
