@@ -572,7 +572,10 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                                 "parameter storage ownership rollback postcondition failed"
                             )
                     if not _array_equal(expected_data, expected_values):
-                        expected_data[...] = expected_values
+                        # Keep the canonical parameter entry snapshot private from
+                        # caller-controlled storage assignment hooks.
+                        write_values = np.array(expected_values, copy=True)
+                        expected_data[...] = write_values
                     # A hostile ndarray write may also rebind storage or corrupt
                     # Tensor-managed ownership, so repair those after the write.
                     if parameter.data is not expected_data:
