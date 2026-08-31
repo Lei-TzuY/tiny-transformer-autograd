@@ -126,6 +126,13 @@ def _restore_array_writability(array, expected_writable):
         np.ndarray.setflags(array, write=expected_writable)
 
 
+def _restore_array_shape(array, expected_shape):
+    """Restore shape on the exact ndarray without dispatching subclass overrides."""
+
+    if np.asarray(array).shape != expected_shape:
+        np.ndarray.shape.__set__(array, expected_shape)
+
+
 def _is_tensor_managed_storage(array, parameter):
     """Reject malformed or foreign Tensor storage ownership metadata."""
 
@@ -400,6 +407,10 @@ def _validate_transaction_metadata(
             )
         expected_gradient = expected_gradients[index]
         if destination is not None:
+            if np.asarray(destination).shape != expected_grad_shape:
+                raise RuntimeError(
+                    f"adaptive gradient clipping gradient shape changed for parameter {index}"
+                )
             if np.asarray(destination).dtype != np.asarray(expected_gradient).dtype:
                 raise RuntimeError(
                     f"adaptive gradient clipping gradient dtype changed for parameter {index}"
@@ -600,21 +611,27 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     continue
                 try:
                     original_dtype = np.asarray(original).dtype
+                    expected_shape = grad_shapes[index]
                     expected_writable = gradient_writability[index]
                     needs_write = (
-                        np.asarray(destination).dtype != original_dtype
+                        np.asarray(destination).shape != expected_shape
+                        or np.asarray(destination).dtype != original_dtype
                         or not _array_equal(destination, original)
                     )
                     if needs_write and not _is_writable(destination):
                         _restore_array_writability(destination, True)
                     _restore_array_dtype(destination, original_dtype)
+                    _restore_array_shape(destination, expected_shape)
                     if not _array_equal(destination, original):
                         # Keep the canonical entry snapshot private from caller-controlled
                         # rollback writes, just as commit keeps its candidate private.
                         write_original = np.array(original, copy=True)
                         destination[...] = write_original
                     _restore_array_dtype(destination, original_dtype)
+                    _restore_array_shape(destination, expected_shape)
                     _restore_array_writability(destination, expected_writable)
+                    if np.asarray(destination).shape != expected_shape:
+                        raise RuntimeError("gradient shape rollback postcondition failed")
                     if np.asarray(destination).dtype != original_dtype:
                         raise RuntimeError("gradient dtype rollback postcondition failed")
                     if _is_writable(destination) is not expected_writable:
