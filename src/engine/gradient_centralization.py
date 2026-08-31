@@ -209,6 +209,10 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 )
             attempted.append(index)
             destination[...] = np.array(candidates[index], copy=True)
+            if np.asarray(destination).shape != originals[index].shape:
+                raise RuntimeError(
+                    f"gradient centralization write failed for parameter {index}"
+                )
             if np.asarray(destination).strides != entry_strides[index]:
                 raise RuntimeError(
                     f"gradient strides changed for parameter {index} during centralization"
