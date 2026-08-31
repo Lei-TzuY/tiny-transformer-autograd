@@ -45,6 +45,16 @@ def _shares_memory(left, right):
         raise ValueError("gradient storage overlap could not be determined") from exc
 
 
+def _restore_array_dtype(array, expected_dtype):
+    if np.asarray(array).dtype == expected_dtype:
+        return
+    # Dtype controls how the same bytes are interpreted, so repair it before shape,
+    # strides, and values. Use the ndarray descriptor to avoid subclass hooks.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        np.ndarray.dtype.__set__(array, expected_dtype)
+
+
 def _restore_array_shape(array, expected_shape):
     if np.asarray(array).shape == expected_shape:
         return
@@ -64,6 +74,12 @@ def _restore_array_strides(array, expected_strides):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         np.ndarray.strides.__set__(array, expected_strides)
+
+
+def _restore_array_writeable(array, expected_writeable):
+    if bool(np.asarray(array).flags.writeable) == expected_writeable:
+        return
+    np.ndarray.setflags(array, write=expected_writeable)
 
 
 def _centralized_candidate(gradient):
@@ -104,7 +120,14 @@ def _centralized_candidate(gradient):
 
 
 def _validate_transaction_state(
-    parameters, gradients, originals, entry_strides, candidates, committed
+    parameters,
+    gradients,
+    originals,
+    entry_dtypes,
+    entry_strides,
+    entry_writeable,
+    candidates,
+    committed,
 ):
     for index, gradient in enumerate(gradients):
         if originals[index] is None:
@@ -117,9 +140,17 @@ def _validate_transaction_state(
             raise RuntimeError(
                 f"gradient shape changed for parameter {index} during centralization"
             )
+        if np.asarray(gradient).dtype != entry_dtypes[index]:
+            raise RuntimeError(
+                f"gradient dtype changed for parameter {index} during centralization"
+            )
         if np.asarray(gradient).strides != entry_strides[index]:
             raise RuntimeError(
                 f"gradient strides changed for parameter {index} during centralization"
+            )
+        if bool(np.asarray(gradient).flags.writeable) != entry_writeable[index]:
+            raise RuntimeError(
+                f"gradient writability changed for parameter {index} during centralization"
             )
         expected = candidates[index] if index in committed else originals[index]
         if not np.array_equal(np.asarray(gradient), expected):
@@ -145,7 +176,9 @@ def centralize_gradients_(parameters, *, min_rank=2):
     parameters = _materialize_parameters(parameters)
     gradients = []
     originals = []
+    entry_dtypes = []
     entry_strides = []
+    entry_writeable = []
     candidates = []
     changed = []
 
@@ -158,7 +191,9 @@ def centralize_gradients_(parameters, *, min_rank=2):
         gradients.append(gradient)
         if gradient is None or np.asarray(parameter.data).ndim < min_rank:
             originals.append(None)
+            entry_dtypes.append(None)
             entry_strides.append(None)
+            entry_writeable.append(None)
             candidates.append(None)
             continue
         if not requires_grad:
@@ -183,7 +218,9 @@ def centralize_gradients_(parameters, *, min_rank=2):
         original = np.array(base, copy=True)
         candidate = _centralized_candidate(base)
         originals.append(original)
+        entry_dtypes.append(base.dtype)
         entry_strides.append(base.strides)
+        entry_writeable.append(bool(base.flags.writeable))
         candidates.append(candidate)
         if not np.array_equal(base, candidate):
             if not bool(base.flags.writeable):
@@ -213,9 +250,18 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 raise RuntimeError(
                     f"gradient centralization write failed for parameter {index}"
                 )
+            if np.asarray(destination).dtype != entry_dtypes[index]:
+                raise RuntimeError(
+                    f"gradient dtype changed for parameter {index} during centralization"
+                )
             if np.asarray(destination).strides != entry_strides[index]:
                 raise RuntimeError(
                     f"gradient strides changed for parameter {index} during centralization"
+                )
+            if bool(np.asarray(destination).flags.writeable) != entry_writeable[index]:
+                raise RuntimeError(
+                    f"gradient writability changed for parameter {index} "
+                    "during centralization"
                 )
             if not np.array_equal(np.asarray(destination), candidates[index]):
                 raise RuntimeError(
@@ -226,7 +272,9 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 parameters,
                 gradients,
                 originals,
+                entry_dtypes,
                 entry_strides,
+                entry_writeable,
                 candidates,
                 committed,
             )
@@ -245,28 +293,33 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 if rollback_error is None:
                     rollback_error = exc
 
-        # A write hook can mutate another eligible gradient's metadata/value. Repair
-        # shape and strides first so entry values address the original physical slots.
+        # A write hook can mutate another eligible gradient's metadata/value. Dtype
+        # must be repaired before shape/strides because it controls byte interpretation.
+        # Writability is temporarily enabled only when value repair needs it.
         for index in reversed(range(len(gradients))):
             if originals[index] is None:
                 continue
             try:
                 destination = gradients[index]
+                _restore_array_dtype(destination, entry_dtypes[index])
                 _restore_array_shape(destination, originals[index].shape)
                 _restore_array_strides(destination, entry_strides[index])
-                if np.array_equal(np.asarray(destination), originals[index]):
-                    continue
-                if not bool(np.asarray(destination).flags.writeable):
-                    raise RuntimeError(
-                        "gradient centralization rollback destination is read-only"
-                    )
-                np.ndarray.__setitem__(
-                    destination, Ellipsis, np.array(originals[index], copy=True)
+                needs_value_repair = not np.array_equal(
+                    np.asarray(destination), originals[index]
                 )
-                if not np.array_equal(np.asarray(destination), originals[index]):
-                    raise RuntimeError(
-                        "gradient centralization rollback postcondition failed"
+                if needs_value_repair and not bool(
+                    np.asarray(destination).flags.writeable
+                ):
+                    np.ndarray.setflags(destination, write=True)
+                if needs_value_repair:
+                    np.ndarray.__setitem__(
+                        destination, Ellipsis, np.array(originals[index], copy=True)
                     )
+                    if not np.array_equal(np.asarray(destination), originals[index]):
+                        raise RuntimeError(
+                            "gradient centralization rollback postcondition failed"
+                        )
+                _restore_array_writeable(destination, entry_writeable[index])
             except BaseException as exc:
                 if rollback_error is None:
                     rollback_error = exc
@@ -283,9 +336,17 @@ def centralize_gradients_(parameters, *, min_rank=2):
                     raise RuntimeError(
                         "gradient centralization shape rollback postcondition failed"
                     )
+                if np.asarray(gradient).dtype != entry_dtypes[index]:
+                    raise RuntimeError(
+                        "gradient centralization dtype rollback postcondition failed"
+                    )
                 if np.asarray(gradient).strides != entry_strides[index]:
                     raise RuntimeError(
                         "gradient centralization strides rollback postcondition failed"
+                    )
+                if bool(np.asarray(gradient).flags.writeable) != entry_writeable[index]:
+                    raise RuntimeError(
+                        "gradient centralization writability rollback postcondition failed"
                     )
                 if not np.array_equal(np.asarray(gradient), originals[index]):
                     raise RuntimeError(
