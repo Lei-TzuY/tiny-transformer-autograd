@@ -164,6 +164,19 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 )
     except BaseException:
         rollback_error = None
+
+        # A caller-controlled ndarray write can mutate another Tensor's public
+        # ``grad`` attribute even when that other destination has not been reached
+        # yet. Restore the complete collection's entry bindings before repairing
+        # attempted storage values so a failed transaction cannot leak rebinding.
+        for index, gradient in enumerate(gradients):
+            try:
+                if parameters[index].grad is not gradient:
+                    parameters[index].grad = gradient
+            except BaseException as exc:
+                if rollback_error is None:
+                    rollback_error = exc
+
         for index in reversed(attempted):
             try:
                 destination = gradients[index]
@@ -181,6 +194,17 @@ def centralize_gradients_(parameters, *, min_rank=2):
             except BaseException as exc:
                 if rollback_error is None:
                     rollback_error = exc
+
+        for index, gradient in enumerate(gradients):
+            try:
+                if parameters[index].grad is not gradient:
+                    raise RuntimeError(
+                        "gradient centralization binding rollback postcondition failed"
+                    )
+            except BaseException as exc:
+                if rollback_error is None:
+                    rollback_error = exc
+
         if rollback_error is not None:
             raise RuntimeError("gradient centralization rollback failed") from rollback_error
         raise
