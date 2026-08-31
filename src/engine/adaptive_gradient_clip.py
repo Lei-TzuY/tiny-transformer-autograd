@@ -145,7 +145,12 @@ def _restore_array_shape(array, expected_shape):
 def _restore_array_strides(array, expected_strides):
     """Restore strides on the exact ndarray without dispatching subclass overrides."""
 
-    if np.asarray(array).strides != expected_strides:
+    if np.asarray(array).strides == expected_strides:
+        return
+    # Newer NumPy deprecates direct strides assignment. Rollback still needs this
+    # exceptional path because replacing the ndarray would violate binding identity.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
         np.ndarray.strides.__set__(array, expected_strides)
 
 
