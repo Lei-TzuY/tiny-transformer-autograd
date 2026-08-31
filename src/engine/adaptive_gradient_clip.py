@@ -120,11 +120,10 @@ def _is_writable(array):
 
 
 def _restore_array_writability(array, expected_writable):
-    """Restore writeability through an ordinary ndarray view, avoiding subclass hooks."""
+    """Restore writability on the exact ndarray without dispatching subclass overrides."""
 
-    base = np.asarray(array)
-    if bool(base.flags.writeable) != expected_writable:
-        base.setflags(write=expected_writable)
+    if _is_writable(array) is not expected_writable:
+        np.ndarray.setflags(array, write=expected_writable)
 
 
 def _is_tensor_managed_storage(array, parameter):
