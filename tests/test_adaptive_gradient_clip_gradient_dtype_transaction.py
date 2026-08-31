@@ -31,7 +31,7 @@ def test_commit_detects_and_restores_gradient_dtype_change():
     grad_before = gradient.copy()
 
     tiny = np.nextafter(np.float64(0.0), np.float64(1.0))
-    with pytest.raises(RuntimeError, match="gradient dtype changed for parameter 0"):
+    with pytest.raises(RuntimeError, match="adaptive gradient clipping write failed"):
         adaptive_clip_grad_(parameter, clip_factor=0.5, eps=tiny)
 
     assert parameter.grad is gradient
