@@ -227,6 +227,17 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 raise ValueError(f"gradient for parameter {index} must be writable")
             changed.append(index)
 
+    # Gradient centralization owns gradient buffers only. A write into storage that
+    # aliases any bound parameter would silently mutate model weights and may advance
+    # Tensor mutation versions. Keep no-op aliases valid because they perform no write.
+    for gradient_index in changed:
+        for parameter_index, parameter in enumerate(parameters):
+            if _shares_memory(gradients[gradient_index], parameter.data):
+                raise ValueError(
+                    f"gradient for parameter {gradient_index} must not overlap "
+                    f"parameter {parameter_index} data"
+                )
+
     for right_position, right_index in enumerate(changed):
         for left_index in changed[:right_position]:
             if _shares_memory(gradients[left_index], gradients[right_index]):
