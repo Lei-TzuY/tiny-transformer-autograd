@@ -148,7 +148,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
                     f"{left_index} and {right_index}"
                 )
 
-    written = []
+    attempted = []
     try:
         for index in changed:
             destination = gradients[index]
@@ -156,22 +156,24 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 raise RuntimeError(
                     f"gradient binding changed for parameter {index} before centralization"
                 )
+            attempted.append(index)
             destination[...] = np.array(candidates[index], copy=True)
-            written.append(index)
             if not np.array_equal(np.asarray(destination), candidates[index]):
                 raise RuntimeError(
                     f"gradient centralization write failed for parameter {index}"
                 )
     except BaseException:
         rollback_error = None
-        for index in reversed(written):
+        for index in reversed(attempted):
             try:
                 destination = gradients[index]
                 if not bool(np.asarray(destination).flags.writeable):
                     raise RuntimeError(
                         "gradient centralization rollback destination is read-only"
                     )
-                destination[...] = np.array(originals[index], copy=True)
+                np.ndarray.__setitem__(
+                    destination, Ellipsis, np.array(originals[index], copy=True)
+                )
                 if not np.array_equal(np.asarray(destination), originals[index]):
                     raise RuntimeError(
                         "gradient centralization rollback postcondition failed"
