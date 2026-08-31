@@ -543,7 +543,10 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 try:
                     if _array_equal(destination, original):
                         continue
-                    destination[...] = original
+                    # Keep the canonical entry snapshot private from caller-controlled
+                    # rollback writes, just as commit keeps its candidate private.
+                    write_original = np.array(original, copy=True)
+                    destination[...] = write_original
                     if not _array_equal(destination, original):
                         raise RuntimeError("rollback postcondition failed")
                 except BaseException as exc:  # best-effort cleanup across every gradient
