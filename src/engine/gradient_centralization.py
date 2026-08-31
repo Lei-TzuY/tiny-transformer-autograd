@@ -81,6 +81,21 @@ def _centralized_candidate(gradient):
     return candidate
 
 
+def _validate_transaction_state(parameters, gradients, originals, candidates, committed):
+    for index, gradient in enumerate(gradients):
+        if originals[index] is None:
+            continue
+        if parameters[index].grad is not gradient:
+            raise RuntimeError(
+                f"gradient binding changed for parameter {index} during centralization"
+            )
+        expected = candidates[index] if index in committed else originals[index]
+        if not np.array_equal(np.asarray(gradient), expected):
+            raise RuntimeError(
+                f"gradient value changed for parameter {index} during centralization"
+            )
+
+
 def centralize_gradients_(parameters, *, min_rank=2):
     """Center eligible live gradients across every non-leading axis in-place.
 
@@ -149,6 +164,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 )
 
     attempted = []
+    committed = set()
     try:
         for index in changed:
             destination = gradients[index]
@@ -162,13 +178,17 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 raise RuntimeError(
                     f"gradient centralization write failed for parameter {index}"
                 )
+            committed.add(index)
+            _validate_transaction_state(
+                parameters, gradients, originals, candidates, committed
+            )
     except BaseException:
         rollback_error = None
 
         # A caller-controlled ndarray write can mutate another Tensor's public
         # ``grad`` attribute even when that other destination has not been reached
         # yet. Restore the complete collection's entry bindings before repairing
-        # attempted storage values so a failed transaction cannot leak rebinding.
+        # storage values so a failed transaction cannot leak rebinding.
         for index, gradient in enumerate(gradients):
             try:
                 if parameters[index].grad is not gradient:
@@ -177,9 +197,16 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 if rollback_error is None:
                     rollback_error = exc
 
-        for index in reversed(attempted):
+        # A write hook can also mutate a different eligible gradient without
+        # rebinding it. Repair every drifted entry snapshot, not only destinations
+        # that this helper itself attempted to write.
+        for index in reversed(range(len(gradients))):
+            if originals[index] is None:
+                continue
             try:
                 destination = gradients[index]
+                if np.array_equal(np.asarray(destination), originals[index]):
+                    continue
                 if not bool(np.asarray(destination).flags.writeable):
                     raise RuntimeError(
                         "gradient centralization rollback destination is read-only"
@@ -200,6 +227,12 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 if parameters[index].grad is not gradient:
                     raise RuntimeError(
                         "gradient centralization binding rollback postcondition failed"
+                    )
+                if originals[index] is not None and not np.array_equal(
+                    np.asarray(gradient), originals[index]
+                ):
+                    raise RuntimeError(
+                        "gradient centralization value rollback postcondition failed"
                     )
             except BaseException as exc:
                 if rollback_error is None:
