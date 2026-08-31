@@ -612,6 +612,10 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 continue
             if not requires_grad:
                 raise ValueError(f"parameter {index} is frozen but still has a gradient")
+            if isinstance(gradient, _VersionedArray):
+                raise ValueError(
+                    f"gradient for parameter {index} must not use Tensor-managed storage"
+                )
 
             gradient_snapshot = _float64_copy(
                 gradient,
