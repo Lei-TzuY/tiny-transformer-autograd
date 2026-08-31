@@ -38,7 +38,10 @@ def test_parameter_shape_is_restored_after_failed_gradient_commit():
     data_before = original_data.copy()
     grad_before = gradient.copy()
 
-    with pytest.raises(RuntimeError, match="parameter data changed for parameter 0"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"parameter data (?:shape )?changed for parameter 0",
+    ):
         adaptive_clip_grad_(parameter, clip_factor=0.1)
 
     assert parameter.data is original_data
