@@ -81,6 +81,30 @@ class _ZeroStrideOnWrite(np.ndarray):
             self.strides = (0, self.strides[1])
 
 
+class _RetypeOnWrite(np.ndarray):
+    def __new__(cls, values):
+        return np.asarray(values, dtype=np.float64).view(cls)
+
+    def __array_finalize__(self, obj):
+        pass
+
+    def __setitem__(self, key, value):
+        np.ndarray.__setitem__(self, key, value)
+        self.dtype = np.int64
+
+
+class _ReadOnlyOnWrite(np.ndarray):
+    def __new__(cls, values):
+        return np.asarray(values, dtype=np.float64).view(cls)
+
+    def __array_finalize__(self, obj):
+        pass
+
+    def __setitem__(self, key, value):
+        np.ndarray.__setitem__(self, key, value)
+        self.flags.writeable = False
+
+
 def test_mutate_then_raise_destination_is_rolled_back():
     parameter = Tensor(np.zeros((1, 2), dtype=np.float64), requires_grad=True)
     gradient = _MutateThenRaise([[1.0, 3.0]])
@@ -161,4 +185,33 @@ def test_failed_write_restores_gradient_strides_on_same_object():
 
     assert parameter.grad is gradient
     assert gradient.strides == before_strides
+    np.testing.assert_array_equal(gradient, before)
+
+
+def test_successful_write_cannot_change_gradient_dtype():
+    parameter = Tensor(np.zeros((1, 2), dtype=np.float64), requires_grad=True)
+    gradient = _RetypeOnWrite([[2.0, 2.0]])
+    parameter.grad = gradient
+    before = np.array(gradient, copy=True)
+    before_dtype = gradient.dtype
+
+    with pytest.raises(RuntimeError, match="gradient dtype changed"):
+        centralize_gradients_([parameter])
+
+    assert parameter.grad is gradient
+    assert gradient.dtype == before_dtype
+    np.testing.assert_array_equal(gradient, before)
+
+
+def test_successful_write_cannot_make_gradient_read_only():
+    parameter = Tensor(np.zeros((1, 2), dtype=np.float64), requires_grad=True)
+    gradient = _ReadOnlyOnWrite([[1.0, 3.0]])
+    parameter.grad = gradient
+    before = np.array(gradient, copy=True)
+
+    with pytest.raises(RuntimeError, match="gradient writability changed"):
+        centralize_gradients_([parameter])
+
+    assert parameter.grad is gradient
+    assert gradient.flags.writeable
     np.testing.assert_array_equal(gradient, before)
