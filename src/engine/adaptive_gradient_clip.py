@@ -376,6 +376,7 @@ def _validate_transaction_metadata(
     grad_shapes,
     data_bindings,
     data_values,
+    data_shapes,
     data_dtypes,
     data_writability,
     data_versions,
@@ -388,6 +389,7 @@ def _validate_transaction_metadata(
         expected_grad_shape,
         expected_data,
         expected_values,
+        expected_data_shape,
         expected_dtype,
         expected_writable,
         expected_version,
@@ -400,6 +402,7 @@ def _validate_transaction_metadata(
             grad_shapes,
             data_bindings,
             data_values,
+            data_shapes,
             data_dtypes,
             data_writability,
             data_versions,
@@ -455,6 +458,10 @@ def _validate_transaction_metadata(
                 "adaptive gradient clipping parameter storage ownership changed for parameter "
                 f"{index}"
             )
+        if np.asarray(parameter.data).shape != expected_data_shape:
+            raise RuntimeError(
+                f"adaptive gradient clipping parameter data shape changed for parameter {index}"
+            )
         if np.asarray(parameter.data).dtype != expected_dtype:
             raise RuntimeError(
                 f"adaptive gradient clipping parameter data dtype changed for parameter {index}"
@@ -491,6 +498,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
         parameters = _materialize_parameters(parameters)
         parameter_data = []
         data_values = []
+        data_shapes = []
         data_dtypes = []
         data_writability = []
         data_versions = []
@@ -523,6 +531,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             data_owner_refs.append(_storage_owner_ref(data))
             data_base = np.asarray(data)
             data_shape = data_base.shape
+            data_shapes.append(data_shape)
             data_dtypes.append(data_base.dtype)
             data_writability.append(bool(data_base.flags.writeable))
             grad_shape = parameter._grad_shape
@@ -602,6 +611,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     grad_shapes,
                     parameter_data,
                     data_values,
+                    data_shapes,
                     data_dtypes,
                     data_writability,
                     data_versions,
@@ -656,6 +666,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 parameter,
                 expected_data,
                 expected_values,
+                expected_shape,
                 expected_dtype,
                 expected_writable,
                 expected_owner_ref,
@@ -663,6 +674,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                 parameters,
                 parameter_data,
                 data_values,
+                data_shapes,
                 data_dtypes,
                 data_writability,
                 data_owner_refs,
@@ -680,22 +692,25 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                                 "parameter storage ownership rollback postcondition failed"
                             )
                     needs_write = (
-                        np.asarray(expected_data).dtype != expected_dtype
+                        np.asarray(expected_data).shape != expected_shape
+                        or np.asarray(expected_data).dtype != expected_dtype
                         or not _array_equal(expected_data, expected_values)
                     )
                     if needs_write and not _is_writable(expected_data):
                         _restore_array_writability(expected_data, True)
                     _restore_array_dtype(expected_data, expected_dtype)
+                    _restore_array_shape(expected_data, expected_shape)
                     if not _array_equal(expected_data, expected_values):
                         # Keep the canonical parameter entry snapshot private from
                         # caller-controlled storage assignment hooks.
                         write_values = np.array(expected_values, copy=True)
                         expected_data[...] = write_values
-                    # A hostile ndarray write may also rebind storage, change dtype, or
-                    # corrupt Tensor-managed ownership; repair those after the write.
+                    # A hostile ndarray write may also rebind storage or corrupt
+                    # shape/dtype/ownership metadata; repair those after the write.
                     if parameter.data is not expected_data:
                         parameter._data = expected_data
                     _restore_array_dtype(expected_data, expected_dtype)
+                    _restore_array_shape(expected_data, expected_shape)
                     _restore_array_writability(expected_data, expected_writable)
                     if type(expected_data) is _VersionedArray:
                         if expected_data._owner_ref is not expected_owner_ref:
@@ -708,6 +723,8 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                             )
                     if parameter.data is not expected_data:
                         raise RuntimeError("parameter data binding rollback failed")
+                    if np.asarray(parameter.data).shape != expected_shape:
+                        raise RuntimeError("parameter data shape rollback postcondition failed")
                     if np.asarray(parameter.data).dtype != expected_dtype:
                         raise RuntimeError("parameter data dtype rollback postcondition failed")
                     if _is_writable(parameter.data) is not expected_writable:
@@ -795,6 +812,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             grad_shapes,
             parameter_data,
             data_values,
+            data_shapes,
             data_dtypes,
             data_writability,
             data_versions,
