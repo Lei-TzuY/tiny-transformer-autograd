@@ -28,7 +28,8 @@ def _materialize_parameters(parameters):
 
 
 def _validate_min_rank(min_rank):
-    if isinstance(min_rank, (bool, np.bool_)) or not isinstance(min_rank, numbers.Integral):
+    is_bool = isinstance(min_rank, (bool, np.bool_))
+    if is_bool or not isinstance(min_rank, numbers.Integral):
         raise TypeError("min_rank must be an integer")
     value = int(min_rank)
     if value < 2:
@@ -46,7 +47,8 @@ def _shares_memory(left, right):
 def _centralized_candidate(gradient):
     source = np.asarray(gradient)
     shape = source.shape
-    rows = source.reshape((shape[0], -1))
+    trailing_size = int(np.prod(shape[1:], dtype=np.intp))
+    rows = source.reshape((shape[0], trailing_size))
     candidate = np.array(source, dtype=source.dtype, copy=True)
     candidate_rows = candidate.reshape(rows.shape)
 
@@ -54,10 +56,17 @@ def _centralized_candidate(gradient):
         scale = float(np.max(np.abs(row))) if row.size else 0.0
         if scale == 0.0:
             continue
-        with np.errstate(over="raise", invalid="raise", divide="raise", under="ignore"):
-            normalized = np.asarray(row, dtype=np.float64) / scale
-            mean = float(np.sum(normalized) / normalized.size) * scale
-            centered = np.asarray(row, dtype=np.float64) - mean
+        try:
+            with np.errstate(
+                over="raise", invalid="raise", divide="raise", under="ignore"
+            ):
+                normalized = np.asarray(row, dtype=np.float64) / scale
+                mean = float(np.sum(normalized) / normalized.size) * scale
+                centered = np.asarray(row, dtype=np.float64) - mean
+        except FloatingPointError as exc:
+            raise ValueError(
+                "centralized gradient is not representable in float64"
+            ) from exc
         if not np.all(np.isfinite(centered)):
             raise ValueError("centralized gradient is not representable in float64")
         try:
@@ -118,7 +127,9 @@ def centralize_gradients_(parameters, *, min_rank=2):
         if not np.issubdtype(base.dtype, np.floating):
             raise TypeError(f"gradient for parameter {index} must have a floating dtype")
         if not np.all(np.isfinite(base)):
-            raise ValueError(f"gradient for parameter {index} must contain only finite values")
+            raise ValueError(
+                f"gradient for parameter {index} must contain only finite values"
+            )
 
         original = np.array(base, copy=True)
         candidate = _centralized_candidate(base)
@@ -148,17 +159,23 @@ def centralize_gradients_(parameters, *, min_rank=2):
             destination[...] = np.array(candidates[index], copy=True)
             written.append(index)
             if not np.array_equal(np.asarray(destination), candidates[index]):
-                raise RuntimeError(f"gradient centralization write failed for parameter {index}")
+                raise RuntimeError(
+                    f"gradient centralization write failed for parameter {index}"
+                )
     except BaseException:
         rollback_error = None
         for index in reversed(written):
             try:
                 destination = gradients[index]
                 if not bool(np.asarray(destination).flags.writeable):
-                    raise RuntimeError("gradient centralization rollback destination is read-only")
+                    raise RuntimeError(
+                        "gradient centralization rollback destination is read-only"
+                    )
                 destination[...] = np.array(originals[index], copy=True)
                 if not np.array_equal(np.asarray(destination), originals[index]):
-                    raise RuntimeError("gradient centralization rollback postcondition failed")
+                    raise RuntimeError(
+                        "gradient centralization rollback postcondition failed"
+                    )
             except BaseException as exc:
                 if rollback_error is None:
                     rollback_error = exc
