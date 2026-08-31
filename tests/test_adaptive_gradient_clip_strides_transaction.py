@@ -1,8 +1,18 @@
+import warnings
+
 import numpy as np
 import pytest
 
 from engine.adaptive_gradient_clip import adaptive_clip_grad_
 from engine.tensor import Tensor
+
+
+def _set_strides(array, strides):
+    # Newer NumPy warns on direct layout metadata assignment. This test needs the
+    # hostile state itself; warning policy is exercised by the production call.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        np.ndarray.strides.__set__(array, strides)
 
 
 class ChangeOwnStridesOnWrite(np.ndarray):
@@ -20,7 +30,7 @@ class ChangeOwnStridesOnWrite(np.ndarray):
         if self.changes_remaining <= 0:
             return
         self.changes_remaining -= 1
-        np.ndarray.strides.__set__(self, (0,))
+        _set_strides(self, (0,))
 
 
 class ChangeParameterStridesOnWrite(np.ndarray):
@@ -40,7 +50,7 @@ class ChangeParameterStridesOnWrite(np.ndarray):
         if self.changes_remaining <= 0:
             return
         self.changes_remaining -= 1
-        np.ndarray.strides.__set__(self.target.data, (0,))
+        _set_strides(self.target.data, (0,))
 
 
 def test_commit_detects_and_restores_gradient_strides():
