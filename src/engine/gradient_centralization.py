@@ -189,7 +189,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
 
         gradient = parameter.grad
         gradients.append(gradient)
-        if gradient is None or np.asarray(parameter.data).ndim < min_rank:
+        if gradient is None:
             originals.append(None)
             entry_dtypes.append(None)
             entry_strides.append(None)
@@ -198,6 +198,13 @@ def centralize_gradients_(parameters, *, min_rank=2):
             continue
         if not requires_grad:
             raise ValueError(f"parameter {index} is frozen but still has a gradient")
+        if np.asarray(parameter.data).ndim < min_rank:
+            originals.append(None)
+            entry_dtypes.append(None)
+            entry_strides.append(None)
+            entry_writeable.append(None)
+            candidates.append(None)
+            continue
         if not isinstance(gradient, np.ndarray):
             raise TypeError(f"gradient for parameter {index} must be a NumPy array")
 
