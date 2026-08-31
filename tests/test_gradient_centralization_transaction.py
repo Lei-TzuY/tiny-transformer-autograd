@@ -76,7 +76,9 @@ class _ZeroStrideOnWrite(np.ndarray):
 
     def __setitem__(self, key, value):
         np.ndarray.__setitem__(self, key, value)
-        self.strides = (0, self.strides[1])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            self.strides = (0, self.strides[1])
 
 
 def test_mutate_then_raise_destination_is_rolled_back():
@@ -154,7 +156,7 @@ def test_failed_write_restores_gradient_strides_on_same_object():
     before = np.array(gradient, copy=True)
     before_strides = gradient.strides
 
-    with pytest.raises(RuntimeError, match="gradient"):
+    with pytest.raises(RuntimeError, match="gradient strides changed"):
         centralize_gradients_([parameter])
 
     assert parameter.grad is gradient
