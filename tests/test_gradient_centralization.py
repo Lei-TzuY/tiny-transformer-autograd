@@ -138,6 +138,52 @@ def test_overlapping_changed_gradients_are_rejected_before_write():
     np.testing.assert_array_equal(storage, before)
 
 
+def test_changed_gradient_must_not_alias_its_parameter_data():
+    parameter = Tensor(np.array([[1.0, 3.0]], dtype=np.float64), requires_grad=True)
+    parameter.grad = parameter.data
+    data = parameter.data
+    before = np.array(data, copy=True)
+    version = parameter._version
+
+    with pytest.raises(ValueError, match="gradient.*parameter 0 data"):
+        centralize_gradients_([parameter])
+
+    assert parameter.data is data
+    assert parameter.grad is data
+    assert parameter._version == version
+    np.testing.assert_array_equal(parameter.data, before)
+
+
+def test_changed_gradient_must_not_alias_another_bound_parameter_data():
+    first = _parameter((1, 2), [[2.0, 6.0]])
+    second = Tensor(np.array([[1.0, 3.0]], dtype=np.float64), requires_grad=True)
+    second.grad = first.data
+    first_grad_before = first.grad.copy()
+    first_data_before = np.array(first.data, copy=True)
+    first_version = first._version
+
+    with pytest.raises(ValueError, match="gradient for parameter 1.*parameter 0 data"):
+        centralize_gradients_([first, second])
+
+    np.testing.assert_array_equal(first.grad, first_grad_before)
+    np.testing.assert_array_equal(first.data, first_data_before)
+    assert first._version == first_version
+
+
+def test_noop_gradient_parameter_data_alias_is_allowed_without_write():
+    parameter = Tensor(np.array([[-1.0, 1.0]], dtype=np.float64), requires_grad=True)
+    parameter.grad = parameter.data
+    data = parameter.data
+    version = parameter._version
+
+    assert centralize_gradients_([parameter]) == 0
+
+    assert parameter.data is data
+    assert parameter.grad is data
+    assert parameter._version == version
+    np.testing.assert_array_equal(parameter.data, [[-1.0, 1.0]])
+
+
 @pytest.mark.parametrize("bad", [True, np.bool_(False), 1, 0, -2, 2.5, "2"])
 def test_min_rank_validation_is_explicit(bad):
     parameter = _parameter((1, 2), [[1.0, 3.0]])
