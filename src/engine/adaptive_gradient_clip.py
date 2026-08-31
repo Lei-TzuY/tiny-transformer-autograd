@@ -129,7 +129,12 @@ def _restore_array_writability(array, expected_writable):
 def _restore_array_shape(array, expected_shape):
     """Restore shape on the exact ndarray without dispatching subclass overrides."""
 
-    if np.asarray(array).shape != expected_shape:
+    if np.asarray(array).shape == expected_shape:
+        return
+    # Newer NumPy deprecates direct shape assignment. Rollback still needs this
+    # exceptional path because replacing the ndarray would violate binding identity.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
         np.ndarray.shape.__set__(array, expected_shape)
 
 
