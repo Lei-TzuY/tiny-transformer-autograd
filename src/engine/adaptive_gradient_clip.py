@@ -3,6 +3,7 @@
 from fractions import Fraction
 import math
 import threading
+import warnings
 import weakref
 
 import numpy as np
@@ -146,6 +147,18 @@ def _has_expected_storage_owner(array, parameter, expected_owner_ref):
     if type(owner_ref) is not weakref.ReferenceType or owner_ref is not expected_owner_ref:
         return False
     return owner_ref() is parameter
+
+
+def _restore_array_dtype(array, expected_dtype):
+    """Repair corrupted dtype metadata while preserving the exact storage object."""
+
+    if np.asarray(array).dtype == expected_dtype:
+        return
+    # NumPy 2.5 deprecates direct dtype assignment. Rollback still needs this
+    # exceptional path because replacing the ndarray would violate binding identity.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        array.dtype = expected_dtype
 
 
 def _is_plain_shape(shape):
@@ -567,8 +580,18 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
             # Parameter-data restoration may execute ndarray-subclass __setitem__.
             # Do it before metadata repair so no caller hook runs after the final
             # transaction metadata postconditions have been re-established.
-            for parameter, expected_data, expected_values, expected_dtype, expected_owner_ref in zip(
-                parameters, parameter_data, data_values, data_dtypes, data_owner_refs
+            for (
+                parameter,
+                expected_data,
+                expected_values,
+                expected_dtype,
+                expected_owner_ref,
+            ) in zip(
+                parameters,
+                parameter_data,
+                data_values,
+                data_dtypes,
+                data_owner_refs,
             ):
                 try:
                     if parameter.data is not expected_data:
@@ -582,8 +605,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                             raise RuntimeError(
                                 "parameter storage ownership rollback postcondition failed"
                             )
-                    if np.asarray(expected_data).dtype != expected_dtype:
-                        expected_data.dtype = expected_dtype
+                    _restore_array_dtype(expected_data, expected_dtype)
                     if not _array_equal(expected_data, expected_values):
                         # Keep the canonical parameter entry snapshot private from
                         # caller-controlled storage assignment hooks.
@@ -593,8 +615,7 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     # corrupt Tensor-managed ownership; repair those after the write.
                     if parameter.data is not expected_data:
                         parameter._data = expected_data
-                    if np.asarray(expected_data).dtype != expected_dtype:
-                        expected_data.dtype = expected_dtype
+                    _restore_array_dtype(expected_data, expected_dtype)
                     if type(expected_data) is _VersionedArray:
                         if expected_data._owner_ref is not expected_owner_ref:
                             expected_data._owner_ref = expected_owner_ref
