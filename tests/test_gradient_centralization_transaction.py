@@ -2,6 +2,7 @@
 
 import os
 import sys
+import warnings
 
 import numpy as np
 import pytest
@@ -50,6 +51,20 @@ class _MutateOtherGradient(np.ndarray):
     def __setitem__(self, key, value):
         np.ndarray.__setitem__(self, key, value)
         np.ndarray.__setitem__(self._target.grad, Ellipsis, 99.0)
+
+
+class _ReshapeOnWrite(np.ndarray):
+    def __new__(cls, values):
+        return np.asarray(values, dtype=np.float64).view(cls)
+
+    def __array_finalize__(self, obj):
+        pass
+
+    def __setitem__(self, key, value):
+        np.ndarray.__setitem__(self, key, value)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            self.shape = (2, 1)
 
 
 def test_mutate_then_raise_destination_is_rolled_back():
@@ -103,3 +118,18 @@ def test_successful_write_cannot_mutate_another_noop_gradient_value():
     assert victim.grad is victim_gradient
     np.testing.assert_array_equal(attacker.grad, attacker_before)
     np.testing.assert_array_equal(victim.grad, victim_before)
+
+
+def test_failed_write_restores_gradient_shape_on_same_object():
+    parameter = Tensor(np.zeros((1, 2), dtype=np.float64), requires_grad=True)
+    gradient = _ReshapeOnWrite([[1.0, 3.0]])
+    parameter.grad = gradient
+    before = np.array(gradient, copy=True)
+    before_shape = gradient.shape
+
+    with pytest.raises(RuntimeError, match="gradient centralization write failed"):
+        centralize_gradients_([parameter])
+
+    assert parameter.grad is gradient
+    assert gradient.shape == before_shape
+    np.testing.assert_array_equal(gradient, before)
