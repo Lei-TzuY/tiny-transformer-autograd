@@ -56,6 +56,16 @@ def _restore_array_shape(array, expected_shape):
         np.ndarray.shape.__set__(array, expected_shape)
 
 
+def _restore_array_strides(array, expected_strides):
+    if np.asarray(array).strides == expected_strides:
+        return
+    # Strides are caller-visible storage metadata. Repair them before writing entry
+    # values so a zero-stride alias cannot make rollback overwrite only one slot.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        np.ndarray.strides.__set__(array, expected_strides)
+
+
 def _centralized_candidate(gradient):
     source = np.asarray(gradient)
     shape = source.shape
@@ -93,7 +103,9 @@ def _centralized_candidate(gradient):
     return candidate
 
 
-def _validate_transaction_state(parameters, gradients, originals, candidates, committed):
+def _validate_transaction_state(
+    parameters, gradients, originals, entry_strides, candidates, committed
+):
     for index, gradient in enumerate(gradients):
         if originals[index] is None:
             continue
@@ -104,6 +116,10 @@ def _validate_transaction_state(parameters, gradients, originals, candidates, co
         if np.asarray(gradient).shape != originals[index].shape:
             raise RuntimeError(
                 f"gradient shape changed for parameter {index} during centralization"
+            )
+        if np.asarray(gradient).strides != entry_strides[index]:
+            raise RuntimeError(
+                f"gradient strides changed for parameter {index} during centralization"
             )
         expected = candidates[index] if index in committed else originals[index]
         if not np.array_equal(np.asarray(gradient), expected):
@@ -129,6 +145,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
     parameters = _materialize_parameters(parameters)
     gradients = []
     originals = []
+    entry_strides = []
     candidates = []
     changed = []
 
@@ -141,6 +158,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
         gradients.append(gradient)
         if gradient is None or np.asarray(parameter.data).ndim < min_rank:
             originals.append(None)
+            entry_strides.append(None)
             candidates.append(None)
             continue
         if not requires_grad:
@@ -165,6 +183,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
         original = np.array(base, copy=True)
         candidate = _centralized_candidate(base)
         originals.append(original)
+        entry_strides.append(base.strides)
         candidates.append(candidate)
         if not np.array_equal(base, candidate):
             if not bool(base.flags.writeable):
@@ -190,13 +209,22 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 )
             attempted.append(index)
             destination[...] = np.array(candidates[index], copy=True)
+            if np.asarray(destination).strides != entry_strides[index]:
+                raise RuntimeError(
+                    f"gradient strides changed for parameter {index} during centralization"
+                )
             if not np.array_equal(np.asarray(destination), candidates[index]):
                 raise RuntimeError(
                     f"gradient centralization write failed for parameter {index}"
                 )
             committed.add(index)
             _validate_transaction_state(
-                parameters, gradients, originals, candidates, committed
+                parameters,
+                gradients,
+                originals,
+                entry_strides,
+                candidates,
+                committed,
             )
     except BaseException:
         rollback_error = None
@@ -213,15 +241,15 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 if rollback_error is None:
                     rollback_error = exc
 
-        # A write hook can also mutate another eligible gradient's metadata/value.
-        # Repair shape first so the original value can be written back to the exact
-        # caller-owned ndarray rather than replacing its public gradient binding.
+        # A write hook can mutate another eligible gradient's metadata/value. Repair
+        # shape and strides first so entry values address the original physical slots.
         for index in reversed(range(len(gradients))):
             if originals[index] is None:
                 continue
             try:
                 destination = gradients[index]
                 _restore_array_shape(destination, originals[index].shape)
+                _restore_array_strides(destination, entry_strides[index])
                 if np.array_equal(np.asarray(destination), originals[index]):
                     continue
                 if not bool(np.asarray(destination).flags.writeable):
@@ -250,6 +278,10 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 if np.asarray(gradient).shape != originals[index].shape:
                     raise RuntimeError(
                         "gradient centralization shape rollback postcondition failed"
+                    )
+                if np.asarray(gradient).strides != entry_strides[index]:
+                    raise RuntimeError(
+                        "gradient centralization strides rollback postcondition failed"
                     )
                 if not np.array_equal(np.asarray(gradient), originals[index]):
                     raise RuntimeError(
