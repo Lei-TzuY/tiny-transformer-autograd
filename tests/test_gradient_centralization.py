@@ -155,8 +155,9 @@ def test_changed_gradient_must_not_alias_its_parameter_data():
 
 
 def test_changed_gradient_must_not_alias_another_bound_parameter_data():
-    first = _parameter((1, 2), [[2.0, 6.0]])
-    second = Tensor(np.array([[1.0, 3.0]], dtype=np.float64), requires_grad=True)
+    first = Tensor(np.array([[1.0, 3.0]], dtype=np.float64), requires_grad=True)
+    first.grad = np.array([[2.0, 6.0]], dtype=np.float64)
+    second = Tensor(np.zeros((1, 2), dtype=np.float64), requires_grad=True)
     second.grad = first.data
     first_grad_before = first.grad.copy()
     first_data_before = np.array(first.data, copy=True)
