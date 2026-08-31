@@ -8,7 +8,7 @@ import weakref
 
 import numpy as np
 
-from .tensor import Tensor, _VersionedArray
+from .tensor import Tensor, _VersionedArray, _no_backward
 
 
 _AGC_LOCK = threading.RLock()
@@ -66,6 +66,10 @@ def _materialize_parameters(parameters):
             raise TypeError(f"parameter {index} graph metadata must be a plain tuple")
         if children != ():
             raise ValueError(f"parameter {index} must be a leaf Tensor")
+        if getattr(parameter, "_backward_fn", None) is not _no_backward:
+            raise TypeError(
+                f"parameter {index} backward metadata must be the leaf no-op closure"
+            )
         marker = id(parameter)
         if marker in seen:
             raise ValueError("parameters must not contain duplicate Tensor identities")
@@ -443,6 +447,10 @@ def _validate_transaction_metadata(
             raise RuntimeError(
                 f"adaptive gradient clipping graph metadata changed for parameter {index}"
             )
+        if getattr(parameter, "_backward_fn", None) is not _no_backward:
+            raise RuntimeError(
+                f"adaptive gradient clipping backward metadata changed for parameter {index}"
+            )
         if parameter.requires_grad is not expected_trainable:
             raise RuntimeError(
                 f"adaptive gradient clipping trainability changed for parameter {index}"
@@ -773,6 +781,10 @@ def adaptive_clip_grad_(parameters, clip_factor=0.01, eps=1e-3):
                     children = parameter._children
                     if type(children) is not tuple or children != ():
                         raise RuntimeError("graph metadata rollback postcondition failed")
+                    if getattr(parameter, "_backward_fn", None) is not _no_backward:
+                        parameter._backward_fn = _no_backward
+                    if parameter._backward_fn is not _no_backward:
+                        raise RuntimeError("backward metadata rollback postcondition failed")
                 except BaseException as exc:
                     if rollback_error is None:
                         rollback_error = exc
