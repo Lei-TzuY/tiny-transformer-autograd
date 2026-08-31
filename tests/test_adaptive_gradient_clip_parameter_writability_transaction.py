@@ -22,7 +22,7 @@ class MakeParameterReadOnlyOnWrite(np.ndarray):
         if self.changes_remaining <= 0:
             return
         self.changes_remaining -= 1
-        np.asarray(self.target.data).setflags(write=False)
+        self.target.data.setflags(write=False)
 
 
 def test_commit_detects_and_restores_parameter_data_writability():
