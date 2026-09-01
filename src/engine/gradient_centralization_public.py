@@ -68,14 +68,17 @@ def _validate_nonwritten_gradients(parameters, gradients, min_rank):
             )
 
 
-def _restore_trainability_and_gradients(parameters, trainability, gradients):
+def _restore_parameter_metadata_and_gradients(
+    parameters, trainability, grad_shapes, gradients
+):
     rollback_error = None
-    for parameter, requires_grad, gradient_state in zip(
-        parameters, trainability, gradients
+    for parameter, requires_grad, grad_shape, gradient_state in zip(
+        parameters, trainability, grad_shapes, gradients
     ):
         gradient, values, dtype, strides, writeable = gradient_state
         try:
             parameter.requires_grad = requires_grad
+            parameter._grad_shape = grad_shape
             if parameter.grad is not gradient:
                 parameter.grad = gradient
             if values is None:
@@ -98,27 +101,33 @@ def _restore_trainability_and_gradients(parameters, trainability, gradients):
 
 
 def centralize_gradients_(parameters, *, min_rank=2):
-    """Center gradients transactionally while preserving all non-written gradients."""
+    """Center gradients transactionally while preserving non-written state."""
 
     min_rank = _validate_min_rank(min_rank)
     with _CENTRALIZATION_LOCK:
         materialized = _materialize_parameters(parameters)
         trainability = tuple(parameter.requires_grad for parameter in materialized)
+        grad_shapes = tuple(parameter._grad_shape for parameter in materialized)
         gradients = _snapshot_gradients(materialized)
         try:
             changed = _centralize_gradients_impl(materialized, min_rank=min_rank)
-            for index, (parameter, entry) in enumerate(
-                zip(materialized, trainability)
+            for index, (parameter, requires_grad, grad_shape) in enumerate(
+                zip(materialized, trainability, grad_shapes)
             ):
-                if parameter.requires_grad is not entry:
+                if parameter.requires_grad is not requires_grad:
                     raise RuntimeError(
                         f"parameter trainability changed for parameter {index} "
+                        "during centralization"
+                    )
+                if parameter._grad_shape != grad_shape:
+                    raise RuntimeError(
+                        f"gradient shape metadata changed for parameter {index} "
                         "during centralization"
                     )
             _validate_nonwritten_gradients(materialized, gradients, min_rank)
             return changed
         except BaseException:
-            _restore_trainability_and_gradients(
-                materialized, trainability, gradients
+            _restore_parameter_metadata_and_gradients(
+                materialized, trainability, grad_shapes, gradients
             )
             raise
