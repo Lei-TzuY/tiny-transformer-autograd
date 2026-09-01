@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from engine.gradient_centralization import centralize_gradients_
+from engine import centralize_gradients_
 from engine.tensor import Tensor
 
 
