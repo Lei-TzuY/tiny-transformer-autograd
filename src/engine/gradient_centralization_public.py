@@ -9,6 +9,7 @@ from .gradient_centralization import (
     _restore_array_shape,
     _restore_array_strides,
     _restore_array_writeable,
+    _validate_min_rank,
     centralize_gradients_ as _centralize_gradients_impl,
 )
 
@@ -33,9 +34,11 @@ def _snapshot_gradients(parameters):
     return tuple(snapshots)
 
 
-def _validate_gradients(parameters, gradients):
+def _validate_nonwritten_gradients(parameters, gradients, min_rank):
     for index, (parameter, gradient_state) in enumerate(zip(parameters, gradients)):
         gradient, values, dtype, strides, writeable = gradient_state
+        if values is not None and np.asarray(parameter.data).ndim >= min_rank:
+            continue
         if parameter.grad is not gradient:
             raise RuntimeError(
                 f"gradient binding changed for parameter {index} during centralization"
@@ -95,8 +98,9 @@ def _restore_trainability_and_gradients(parameters, trainability, gradients):
 
 
 def centralize_gradients_(parameters, *, min_rank=2):
-    """Center gradients transactionally while preserving all entry gradient state."""
+    """Center gradients transactionally while preserving all non-written gradients."""
 
+    min_rank = _validate_min_rank(min_rank)
     with _CENTRALIZATION_LOCK:
         materialized = _materialize_parameters(parameters)
         trainability = tuple(parameter.requires_grad for parameter in materialized)
@@ -111,7 +115,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
                         f"parameter trainability changed for parameter {index} "
                         "during centralization"
                     )
-            _validate_gradients(materialized, gradients)
+            _validate_nonwritten_gradients(materialized, gradients, min_rank)
             return changed
         except BaseException:
             _restore_trainability_and_gradients(
