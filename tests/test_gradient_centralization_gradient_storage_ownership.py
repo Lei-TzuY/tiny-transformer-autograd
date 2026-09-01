@@ -37,7 +37,7 @@ def test_rejects_plain_ndarray_view_of_external_tensor_storage_before_write():
     assert type(plain_view) is np.ndarray
     assert np.shares_memory(plain_view, external_data)
 
-    with pytest.raises(ValueError, match="Tensor-managed storage"):
+    with pytest.raises(ValueError, match="must own its storage"):
         centralize_gradients_([parameter])
 
     assert parameter.grad is plain_view
