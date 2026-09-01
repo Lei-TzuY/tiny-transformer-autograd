@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from engine import centralize_gradients_
-from engine.tensor import Tensor
+from engine.tensor import Tensor, _VersionedArray
 
 
 class _CorruptParameterOwnerOnWrite(np.ndarray):
@@ -38,6 +38,10 @@ class _ReplaceParameterOwnerWithObjectOnWrite(np.ndarray):
     def __setitem__(self, key, value):
         np.ndarray.__setitem__(self, key, value)
         self._target.data._owner_ref = object()
+
+
+class _DerivedVersionedArray(_VersionedArray):
+    pass
 
 
 def test_gradient_write_cannot_detach_parameter_storage_owner():
@@ -73,6 +77,20 @@ def test_gradient_write_cannot_replace_owner_with_non_weakref_metadata():
     assert parameter.data._owner_ref is owner_ref_before
     assert owner_ref_before() is parameter
     assert parameter.grad is gradient
+    np.testing.assert_array_equal(parameter.grad, gradient_before)
+
+
+def test_parameter_data_requires_exact_tensor_managed_storage_type():
+    parameter = Tensor(np.zeros((1, 2), dtype=np.float64), requires_grad=True)
+    parameter.grad[...] = [[1.0, 3.0]]
+    gradient_before = np.array(parameter.grad, copy=True)
+    derived = parameter.data.view(_DerivedVersionedArray)
+    assert derived._owner_ref() is parameter
+    parameter._data = derived
+
+    with pytest.raises(TypeError, match="data must use Tensor-managed storage"):
+        centralize_gradients_([parameter])
+
     np.testing.assert_array_equal(parameter.grad, gradient_before)
 
 
