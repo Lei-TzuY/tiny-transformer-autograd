@@ -78,6 +78,15 @@ def _validate_entry_versions(parameters):
             raise ValueError(f"parameter {index} mutation version must be non-negative")
 
 
+def _validate_transaction_versions(parameters, versions):
+    for index, (parameter, entry_version) in enumerate(zip(parameters, versions)):
+        version = parameter._version
+        if type(version) is not int or version != entry_version:
+            raise RuntimeError(
+                f"mutation version changed for parameter {index} during centralization"
+            )
+
+
 def _validate_entry_grad_shapes(parameters):
     for index, parameter in enumerate(parameters):
         expected = np.asarray(parameter.data).shape
@@ -215,12 +224,27 @@ def _validate_nonwritten_gradients(parameters, gradients, min_rank):
 
 
 def _restore_parameter_metadata_and_gradients(
-    parameters, trainability, grad_shapes, data_owners, leaf_provenance, gradients
+    parameters,
+    trainability,
+    versions,
+    grad_shapes,
+    data_owners,
+    leaf_provenance,
+    gradients,
 ):
     rollback_error = None
-    for parameter, requires_grad, grad_shape, owner_ref, provenance, gradient_state in zip(
+    for (
+        parameter,
+        requires_grad,
+        version,
+        grad_shape,
+        owner_ref,
+        provenance,
+        gradient_state,
+    ) in zip(
         parameters,
         trainability,
+        versions,
         grad_shapes,
         data_owners,
         leaf_provenance,
@@ -230,6 +254,8 @@ def _restore_parameter_metadata_and_gradients(
         children, backward_fn, detached_by_no_grad = provenance
         try:
             parameter.requires_grad = requires_grad
+            if type(parameter._version) is not int:
+                parameter._version = version
             parameter._grad_shape = grad_shape
             parameter.data._owner_ref = owner_ref
             parameter._children = children
@@ -268,6 +294,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
         data_owners = _snapshot_parameter_data_owners(materialized)
         _validate_foreign_tensor_managed_gradients(materialized, min_rank)
         trainability = tuple(parameter.requires_grad for parameter in materialized)
+        versions = tuple(parameter._version for parameter in materialized)
         grad_shapes = tuple(parameter._grad_shape for parameter in materialized)
         leaf_provenance = tuple(
             (
@@ -293,6 +320,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
                         f"gradient shape metadata changed for parameter {index} "
                         "during centralization"
                     )
+            _validate_transaction_versions(materialized, versions)
             _validate_leaf_provenance(materialized, leaf_provenance)
             _validate_parameter_data_owners(materialized, data_owners)
             _validate_nonwritten_gradients(materialized, gradients, min_rank)
@@ -301,6 +329,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
             _restore_parameter_metadata_and_gradients(
                 materialized,
                 trainability,
+                versions,
                 grad_shapes,
                 data_owners,
                 leaf_provenance,
