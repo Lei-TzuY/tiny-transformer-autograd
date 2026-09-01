@@ -13,7 +13,7 @@ from .gradient_centralization import (
     _validate_min_rank,
     centralize_gradients_ as _centralize_gradients_impl,
 )
-from .tensor import _VersionedArray
+from .tensor import _VersionedArray, _no_backward
 
 
 def _snapshot_gradients(parameters):
@@ -38,8 +38,31 @@ def _snapshot_gradients(parameters):
 
 def _validate_leaf_parameters(parameters):
     for index, parameter in enumerate(parameters):
-        if parameter._children:
+        children = parameter._children
+        if type(children) is not tuple:
+            raise TypeError(f"parameter {index} graph metadata must be a plain tuple")
+        if children != ():
             raise ValueError(f"parameter {index} must be a leaf Tensor")
+        if getattr(parameter, "_backward_fn", None) is not _no_backward:
+            raise TypeError(
+                f"parameter {index} backward metadata must be the leaf no-op closure"
+            )
+        if getattr(parameter, "_detached_by_no_grad", None) is not False:
+            raise TypeError(f"parameter {index} detached provenance must be false")
+
+
+def _validate_leaf_provenance(parameters, provenance):
+    for index, (parameter, entry) in enumerate(zip(parameters, provenance)):
+        children, backward_fn, detached_by_no_grad = entry
+        if (
+            type(parameter._children) is not tuple
+            or parameter._children != children
+            or parameter._backward_fn is not backward_fn
+            or parameter._detached_by_no_grad is not detached_by_no_grad
+        ):
+            raise RuntimeError(
+                f"leaf provenance changed for parameter {index} during centralization"
+            )
 
 
 def _validate_entry_versions(parameters):
@@ -184,17 +207,26 @@ def _validate_nonwritten_gradients(parameters, gradients, min_rank):
 
 
 def _restore_parameter_metadata_and_gradients(
-    parameters, trainability, grad_shapes, data_owners, gradients
+    parameters, trainability, grad_shapes, data_owners, leaf_provenance, gradients
 ):
     rollback_error = None
-    for parameter, requires_grad, grad_shape, owner_ref, gradient_state in zip(
-        parameters, trainability, grad_shapes, data_owners, gradients
+    for parameter, requires_grad, grad_shape, owner_ref, provenance, gradient_state in zip(
+        parameters,
+        trainability,
+        grad_shapes,
+        data_owners,
+        leaf_provenance,
+        gradients,
     ):
         gradient, values, dtype, strides, writeable = gradient_state
+        children, backward_fn, detached_by_no_grad = provenance
         try:
             parameter.requires_grad = requires_grad
             parameter._grad_shape = grad_shape
             parameter.data._owner_ref = owner_ref
+            parameter._children = children
+            parameter._backward_fn = backward_fn
+            parameter._detached_by_no_grad = detached_by_no_grad
             if parameter.grad is not gradient:
                 parameter.grad = gradient
             if values is None:
@@ -229,6 +261,14 @@ def centralize_gradients_(parameters, *, min_rank=2):
         _validate_foreign_tensor_managed_gradients(materialized, min_rank)
         trainability = tuple(parameter.requires_grad for parameter in materialized)
         grad_shapes = tuple(parameter._grad_shape for parameter in materialized)
+        leaf_provenance = tuple(
+            (
+                parameter._children,
+                parameter._backward_fn,
+                parameter._detached_by_no_grad,
+            )
+            for parameter in materialized
+        )
         gradients = _snapshot_gradients(materialized)
         try:
             changed = _centralize_gradients_impl(materialized, min_rank=min_rank)
@@ -245,11 +285,17 @@ def centralize_gradients_(parameters, *, min_rank=2):
                         f"gradient shape metadata changed for parameter {index} "
                         "during centralization"
                     )
+            _validate_leaf_provenance(materialized, leaf_provenance)
             _validate_parameter_data_owners(materialized, data_owners)
             _validate_nonwritten_gradients(materialized, gradients, min_rank)
             return changed
         except BaseException:
             _restore_parameter_metadata_and_gradients(
-                materialized, trainability, grad_shapes, data_owners, gradients
+                materialized,
+                trainability,
+                grad_shapes,
+                data_owners,
+                leaf_provenance,
+                gradients,
             )
             raise
