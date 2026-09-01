@@ -33,6 +33,12 @@ def parse_args():
     parser.add_argument("--ctx", type=int, default=32)
     parser.add_argument("--d", type=int, default=64)
     parser.add_argument("--heads", type=int, default=4)
+    parser.add_argument(
+        "--kv-heads",
+        type=int,
+        default=None,
+        help="Key/value heads; defaults to --heads (ordinary MHA)",
+    )
     parser.add_argument("--layers", type=int, default=2)
     parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--arch", choices=["gpt", "llama"], default="gpt")
@@ -47,16 +53,19 @@ def parse_args():
 
 def run_benchmark(args):
     """Run a deterministic benchmark without perturbing caller NumPy RNG state."""
-    warmup, repeats, seed = _validate_args(args)
+    warmup, repeats, seed, kv_heads = _validate_args(args)
     rng_state = np.random.get_state()
     try:
         np.random.seed(seed)
-        return _run_benchmark(args, warmup, repeats, seed)
+        return _run_benchmark(args, warmup, repeats, seed, kv_heads)
     finally:
         np.random.set_state(rng_state)
 
 
-def _run_benchmark(args, warmup, repeats, seed):
+def _run_benchmark(args, warmup, repeats, seed, kv_heads):
+    attention_config = (
+        {} if kv_heads == int(args.heads) else {"num_kv_heads": kv_heads}
+    )
     model = GPT(
         vocab_size=args.vocab,
         context_len=args.ctx,
@@ -64,6 +73,7 @@ def _run_benchmark(args, warmup, repeats, seed):
         num_heads=args.heads,
         d_ff=4 * args.d,
         num_layers=args.layers,
+        **attention_config,
         **_ARCH_PRESETS[args.arch],
     )
     model.eval()
@@ -141,6 +151,12 @@ def _run_benchmark(args, warmup, repeats, seed):
         "cache_speedup": cache_speedups,
     }
     summaries = {name: _summarize(values) for name, values in samples.items()}
+    head_dim = int(args.d) // int(args.heads)
+    itemsize = int(model.token_emb.weight.data.dtype.itemsize)
+    cache_bytes_per_token_batch = (
+        2 * int(args.layers) * kv_heads * head_dim * itemsize
+    )
+    kv_head_ratio = kv_heads / int(args.heads)
     return {
         "benchmark_schema": 1,
         "arch": args.arch,
@@ -148,6 +164,10 @@ def _run_benchmark(args, warmup, repeats, seed):
         "context_len": int(args.ctx),
         "d_model": int(args.d),
         "heads": int(args.heads),
+        "kv_heads": kv_heads,
+        "kv_cache_head_ratio": kv_head_ratio,
+        "kv_cache_head_reduction": 1.0 - kv_head_ratio,
+        "kv_cache_bytes_per_token_batch": cache_bytes_per_token_batch,
         "layers": int(args.layers),
         "batch": int(args.batch),
         "d_ff": int(4 * args.d),
@@ -267,6 +287,17 @@ def _strict_int(value, name, *, minimum=1, maximum=None):
     return result
 
 
+def _resolve_kv_heads(args):
+    heads = int(args.heads)
+    raw = getattr(args, "kv_heads", None)
+    if raw is None:
+        return heads
+    kv_heads = _strict_int(raw, "--kv-heads")
+    if kv_heads > heads or heads % kv_heads != 0:
+        raise ValueError("--kv-heads must divide --heads")
+    return kv_heads
+
+
 def _validate_args(args):
     # Before the benchmark protocol was configurable, programmatic callers
     # only supplied the model/workload fields. Preserve that API with the old
@@ -291,9 +322,10 @@ def _validate_args(args):
         raise ValueError(f"unsupported --arch: {args.arch!r}")
     if args.d % args.heads != 0:
         raise ValueError("--d must be divisible by --heads")
+    kv_heads = _resolve_kv_heads(args)
     if args.arch == "llama" and (args.d // args.heads) % 2 != 0:
         raise ValueError("--arch llama needs an even head dimension (d/heads) for RoPE")
-    return warmup, repeats, seed
+    return warmup, repeats, seed, kv_heads
 
 
 def main():
@@ -308,7 +340,12 @@ def main():
     print(
         f"  shape: vocab={metrics['vocab']} ctx={metrics['context_len']} "
         f"d={metrics['d_model']} heads={metrics['heads']} "
-        f"layers={metrics['layers']} batch={metrics['batch']}"
+        f"kv_heads={metrics['kv_heads']} layers={metrics['layers']} "
+        f"batch={metrics['batch']}"
+    )
+    print(
+        f"  KV cache: {metrics['kv_cache_bytes_per_token_batch']} bytes/token/batch "
+        f"({metrics['kv_cache_head_reduction'] * 100:.1f}% head reduction)"
     )
     print(
         f"  protocol: warmup={metrics['warmup']} repeats={metrics['repeats']} "
