@@ -26,6 +26,24 @@ class _CorruptGradShapeOnWrite(np.ndarray):
         self._target._grad_shape = (999,)
 
 
+class _ShapeTuple(tuple):
+    """Tuple subclass used to preserve values while corrupting metadata type."""
+
+
+class _SubstituteGradShapeTupleOnWrite(np.ndarray):
+    def __new__(cls, values, target):
+        array = np.asarray(values, dtype=np.float64).view(cls)
+        array._target = target
+        return array
+
+    def __array_finalize__(self, obj):
+        self._target = getattr(obj, "_target", None)
+
+    def __setitem__(self, key, value):
+        np.ndarray.__setitem__(self, key, value)
+        self._target._grad_shape = _ShapeTuple(self._target._grad_shape)
+
+
 def test_gradient_write_cannot_change_tensor_grad_shape_metadata():
     parameter = Tensor(np.zeros((1, 2), dtype=np.float64), requires_grad=True)
     gradient = _CorruptGradShapeOnWrite([[1.0, 3.0]], parameter)
@@ -36,6 +54,22 @@ def test_gradient_write_cannot_change_tensor_grad_shape_metadata():
     with pytest.raises(RuntimeError, match="gradient shape metadata changed"):
         centralize_gradients_([parameter])
 
+    assert parameter._grad_shape == grad_shape_before
+    assert parameter.grad is gradient
+    np.testing.assert_array_equal(parameter.grad, gradient_before)
+
+
+def test_gradient_write_cannot_replace_grad_shape_with_equal_tuple_subclass():
+    parameter = Tensor(np.zeros((1, 2), dtype=np.float64), requires_grad=True)
+    gradient = _SubstituteGradShapeTupleOnWrite([[1.0, 3.0]], parameter)
+    parameter.grad = gradient
+    gradient_before = np.array(gradient, copy=True)
+    grad_shape_before = parameter._grad_shape
+
+    with pytest.raises(RuntimeError, match="gradient shape metadata changed"):
+        centralize_gradients_([parameter])
+
+    assert type(parameter._grad_shape) is tuple
     assert parameter._grad_shape == grad_shape_before
     assert parameter.grad is gradient
     np.testing.assert_array_equal(parameter.grad, gradient_before)
