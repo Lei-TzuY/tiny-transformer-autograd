@@ -53,13 +53,10 @@ def _has_live_tensor_storage_owner(array):
 
 
 def _validate_foreign_tensor_managed_gradients(parameters, min_rank):
-    """Reject writes that would mutate Tensor-owned storage outside this collection."""
+    """Reject writes whose storage ownership cannot be proven local and safe."""
 
     for index, parameter in enumerate(parameters):
         gradient = parameter.grad
-        if not _has_live_tensor_storage_owner(gradient):
-            continue
-
         requires_grad = parameter.requires_grad
         if not isinstance(requires_grad, bool) or not requires_grad:
             continue
@@ -79,15 +76,34 @@ def _validate_foreign_tensor_managed_gradients(parameters, min_rank):
         if np.array_equal(base, candidate):
             continue
 
+        overlaps_bound_data = False
         for bound_parameter in parameters:
             try:
                 if np.shares_memory(base, np.asarray(bound_parameter.data)):
+                    overlaps_bound_data = True
                     break
             except ValueError:
+                overlaps_bound_data = True
                 break
-        else:
+        if overlaps_bound_data:
+            continue
+
+        if _has_live_tensor_storage_owner(gradient):
             raise ValueError(
                 f"gradient for parameter {index} must not use foreign Tensor-managed storage"
+            )
+
+        # ``external.data.view(np.ndarray)`` deliberately strips the
+        # _VersionedArray subclass (and therefore its weak owner metadata) while
+        # retaining the same writable storage.  Exact ordinary ndarray views are
+        # consequently ownership-ambiguous: the helper cannot prove that an
+        # in-place write is confined to caller-owned gradient storage.  Fail
+        # closed only when centralization would actually write; independent
+        # owning ndarrays and exact no-ops remain accepted.
+        if type(gradient) is np.ndarray and gradient.base is not None:
+            raise ValueError(
+                f"gradient for parameter {index} must own its storage when "
+                "centralization requires a write"
             )
 
 
