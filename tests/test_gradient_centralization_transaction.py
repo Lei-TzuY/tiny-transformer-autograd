@@ -107,6 +107,20 @@ class _ReadOnlyOnWrite(np.ndarray):
         self.flags.writeable = False
 
 
+class _MutateParameterDataOnWrite(np.ndarray):
+    def __new__(cls, values, target):
+        array = np.asarray(values, dtype=np.float64).view(cls)
+        array._target = target
+        return array
+
+    def __array_finalize__(self, obj):
+        self._target = getattr(obj, "_target", None)
+
+    def __setitem__(self, key, value):
+        np.ndarray.__setitem__(self, key, value)
+        self._target.data[...] = 99.0
+
+
 def test_mutate_then_raise_destination_is_rolled_back():
     parameter = Tensor(np.zeros((1, 2), dtype=np.float64), requires_grad=True)
     gradient = _MutateThenRaise([[1.0, 3.0]])
@@ -217,3 +231,21 @@ def test_successful_write_cannot_make_gradient_read_only():
     assert parameter.grad is gradient
     assert gradient.flags.writeable
     np.testing.assert_array_equal(gradient, before)
+
+
+def test_successful_gradient_write_cannot_mutate_parameter_data():
+    parameter = Tensor(np.array([[10.0, 20.0]], dtype=np.float64), requires_grad=True)
+    data = parameter.data
+    data_before = np.array(data, copy=True)
+    version_before = parameter._version
+    gradient = _MutateParameterDataOnWrite([[1.0, 3.0]], parameter)
+    parameter.grad = gradient
+    gradient_before = np.array(gradient, copy=True)
+
+    with pytest.raises(RuntimeError, match="parameter data changed"):
+        centralize_gradients_([parameter])
+
+    assert parameter.data is data
+    np.testing.assert_array_equal(parameter.data, data_before)
+    np.testing.assert_array_equal(parameter.grad, gradient_before)
+    assert parameter._version > version_before
