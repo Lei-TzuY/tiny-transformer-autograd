@@ -44,3 +44,19 @@ def test_gradient_write_cannot_detach_parameter_storage_owner():
 
     parameter.data[...] = 1.0
     assert parameter._version == version_before + 1
+
+
+def test_parameter_storage_owner_must_be_a_real_weak_reference():
+    parameter = Tensor(np.zeros((1, 2), dtype=np.float64), requires_grad=True)
+    parameter.grad[...] = [[1.0, 3.0]]
+    gradient_before = np.array(parameter.grad, copy=True)
+
+    # A callable strong reference preserves writes today but violates the Tensor
+    # storage ownership contract: _VersionedArray deliberately keeps only a weak
+    # reference so array storage does not extend its owning Tensor's lifetime.
+    parameter.data._owner_ref = lambda: parameter
+
+    with pytest.raises(TypeError, match="ownership metadata must be a weak reference"):
+        centralize_gradients_([parameter])
+
+    np.testing.assert_array_equal(parameter.grad, gradient_before)
