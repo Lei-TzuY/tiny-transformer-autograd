@@ -4,6 +4,7 @@ import numpy as np
 
 from .gradient_centralization import (
     _CENTRALIZATION_LOCK,
+    _centralized_candidate,
     _materialize_parameters,
     _restore_array_dtype,
     _restore_array_shape,
@@ -12,6 +13,7 @@ from .gradient_centralization import (
     _validate_min_rank,
     centralize_gradients_ as _centralize_gradients_impl,
 )
+from .tensor import _VersionedArray
 
 
 def _snapshot_gradients(parameters):
@@ -40,6 +42,52 @@ def _validate_entry_grad_shapes(parameters):
         if type(parameter._grad_shape) is not tuple or parameter._grad_shape != expected:
             raise ValueError(
                 f"parameter {index} gradient shape metadata must match parameter data shape"
+            )
+
+
+def _has_live_tensor_storage_owner(array):
+    if not isinstance(array, _VersionedArray):
+        return False
+    owner_ref = getattr(array, "_owner_ref", None)
+    return owner_ref is not None and owner_ref() is not None
+
+
+def _validate_foreign_tensor_managed_gradients(parameters, min_rank):
+    """Reject writes that would mutate Tensor-owned storage outside this collection."""
+
+    for index, parameter in enumerate(parameters):
+        gradient = parameter.grad
+        if not _has_live_tensor_storage_owner(gradient):
+            continue
+
+        requires_grad = parameter.requires_grad
+        if not isinstance(requires_grad, bool) or not requires_grad:
+            continue
+        if not isinstance(gradient, np.ndarray):
+            continue
+
+        base = np.asarray(gradient)
+        parameter_data = np.asarray(parameter.data)
+        if base.shape != parameter_data.shape:
+            continue
+        if not np.issubdtype(base.dtype, np.floating) or not np.all(np.isfinite(base)):
+            continue
+        if parameter_data.ndim < min_rank:
+            continue
+
+        candidate = _centralized_candidate(base)
+        if np.array_equal(base, candidate):
+            continue
+
+        for bound_parameter in parameters:
+            try:
+                if np.shares_memory(base, np.asarray(bound_parameter.data)):
+                    break
+            except ValueError:
+                break
+        else:
+            raise ValueError(
+                f"gradient for parameter {index} must not use foreign Tensor-managed storage"
             )
 
 
@@ -116,6 +164,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
     with _CENTRALIZATION_LOCK:
         materialized = _materialize_parameters(parameters)
         _validate_entry_grad_shapes(materialized)
+        _validate_foreign_tensor_managed_gradients(materialized, min_rank)
         trainability = tuple(parameter.requires_grad for parameter in materialized)
         grad_shapes = tuple(parameter._grad_shape for parameter in materialized)
         gradients = _snapshot_gradients(materialized)
