@@ -56,6 +56,31 @@ def _validate_entry_grad_shapes(parameters):
             )
 
 
+def _snapshot_parameter_data_owners(parameters):
+    owners = []
+    for index, parameter in enumerate(parameters):
+        data = parameter.data
+        if not isinstance(data, _VersionedArray):
+            raise TypeError(f"parameter {index} data must use Tensor-managed storage")
+        owner_ref = getattr(data, "_owner_ref", None)
+        if owner_ref is None or owner_ref() is not parameter:
+            raise ValueError(
+                f"parameter {index} data ownership metadata must reference its Tensor"
+            )
+        owners.append(owner_ref)
+    return tuple(owners)
+
+
+def _validate_parameter_data_owners(parameters, owners):
+    for index, (parameter, owner_ref) in enumerate(zip(parameters, owners)):
+        current = getattr(parameter.data, "_owner_ref", None)
+        if current is not owner_ref or current() is not parameter:
+            raise RuntimeError(
+                f"parameter data ownership changed for parameter {index} "
+                "during centralization"
+            )
+
+
 def _has_live_tensor_storage_owner(array):
     if not isinstance(array, _VersionedArray):
         return False
@@ -106,9 +131,9 @@ def _validate_foreign_tensor_managed_gradients(parameters, min_rank):
 
         # ``external.data.view(np.ndarray)`` deliberately strips the
         # _VersionedArray subclass (and therefore its weak owner metadata) while
-        # retaining the same writable storage.  Exact ordinary ndarray views are
+        # retaining the same writable storage. Exact ordinary ndarray views are
         # consequently ownership-ambiguous: the helper cannot prove that an
-        # in-place write is confined to caller-owned gradient storage.  Fail
+        # in-place write is confined to caller-owned gradient storage. Fail
         # closed only when centralization would actually write; independent
         # owning ndarrays and exact no-ops remain accepted.
         if type(gradient) is np.ndarray and gradient.base is not None:
@@ -153,16 +178,17 @@ def _validate_nonwritten_gradients(parameters, gradients, min_rank):
 
 
 def _restore_parameter_metadata_and_gradients(
-    parameters, trainability, grad_shapes, gradients
+    parameters, trainability, grad_shapes, data_owners, gradients
 ):
     rollback_error = None
-    for parameter, requires_grad, grad_shape, gradient_state in zip(
-        parameters, trainability, grad_shapes, gradients
+    for parameter, requires_grad, grad_shape, owner_ref, gradient_state in zip(
+        parameters, trainability, grad_shapes, data_owners, gradients
     ):
         gradient, values, dtype, strides, writeable = gradient_state
         try:
             parameter.requires_grad = requires_grad
             parameter._grad_shape = grad_shape
+            parameter.data._owner_ref = owner_ref
             if parameter.grad is not gradient:
                 parameter.grad = gradient
             if values is None:
@@ -192,6 +218,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
         materialized = _materialize_parameters(parameters)
         _validate_entry_versions(materialized)
         _validate_entry_grad_shapes(materialized)
+        data_owners = _snapshot_parameter_data_owners(materialized)
         _validate_foreign_tensor_managed_gradients(materialized, min_rank)
         trainability = tuple(parameter.requires_grad for parameter in materialized)
         grad_shapes = tuple(parameter._grad_shape for parameter in materialized)
@@ -211,10 +238,11 @@ def centralize_gradients_(parameters, *, min_rank=2):
                         f"gradient shape metadata changed for parameter {index} "
                         "during centralization"
                     )
+            _validate_parameter_data_owners(materialized, data_owners)
             _validate_nonwritten_gradients(materialized, gradients, min_rank)
             return changed
         except BaseException:
             _restore_parameter_metadata_and_gradients(
-                materialized, trainability, grad_shapes, gradients
+                materialized, trainability, grad_shapes, data_owners, gradients
             )
             raise
