@@ -48,8 +48,6 @@ def _shares_memory(left, right):
 def _restore_array_dtype(array, expected_dtype):
     if np.asarray(array).dtype == expected_dtype:
         return
-    # Dtype controls how the same bytes are interpreted, so repair it before shape,
-    # strides, and values. Use the ndarray descriptor to avoid subclass hooks.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         np.ndarray.dtype.__set__(array, expected_dtype)
@@ -58,9 +56,6 @@ def _restore_array_dtype(array, expected_dtype):
 def _restore_array_shape(array, expected_shape):
     if np.asarray(array).shape == expected_shape:
         return
-    # Exceptional rollback must preserve the exact caller-owned ndarray object.
-    # New NumPy versions deprecate direct shape assignment, so suppress only that
-    # deprecation at this narrow repair boundary rather than weakening -W error.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         np.ndarray.shape.__set__(array, expected_shape)
@@ -69,8 +64,6 @@ def _restore_array_shape(array, expected_shape):
 def _restore_array_strides(array, expected_strides):
     if np.asarray(array).strides == expected_strides:
         return
-    # Strides are caller-visible storage metadata. Repair them before writing entry
-    # values so a zero-stride alias cannot make rollback overwrite only one slot.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         np.ndarray.strides.__set__(array, expected_strides)
@@ -160,17 +153,7 @@ def _validate_transaction_state(
 
 
 def centralize_gradients_(parameters, *, min_rank=2):
-    """Center eligible live gradients across every non-leading axis in-place.
-
-    For a rank-2 Linear-style weight gradient ``(out, in)``, each output row is
-    centered independently. Higher-rank tensors are treated the same way: axis 0
-    identifies units and all remaining axes form that unit. Gradients below
-    ``min_rank`` and missing gradients are left unchanged.
-
-    The complete parameter/gradient collection is validated and every candidate is
-    computed before the first write. The function returns the number of gradient
-    tensors whose stored values changed.
-    """
+    """Center eligible live gradients across every non-leading axis in-place."""
 
     min_rank = _validate_min_rank(min_rank)
     parameters = _materialize_parameters(parameters)
@@ -235,9 +218,6 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 raise ValueError(f"gradient for parameter {index} must be writable")
             changed.append(index)
 
-    # Gradient centralization owns gradient buffers only. A write into storage that
-    # aliases any bound parameter would silently mutate model weights and may advance
-    # Tensor mutation versions. Keep no-op aliases valid because they perform no write.
     for gradient_index in changed:
         for parameter_index, parameter in enumerate(parameters):
             if _shares_memory(gradients[gradient_index], parameter.data):
@@ -300,10 +280,6 @@ def centralize_gradients_(parameters, *, min_rank=2):
     except BaseException:
         rollback_error = None
 
-        # A caller-controlled ndarray write can mutate another Tensor's public
-        # ``grad`` attribute even when that other destination has not been reached
-        # yet. Restore the complete collection's entry bindings before repairing
-        # storage values so a failed transaction cannot leak rebinding.
         for index, gradient in enumerate(gradients):
             try:
                 if parameters[index].grad is not gradient:
@@ -312,9 +288,6 @@ def centralize_gradients_(parameters, *, min_rank=2):
                 if rollback_error is None:
                     rollback_error = exc
 
-        # A write hook can mutate another eligible gradient's metadata/value. Dtype
-        # must be repaired before shape/strides because it controls byte interpretation.
-        # Writability is temporarily enabled only when value repair needs it.
         for index in reversed(range(len(gradients))):
             if originals[index] is None:
                 continue
@@ -382,18 +355,121 @@ def centralize_gradients_(parameters, *, min_rank=2):
     return len(changed)
 
 
-# A transaction can execute caller-controlled ndarray subclass hooks while its entry
-# snapshots are live. Serialize complete helper-managed calls so another transaction
-# cannot observe or mutate a half-committed collection. RLock keeps same-thread nested
-# diagnostics on disjoint parameters usable instead of introducing a self-deadlock.
 import threading as _threading
 
 _CENTRALIZATION_LOCK = _threading.RLock()
 _centralize_gradients_unlocked = centralize_gradients_
 
 
+def _snapshot_parameter_guard_state(parameters):
+    states = []
+    for parameter in parameters:
+        data = parameter.data
+        data_base = np.asarray(data)
+        gradient = parameter.grad
+        gradient_state = None
+        if isinstance(gradient, np.ndarray):
+            gradient_base = np.asarray(gradient)
+            gradient_state = (
+                gradient,
+                np.array(gradient_base, copy=True),
+                gradient_base.dtype,
+                gradient_base.strides,
+                bool(gradient_base.flags.writeable),
+            )
+        states.append(
+            (
+                data,
+                np.array(data_base, copy=True),
+                data_base.dtype,
+                data_base.strides,
+                bool(data_base.flags.writeable),
+                parameter._version,
+                gradient,
+                gradient_state,
+            )
+        )
+    return tuple(states)
+
+
+def _validate_parameter_guard_state(parameters, states):
+    for index, (parameter, state) in enumerate(zip(parameters, states)):
+        data, values, dtype, strides, writeable, version, _, _ = state
+        current = parameter.data
+        if current is not data:
+            raise RuntimeError(
+                f"parameter data changed for parameter {index} during centralization"
+            )
+        base = np.asarray(current)
+        if base.shape != values.shape or base.dtype != dtype or base.strides != strides:
+            raise RuntimeError(
+                f"parameter data changed for parameter {index} during centralization"
+            )
+        if bool(base.flags.writeable) != writeable:
+            raise RuntimeError(
+                f"parameter data changed for parameter {index} during centralization"
+            )
+        if parameter._version != version or not np.array_equal(base, values):
+            raise RuntimeError(
+                f"parameter data changed for parameter {index} during centralization"
+            )
+
+
+def _restore_parameter_guard_state(parameters, states, *, restore_gradients):
+    rollback_error = None
+    for parameter, state in zip(parameters, states):
+        data, values, dtype, strides, writeable, _, gradient, gradient_state = state
+        try:
+            if parameter.data is not data:
+                parameter._data = data
+            _restore_array_dtype(data, dtype)
+            _restore_array_shape(data, values.shape)
+            _restore_array_strides(data, strides)
+            if not bool(np.asarray(data).flags.writeable):
+                np.ndarray.setflags(data, write=True)
+            if not np.array_equal(np.asarray(data), values):
+                np.ndarray.__setitem__(data, Ellipsis, np.array(values, copy=True))
+            _restore_array_writeable(data, writeable)
+
+            if restore_gradients:
+                if parameter.grad is not gradient:
+                    parameter.grad = gradient
+                if gradient_state is not None:
+                    grad, grad_values, grad_dtype, grad_strides, grad_writeable = gradient_state
+                    _restore_array_dtype(grad, grad_dtype)
+                    _restore_array_shape(grad, grad_values.shape)
+                    _restore_array_strides(grad, grad_strides)
+                    if not bool(np.asarray(grad).flags.writeable):
+                        np.ndarray.setflags(grad, write=True)
+                    if not np.array_equal(np.asarray(grad), grad_values):
+                        np.ndarray.__setitem__(
+                            grad, Ellipsis, np.array(grad_values, copy=True)
+                        )
+                    _restore_array_writeable(grad, grad_writeable)
+        except BaseException as exc:
+            if rollback_error is None:
+                rollback_error = exc
+    if rollback_error is not None:
+        raise RuntimeError("gradient centralization outer rollback failed") from rollback_error
+
+
+_centralize_gradients_with_gradient_guards = centralize_gradients_
+
+
 def centralize_gradients_(parameters, *, min_rank=2):
-    """Center eligible gradients atomically across helper-managed concurrent calls."""
+    """Center eligible gradients without allowing parameter-state side effects."""
 
     with _CENTRALIZATION_LOCK:
-        return _centralize_gradients_unlocked(parameters, min_rank=min_rank)
+        materialized = _materialize_parameters(parameters)
+        states = _snapshot_parameter_guard_state(materialized)
+        inner_succeeded = False
+        try:
+            changed = _centralize_gradients_unlocked(materialized, min_rank=min_rank)
+            inner_succeeded = True
+            _validate_parameter_guard_state(materialized, states)
+            return changed
+        except BaseException:
+            _restore_parameter_guard_state(
+                materialized, states, restore_gradients=inner_succeeded
+            )
+            raise
