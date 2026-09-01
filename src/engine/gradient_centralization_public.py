@@ -93,6 +93,8 @@ def _snapshot_parameter_data_owners(parameters):
         data = parameter.data
         if not isinstance(data, _VersionedArray):
             raise TypeError(f"parameter {index} data must use Tensor-managed storage")
+        if np.asarray(data).dtype != np.dtype(np.float64):
+            raise TypeError(f"parameter {index} data must have dtype float64")
         owner_ref = getattr(data, "_owner_ref", None)
         if type(owner_ref) is not weakref.ReferenceType:
             raise TypeError(
