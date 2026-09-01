@@ -86,6 +86,27 @@ def test_ineligible_frozen_parameter_with_live_gradient_is_rejected(
     np.testing.assert_array_equal(parameter.grad, before)
 
 
+@pytest.mark.parametrize(
+    ("gradient", "error", "message"),
+    [
+        (np.array([1.0]), ValueError, "shape mismatch"),
+        (np.array([1, 2], dtype=np.int64), TypeError, "floating dtype"),
+        (np.array([1.0, np.nan]), ValueError, "finite values"),
+    ],
+)
+def test_ineligible_live_gradient_is_still_validated(gradient, error, message):
+    parameter = Tensor(np.zeros((2,), dtype=np.float64), requires_grad=True)
+    parameter.grad = gradient
+    binding = parameter.grad
+    before = np.array(binding, copy=True)
+
+    with pytest.raises(error, match=message):
+        centralize_gradients_([parameter])
+
+    assert parameter.grad is binding
+    np.testing.assert_array_equal(parameter.grad, before)
+
+
 def test_zero_mean_gradient_is_not_rewritten():
     parameter = _parameter((2, 2), [[-1.0, 1.0], [-3.0, 3.0]])
     gradient = parameter.grad
