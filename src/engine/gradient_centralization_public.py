@@ -1,5 +1,7 @@
 """Public gradient-centralization guard for complete parameter/gradient metadata."""
 
+import weakref
+
 import numpy as np
 
 from .gradient_centralization import (
@@ -92,7 +94,11 @@ def _snapshot_parameter_data_owners(parameters):
         if not isinstance(data, _VersionedArray):
             raise TypeError(f"parameter {index} data must use Tensor-managed storage")
         owner_ref = getattr(data, "_owner_ref", None)
-        if owner_ref is None or owner_ref() is not parameter:
+        if type(owner_ref) is not weakref.ReferenceType:
+            raise TypeError(
+                f"parameter {index} data ownership metadata must be a weak reference"
+            )
+        if owner_ref() is not parameter:
             raise ValueError(
                 f"parameter {index} data ownership metadata must reference its Tensor"
             )
