@@ -198,18 +198,12 @@ def centralize_gradients_(parameters, *, min_rank=2):
             continue
         if not requires_grad:
             raise ValueError(f"parameter {index} is frozen but still has a gradient")
-        if np.asarray(parameter.data).ndim < min_rank:
-            originals.append(None)
-            entry_dtypes.append(None)
-            entry_strides.append(None)
-            entry_writeable.append(None)
-            candidates.append(None)
-            continue
         if not isinstance(gradient, np.ndarray):
             raise TypeError(f"gradient for parameter {index} must be a NumPy array")
 
         base = np.asarray(gradient)
-        expected_shape = np.asarray(parameter.data).shape
+        parameter_data = np.asarray(parameter.data)
+        expected_shape = parameter_data.shape
         if base.shape != expected_shape:
             raise ValueError(
                 f"gradient for parameter {index} shape mismatch: "
@@ -221,6 +215,13 @@ def centralize_gradients_(parameters, *, min_rank=2):
             raise ValueError(
                 f"gradient for parameter {index} must contain only finite values"
             )
+        if parameter_data.ndim < min_rank:
+            originals.append(None)
+            entry_dtypes.append(None)
+            entry_strides.append(None)
+            entry_writeable.append(None)
+            candidates.append(None)
+            continue
 
         original = np.array(base, copy=True)
         candidate = _centralized_candidate(base)
