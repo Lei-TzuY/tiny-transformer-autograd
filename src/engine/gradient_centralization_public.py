@@ -36,6 +36,12 @@ def _snapshot_gradients(parameters):
     return tuple(snapshots)
 
 
+def _validate_leaf_parameters(parameters):
+    for index, parameter in enumerate(parameters):
+        if parameter._children:
+            raise ValueError(f"parameter {index} must be a leaf Tensor")
+
+
 def _validate_entry_versions(parameters):
     for index, parameter in enumerate(parameters):
         version = parameter._version
@@ -216,6 +222,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
     min_rank = _validate_min_rank(min_rank)
     with _CENTRALIZATION_LOCK:
         materialized = _materialize_parameters(parameters)
+        _validate_leaf_parameters(materialized)
         _validate_entry_versions(materialized)
         _validate_entry_grad_shapes(materialized)
         data_owners = _snapshot_parameter_data_owners(materialized)
