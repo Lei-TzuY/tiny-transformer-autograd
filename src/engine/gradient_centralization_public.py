@@ -350,7 +350,10 @@ def centralize_gradients_(parameters, *, min_rank=2):
                         f"parameter trainability changed for parameter {index} "
                         "during centralization"
                     )
-                if parameter._grad_shape != grad_shape:
+                if (
+                    type(parameter._grad_shape) is not tuple
+                    or parameter._grad_shape != grad_shape
+                ):
                     raise RuntimeError(
                         f"gradient shape metadata changed for parameter {index} "
                         "during centralization"
