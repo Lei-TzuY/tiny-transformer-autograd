@@ -14,9 +14,10 @@ def test_parameter_storage_rejects_owner_weakref_with_callback_before_write():
     gradient = np.array([[1.0, 3.0], [5.0, 9.0]], dtype=np.float64)
     parameter.grad = gradient
     entry_gradient = gradient.copy()
+    callback_calls = []
 
-    def callback(_reference):
-        raise AssertionError("parameter storage owner weakrefs must not run callbacks")
+    def callback(reference):
+        callback_calls.append(reference)
 
     parameter.data._owner_ref = weakref.ref(parameter, callback)
 
@@ -26,6 +27,7 @@ def test_parameter_storage_rejects_owner_weakref_with_callback_before_write():
     ):
         centralize_gradients_(parameter)
 
+    assert callback_calls == []
     assert parameter.grad is gradient
     np.testing.assert_array_equal(gradient, entry_gradient)
     assert parameter.data._owner_ref() is parameter
