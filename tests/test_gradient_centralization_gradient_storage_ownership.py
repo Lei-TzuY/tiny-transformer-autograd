@@ -26,7 +26,7 @@ def test_rejects_external_tensor_managed_gradient_storage_before_write():
 
 def test_allows_external_tensor_managed_gradient_storage_when_centralization_is_noop():
     parameter = Tensor([[2.0, 2.0]], requires_grad=True)
-    external = Tensor([[4.0, 4.0]], requires_grad=False)
+    external = Tensor([[-1.0, 1.0]], requires_grad=False)
     parameter.grad = external.data
 
     external_data = external.data
