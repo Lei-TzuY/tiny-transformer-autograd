@@ -109,6 +109,11 @@ def _snapshot_parameter_data_owners(parameters):
             raise TypeError(
                 f"parameter {index} data ownership metadata must be a weak reference"
             )
+        if owner_ref.__callback__ is not None:
+            raise TypeError(
+                f"parameter {index} data ownership metadata must be a "
+                "callback-free weak reference"
+            )
         if owner_ref() is not parameter:
             raise ValueError(
                 f"parameter {index} data ownership metadata must reference its Tensor"
@@ -135,6 +140,11 @@ def _tensor_storage_owner(array, parameter_index):
         raise TypeError(
             f"gradient for parameter {parameter_index} ownership metadata must be "
             "a weak reference"
+        )
+    if owner_ref.__callback__ is not None:
+        raise TypeError(
+            f"gradient for parameter {parameter_index} ownership metadata must be "
+            "a callback-free weak reference"
         )
     owner = owner_ref()
     if owner is None:
