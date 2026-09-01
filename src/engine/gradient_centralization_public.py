@@ -34,6 +34,15 @@ def _snapshot_gradients(parameters):
     return tuple(snapshots)
 
 
+def _validate_entry_grad_shapes(parameters):
+    for index, parameter in enumerate(parameters):
+        expected = np.asarray(parameter.data).shape
+        if type(parameter._grad_shape) is not tuple or parameter._grad_shape != expected:
+            raise ValueError(
+                f"parameter {index} gradient shape metadata must match parameter data shape"
+            )
+
+
 def _validate_nonwritten_gradients(parameters, gradients, min_rank):
     for index, (parameter, gradient_state) in enumerate(zip(parameters, gradients)):
         gradient, values, dtype, strides, writeable = gradient_state
@@ -106,6 +115,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
     min_rank = _validate_min_rank(min_rank)
     with _CENTRALIZATION_LOCK:
         materialized = _materialize_parameters(parameters)
+        _validate_entry_grad_shapes(materialized)
         trainability = tuple(parameter.requires_grad for parameter in materialized)
         grad_shapes = tuple(parameter._grad_shape for parameter in materialized)
         gradients = _snapshot_gradients(materialized)
