@@ -36,6 +36,17 @@ def _snapshot_gradients(parameters):
     return tuple(snapshots)
 
 
+def _validate_entry_versions(parameters):
+    for index, parameter in enumerate(parameters):
+        version = parameter._version
+        if type(version) is not int:
+            raise TypeError(
+                f"parameter {index} mutation version must be a non-negative integer"
+            )
+        if version < 0:
+            raise ValueError(f"parameter {index} mutation version must be non-negative")
+
+
 def _validate_entry_grad_shapes(parameters):
     for index, parameter in enumerate(parameters):
         expected = np.asarray(parameter.data).shape
@@ -179,6 +190,7 @@ def centralize_gradients_(parameters, *, min_rank=2):
     min_rank = _validate_min_rank(min_rank)
     with _CENTRALIZATION_LOCK:
         materialized = _materialize_parameters(parameters)
+        _validate_entry_versions(materialized)
         _validate_entry_grad_shapes(materialized)
         _validate_foreign_tensor_managed_gradients(materialized, min_rank)
         trainability = tuple(parameter.requires_grad for parameter in materialized)
