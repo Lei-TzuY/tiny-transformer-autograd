@@ -41,6 +41,10 @@ def beam_generate(
     flattened into one inference batch. Immutable KV snapshots make that cache
     batching safe even when siblings share the same parent state.
 
+    Equal-scoring token candidates use descending token id as a deterministic
+    secondary key. This makes exact ties independent of NumPy's sorting-kind
+    implementation details and, importantly, independent of ``beam_width``.
+
     When a cache fills ``context_len``, all selected children are re-prefilled
     together from their cropped strict windows so positions are renumbered and
     out-of-window tokens are genuinely forgotten.
@@ -59,9 +63,6 @@ def beam_generate(
     if max_new_tokens == 0:
         return idx
 
-    # Every row shares the same padded slot width, so prompt prefill is one
-    # batched inference even when real prompt lengths differ. Per-row
-    # position_ids preserve ragged left-padding semantics.
     logits, cache = _prefill(model, idx, mask)
 
     beam_groups = []
@@ -100,8 +101,14 @@ def beam_generate(
             use_cache,
         )
 
-    # The loop returns on its final iteration for every positive token count.
     return idx
+
+
+def _rank_beam_tokens(log_probs, beam_width):
+    """Rank token ids by score descending, then token id descending."""
+    token_ids = np.arange(log_probs.shape[0], dtype=np.int64)
+    order = np.lexsort((-token_ids, -log_probs))
+    return order[:beam_width]
 
 
 def _select_children(beams, beam_width, temperature):
@@ -110,7 +117,7 @@ def _select_children(beams, beam_width, temperature):
     for sequence, score, logits, cache in beams:
         scaled = _temperature_scale_logits(logits[0, -1], temperature)
         log_probs = _log_softmax(scaled)
-        best = np.argsort(log_probs)[-beam_width:]
+        best = _rank_beam_tokens(log_probs, beam_width)
         for token in best:
             extended = np.concatenate([sequence, [[token]]], axis=1)
             candidates.append(
