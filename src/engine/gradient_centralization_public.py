@@ -127,15 +127,26 @@ def _validate_parameter_data_owners(parameters, owners):
             )
 
 
-def _has_live_tensor_storage_owner(array):
+def _tensor_storage_owner(array, parameter_index):
     if not isinstance(array, _VersionedArray):
-        return False
+        return None
     owner_ref = getattr(array, "_owner_ref", None)
-    return owner_ref is not None and owner_ref() is not None
+    if type(owner_ref) is not weakref.ReferenceType:
+        raise TypeError(
+            f"gradient for parameter {parameter_index} ownership metadata must be "
+            "a weak reference"
+        )
+    owner = owner_ref()
+    if owner is None:
+        raise ValueError(
+            f"gradient for parameter {parameter_index} ownership metadata must "
+            "reference a live Tensor"
+        )
+    return owner
 
 
-def _has_live_tensor_storage_owner_in_base_chain(array):
-    """Return whether an ndarray view ultimately aliases live Tensor storage."""
+def _has_tensor_storage_owner_in_base_chain(array, parameter_index):
+    """Return whether an ndarray view ultimately aliases valid Tensor storage."""
 
     current = getattr(array, "base", None)
     seen = set()
@@ -144,7 +155,7 @@ def _has_live_tensor_storage_owner_in_base_chain(array):
         if marker in seen:
             break
         seen.add(marker)
-        if _has_live_tensor_storage_owner(current):
+        if _tensor_storage_owner(current, parameter_index) is not None:
             return True
         current = getattr(current, "base", None)
     return False
@@ -186,7 +197,7 @@ def _validate_foreign_tensor_managed_gradients(parameters, min_rank):
         if overlaps_bound_data:
             continue
 
-        if _has_live_tensor_storage_owner(gradient):
+        if _tensor_storage_owner(gradient, index) is not None:
             raise ValueError(
                 f"gradient for parameter {index} must not use foreign Tensor-managed storage"
             )
@@ -207,7 +218,7 @@ def _validate_foreign_tensor_managed_gradients(parameters, min_rank):
         # An ndarray subclass can preserve the same external Tensor storage in
         # its ``base`` chain while no longer being a _VersionedArray itself.
         # Follow that chain so a subclass view cannot bypass the ownership guard.
-        if _has_live_tensor_storage_owner_in_base_chain(gradient):
+        if _has_tensor_storage_owner_in_base_chain(gradient, index):
             raise ValueError(
                 f"gradient for parameter {index} must not use foreign Tensor-managed storage"
             )
