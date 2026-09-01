@@ -100,7 +100,7 @@ def _snapshot_parameter_data_owners(parameters):
     owners = []
     for index, parameter in enumerate(parameters):
         data = parameter.data
-        if not isinstance(data, _VersionedArray):
+        if type(data) is not _VersionedArray:
             raise TypeError(f"parameter {index} data must use Tensor-managed storage")
         if np.asarray(data).dtype != np.dtype(np.float64):
             raise TypeError(f"parameter {index} data must have dtype float64")
