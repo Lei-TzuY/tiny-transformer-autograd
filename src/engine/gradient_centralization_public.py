@@ -134,6 +134,22 @@ def _has_live_tensor_storage_owner(array):
     return owner_ref is not None and owner_ref() is not None
 
 
+def _has_live_tensor_storage_owner_in_base_chain(array):
+    """Return whether an ndarray view ultimately aliases live Tensor storage."""
+
+    current = getattr(array, "base", None)
+    seen = set()
+    while isinstance(current, np.ndarray):
+        marker = id(current)
+        if marker in seen:
+            break
+        seen.add(marker)
+        if _has_live_tensor_storage_owner(current):
+            return True
+        current = getattr(current, "base", None)
+    return False
+
+
 def _validate_foreign_tensor_managed_gradients(parameters, min_rank):
     """Reject writes whose storage ownership cannot be proven local and safe."""
 
@@ -186,6 +202,14 @@ def _validate_foreign_tensor_managed_gradients(parameters, min_rank):
             raise ValueError(
                 f"gradient for parameter {index} must own its storage when "
                 "centralization requires a write"
+            )
+
+        # An ndarray subclass can preserve the same external Tensor storage in
+        # its ``base`` chain while no longer being a _VersionedArray itself.
+        # Follow that chain so a subclass view cannot bypass the ownership guard.
+        if _has_live_tensor_storage_owner_in_base_chain(gradient):
+            raise ValueError(
+                f"gradient for parameter {index} must not use foreign Tensor-managed storage"
             )
 
 
