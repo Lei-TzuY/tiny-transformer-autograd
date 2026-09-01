@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pytest
 
@@ -10,7 +12,12 @@ def test_centralization_rejects_non_float64_parameter_storage_before_gradient_wr
     parameter.grad = gradient
     before = gradient.copy()
 
-    np.ndarray.dtype.__set__(parameter.data, np.int64)
+    # Deliberately manufacture an impossible-through-public-API Tensor state.
+    # NumPy 2.5 deprecates direct dtype mutation, so suppress only the fixture's
+    # warning while keeping the repository's warnings-as-errors policy intact.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        np.ndarray.dtype.__set__(parameter.data, np.int64)
     assert parameter.data.dtype == np.dtype(np.int64)
     assert parameter.data.shape == (1, 2)
 
